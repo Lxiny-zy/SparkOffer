@@ -1,0 +1,229 @@
+"""统一数据库连接管理 — 单例连接 + 集中式表初始化。
+
+所有模块通过 get_db() 获取共享连接，不再各自创建。
+init_all_tables() 在启动时调用一次，创建所有表、索引和迁移。
+"""
+import logging
+import sqlite3
+
+from backend.config import settings
+
+logger = logging.getLogger("uvicorn")
+
+DB_PATH = settings.db_path
+
+_conn: sqlite3.Connection | None = None
+
+
+def get_db() -> sqlite3.Connection:
+    """返回全局复用的 SQLite 连接。"""
+    global _conn
+    if _conn is None:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
+        _conn.execute("PRAGMA journal_mode=WAL")
+        _conn.execute("PRAGMA synchronous=NORMAL")
+    return _conn
+
+
+def init_all_tables():
+    """启动时调用一次，创建所有表、索引、执行迁移。"""
+    conn = get_db()
+
+    # ── users ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id         TEXT PRIMARY KEY,
+            email      TEXT UNIQUE NOT NULL,
+            password   TEXT NOT NULL,
+            name       TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # ── sessions ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id TEXT PRIMARY KEY,
+            mode TEXT NOT NULL,
+            topic TEXT,
+            meta TEXT DEFAULT '{}',
+            questions TEXT DEFAULT '[]',
+            transcript TEXT DEFAULT '[]',
+            scores TEXT DEFAULT '[]',
+            weak_points TEXT DEFAULT '[]',
+            overall TEXT DEFAULT '{}',
+            review TEXT,
+            user_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # Migrate: add columns if missing
+    for col, default in [("questions", "'[]'"), ("overall", "'{}'"),
+                         ("user_id", "NULL"), ("meta", "'{}'"),
+                         ("reference_answers", "'{}'")]:
+        try:
+            conn.execute(f"SELECT {col} FROM sessions LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT DEFAULT {default}")
+
+    # ── favorites ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS favorites (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            session_id TEXT,
+            question TEXT NOT NULL,
+            user_answer TEXT DEFAULT '',
+            reference_answer TEXT DEFAULT '',
+            score REAL,
+            assessment TEXT DEFAULT '',
+            topic TEXT DEFAULT '',
+            difficulty TEXT DEFAULT '',
+            tags TEXT DEFAULT '[]',
+            note TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # ── algorithm_cards ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS algorithm_cards (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            problem_text TEXT NOT NULL,
+            difficulty TEXT DEFAULT '',
+            tags TEXT DEFAULT '[]',
+            solution TEXT DEFAULT '',
+            conversation_history TEXT DEFAULT '[]',
+            source_url TEXT DEFAULT '',
+            language TEXT DEFAULT 'python',
+            note TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # ── live_sessions ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS live_sessions (
+            session_id TEXT PRIMARY KEY,
+            session_type TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            data TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # ── assistant_chats ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS assistant_chats (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    TEXT NOT NULL,
+            role       TEXT NOT NULL,
+            content    TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # ── memory_vectors ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS memory_vectors (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chunk_type  TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            topic       TEXT,
+            session_id  TEXT,
+            metadata    TEXT DEFAULT '{}',
+            embedding   BLOB NOT NULL,
+            user_id     TEXT,
+            created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # Migrate: add user_id if missing
+    try:
+        conn.execute("SELECT user_id FROM memory_vectors LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE memory_vectors ADD COLUMN user_id TEXT")
+
+    # ── question_embeddings ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS question_embeddings (
+            question_hash TEXT PRIMARY KEY,
+            topic         TEXT,
+            question_text TEXT,
+            embedding     BLOB NOT NULL,
+            user_id       TEXT,
+            created_at    TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    try:
+        conn.execute("SELECT user_id FROM question_embeddings LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE question_embeddings ADD COLUMN user_id TEXT")
+
+    # ── qa_sessions ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS qa_sessions (
+            id         TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL,
+            title      TEXT DEFAULT '新对话',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Migration: add context_summary column to qa_sessions
+    try:
+        conn.execute("SELECT context_summary FROM qa_sessions LIMIT 1")
+    except Exception:
+        conn.execute("ALTER TABLE qa_sessions ADD COLUMN context_summary TEXT")
+        conn.execute("ALTER TABLE qa_sessions ADD COLUMN summary_msg_count INTEGER DEFAULT 0")
+
+    # ── qa_messages ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS qa_messages (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            user_id    TEXT NOT NULL,
+            role       TEXT NOT NULL,
+            content    TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # ── 索引 ──
+
+    # sessions（新增 — 修复全表扫描）
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_created ON sessions(user_id, created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_topic ON sessions(user_id, topic)")
+
+    # favorites
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_favorites_topic ON favorites(user_id, topic)")
+
+    # algorithm_cards
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_algo_user ON algorithm_cards(user_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_algo_diff ON algorithm_cards(user_id, difficulty)")
+
+    # assistant_chats
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ac_user ON assistant_chats(user_id)")
+
+    # memory_vectors
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mv_type ON memory_vectors(chunk_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mv_topic ON memory_vectors(topic)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mv_user ON memory_vectors(user_id)")
+
+    # question_embeddings（新增）
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_qe_user_topic ON question_embeddings(user_id, topic)")
+
+    # qa_sessions / qa_messages
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_qa_sessions_user ON qa_sessions(user_id, updated_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_qa_messages_session ON qa_messages(session_id, id ASC)")
+
+    conn.commit()
+    logger.info("All database tables and indexes initialized.")

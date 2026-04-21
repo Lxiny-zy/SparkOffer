@@ -1,0 +1,371 @@
+import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { ChevronRight, TrendingUp, Download, BarChart3, Target } from "lucide-react";
+import { getProfile, exportProfile } from "../api/interview";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import ScoreTrendChart from "@/components/charts/ScoreTrendChart";
+import TopicRadarChart from "@/components/charts/TopicRadarChart";
+import SessionFrequencyChart from "@/components/charts/SessionFrequencyChart";
+import type { Profile as ProfileType } from "../types/api";
+
+const MODE_META: Record<string, { color: string; label: string }> = {
+  resume: { color: "var(--ai-glow)", label: "简历面试" },
+  topic_drill: { color: "var(--green)", label: "专项训练" },
+  jd_prep: { color: "#60a5fa", label: "JD 备面" },
+  recording: { color: "#22d3ee", label: "录音复盘" },
+};
+
+interface CollapsibleListProps {
+  items: any[];
+  limit: number;
+  renderItem: (item: any, index: number) => React.ReactNode;
+}
+
+function CollapsibleList({ items, limit, renderItem }: CollapsibleListProps) {
+  const [expanded, setExpanded] = useState(false);
+  const show = expanded ? items : items.slice(0, limit);
+  const hasMore = items.length > limit;
+
+  return (
+    <div className="flex flex-col gap-2">
+      {show.map((item, i) => renderItem(item, i))}
+      {hasMore && (
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-primary text-[13px] cursor-pointer py-1 text-left hover:underline"
+        >
+          {expanded ? "收起" : `展开更多 (+${items.length - limit})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+
+export default function Profile() {
+  const [profile, setProfile] = useState<ProfileType | null>(null);
+  const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    getProfile()
+      .then(setProfile)
+      .catch(() => setProfile(null))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full space-y-4">
+        <Skeleton className="h-8 w-32" />
+        <Skeleton className="h-4 w-64" />
+        <div className="grid grid-cols-2 gap-3"><Skeleton className="h-24" /><Skeleton className="h-24" /></div>
+        <Skeleton className="h-48" />
+      </div>
+    );
+  }
+
+  const hasData = profile && (
+    profile.stats?.total_sessions > 0 ||
+    profile.stats?.total_answers > 0 ||
+    (profile.weak_points || []).length > 0 ||
+    (profile.strong_points || []).length > 0
+  );
+
+  if (!hasData) {
+    return (
+      <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
+        <div className="text-2xl md:text-[28px] font-display font-bold mb-2 animate-fade-in">个人画像</div>
+        <div className="text-center py-15 text-dim animate-fade-in-up">
+          <p>还没有面试数据</p>
+          <p className="mt-3 text-sm">开始面试后，系统会实时分析你的每个回答，自动构建你的能力画像</p>
+          <Button variant="default" className="mt-5" onClick={() => navigate("/")}>
+            开始第一场面试
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  const stats = profile!.stats || {};
+  const weakActive = (profile!.weak_points || []).filter((w) => !w.improved);
+  const weakImproved = (profile!.weak_points || []).filter((w) => w.improved);
+
+  return (
+    <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
+      <div className="flex items-center justify-between mb-2 animate-fade-in">
+        <div className="text-2xl md:text-[28px] font-display font-bold">个人画像</div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-1.5"
+          onClick={async () => {
+            try {
+              const { markdown, filename } = await exportProfile();
+              const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = filename;
+              a.click();
+              URL.revokeObjectURL(url);
+            } catch (err: any) {
+              alert("导出失败: " + err.message);
+            }
+          }}
+        >
+          <Download size={14} />
+          导出画像
+        </Button>
+      </div>
+      <div className="text-sm text-dim mb-8 animate-fade-in-up">
+        {stats.total_answers || 0} 次回答分析{stats.total_sessions ? ` | ${stats.total_sessions} 次完整面试` : ""} | 上次更新: {profile!.updated_at?.slice(0, 16)}
+      </div>
+
+      <div className="mb-7 animate-fade-in-up">
+        <div className="flex items-center gap-2 text-base font-semibold mb-3">
+          <TrendingUp size={18} className="text-primary" />
+          练习统计
+        </div>
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <Card className="hover:shadow-sm transition-shadow">
+            <CardContent className="p-4 text-center">
+              <div className="text-[28px] font-bold text-primary">{stats.total_sessions}</div>
+              <div className="text-xs text-dim mt-1">总练习次数</div>
+            </CardContent>
+          </Card>
+          <Card className="hover:shadow-sm transition-shadow">
+            <CardContent className="p-4 text-center">
+              <div className="text-[32px] font-bold text-green">{stats.avg_score || "-"}</div>
+              <div className="text-xs text-dim mt-1">综合平均分</div>
+            </CardContent>
+          </Card>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <Card className="border-l-[3px] border-l-primary">
+            <CardContent className="p-3.5">
+              <div className="text-[13px] font-semibold text-primary mb-2.5">简历面试</div>
+              <div className="flex gap-3">
+                <div className="flex-1 text-center">
+                  <div className="text-[22px] font-bold text-primary">{stats.resume_sessions || 0}</div>
+                  <div className="text-[11px] text-dim mt-0.5">次数</div>
+                </div>
+                <div className="flex-1 text-center">
+                  <div className="text-[22px] font-bold text-primary">{stats.resume_avg_score ?? "-"}</div>
+                  <div className="text-[11px] text-dim mt-0.5">平均分</div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="border-l-[3px] border-l-green">
+            <CardContent className="p-3.5">
+              <div className="text-[13px] font-semibold text-green mb-2.5">专项训练</div>
+              <div className="flex gap-3">
+                <div className="flex-1 text-center">
+                  <div className="text-[22px] font-bold text-green">{stats.drill_sessions || 0}</div>
+                  <div className="text-[11px] text-dim mt-0.5">次数</div>
+                </div>
+                <div className="flex-1 text-center">
+                  <div className="text-[22px] font-bold text-green">{stats.drill_avg_score ?? "-"}</div>
+                  <div className="text-[11px] text-dim mt-0.5">平均分</div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="border-l-[3px] border-l-tertiary">
+            <CardContent className="p-3.5">
+              <div className="text-[13px] font-semibold text-tertiary mb-2.5">JD 备面</div>
+              <div className="flex gap-3">
+                <div className="flex-1 text-center">
+                  <div className="text-[22px] font-bold text-tertiary">{stats.job_prep_sessions || 0}</div>
+                  <div className="text-[11px] text-dim mt-0.5">次数</div>
+                </div>
+                <div className="flex-1 text-center">
+                  <div className="text-[22px] font-bold text-tertiary">{stats.job_prep_avg_score ?? "-"}</div>
+                  <div className="text-[11px] text-dim mt-0.5">平均分</div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+
+      {(stats.score_history || []).length >= 2 && (
+        <div className="mb-7 animate-fade-in-up [animation-delay:0.1s]">
+          <div className="flex items-center gap-2 text-base font-semibold mb-3">
+            <TrendingUp size={18} className="text-primary" />
+            成长趋势
+          </div>
+          <Card>
+            <CardContent className="p-4 md:p-6">
+              <ScoreTrendChart history={stats.score_history} />
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {(stats.score_history || []).length >= 2 && (
+        <div className="mb-7 animate-fade-in-up [animation-delay:0.12s]">
+          <div className="flex items-center gap-2 text-base font-semibold mb-3">
+            <BarChart3 size={18} className="text-primary" />
+            训练频率
+          </div>
+          <Card>
+            <CardContent className="p-4 md:p-6">
+              <SessionFrequencyChart history={stats.score_history} />
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {Object.keys(profile!.topic_mastery || {}).length > 0 && (
+        <div className="mb-7 animate-fade-in-up [animation-delay:0.15s]">
+          <div className="flex items-center gap-2 text-base font-semibold mb-3">
+            <Target size={18} className="text-primary" />
+            领域掌握度
+          </div>
+          <Card className="mb-4">
+            <CardContent className="p-4 md:p-6">
+              <TopicRadarChart mastery={profile!.topic_mastery} />
+            </CardContent>
+          </Card>
+          <div className="grid grid-cols-1 md:grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-2.5 stagger-children">
+            {Object.entries(profile!.topic_mastery!).map(([topic, data]) => (
+              <Card
+                key={topic}
+                className="cursor-pointer hover:border-primary/50 hover:-translate-y-px hover:shadow-sm transition-all"
+                onClick={() => navigate(`/profile/topic/${topic}`)}
+              >
+                <CardContent className="p-4">
+                  <div className="flex justify-between items-center mb-1.5">
+                    <span className="text-sm font-medium">{topic}</span>
+                    <span className="text-xs text-dim flex items-center gap-0.5">
+                      {data.score ?? (data.level ? data.level * 20 : 0)}/100 <ChevronRight size={14} />
+                    </span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-border overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-primary to-primary-hover transition-[width] duration-500 ease-in-out"
+                      style={{ width: `${data.score ?? (data.level ? data.level * 20 : 0)}%` }}
+                    />
+                  </div>
+                  {data.notes && <div className="text-xs text-dim mt-1.5">{data.notes}</div>}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(weakActive.length > 0 || (profile!.strong_points || []).length > 0) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-7 animate-fade-in-up [animation-delay:0.2s]">
+          {weakActive.length > 0 && (
+            <div>
+              <div className="flex items-center gap-2 text-base font-semibold mb-3">
+                待改进 <Badge variant="destructive">{weakActive.length}</Badge>
+              </div>
+              <CollapsibleList items={weakActive} limit={3} renderItem={(w, i) => (
+                <Card key={i}>
+                  <CardContent className="p-3.5 flex justify-between items-center">
+                    <span className="flex-1 text-sm">{w.point}</span>
+                    <div className="flex items-center gap-2 text-xs text-dim shrink-0">
+                      {w.topic && <Badge variant="default">{w.topic}</Badge>}
+                      <span>出现 {w.times_seen} 次</span>
+                    </div>
+                  </CardContent>
+                </Card>
+              )} />
+            </div>
+          )}
+          {(profile!.strong_points || []).length > 0 && (
+            <div>
+              <div className="text-base font-semibold mb-3">强项</div>
+              <CollapsibleList items={profile!.strong_points!} limit={3} renderItem={(s, i) => (
+                <Card key={i} className="border-l-[3px] border-l-green">
+                  <CardContent className="p-3.5 flex justify-between items-center">
+                    <span className="text-sm">{s.point}</span>
+                    {s.topic && <Badge variant="default">{s.topic}</Badge>}
+                  </CardContent>
+                </Card>
+              )} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {weakImproved.length > 0 && (
+        <div className="mb-7 animate-fade-in-up [animation-delay:0.25s]">
+          <div className="flex items-center gap-2 text-base font-semibold mb-3">
+            已改善 <Badge variant="success" as any>{weakImproved.length}</Badge>
+          </div>
+          <div className="flex flex-col gap-2">
+            {weakImproved.map((w, i) => (
+              <Card key={i} className="opacity-70">
+                <CardContent className="p-3.5 flex justify-between items-center">
+                  <span className="flex-1 line-through text-sm">{w.point}</span>
+                  <Badge variant="success" as any>已改善</Badge>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {((profile!.thinking_patterns?.strengths || []).length > 0 ||
+        (profile!.thinking_patterns?.gaps || []).length > 0) && (
+        <div className="mb-7 animate-fade-in-up [animation-delay:0.3s]">
+          <div className="text-base font-semibold mb-3">思维模式</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {(profile!.thinking_patterns!.strengths || []).length > 0 && (
+              <div>
+                <div className="text-xs font-semibold text-green mb-1.5">优势</div>
+                <CollapsibleList items={profile!.thinking_patterns!.strengths!} limit={3} renderItem={(s, i) => (
+                  <div key={i} className="px-3 py-2 rounded-lg text-sm bg-green/8 border-l-[3px] border-l-green">{s}</div>
+                )} />
+              </div>
+            )}
+            {(profile!.thinking_patterns!.gaps || []).length > 0 && (
+              <div>
+                <div className="text-xs font-semibold text-red mb-1.5">短板</div>
+                <CollapsibleList items={profile!.thinking_patterns!.gaps!} limit={3} renderItem={(g, i) => (
+                  <div key={i} className="px-3 py-2 rounded-lg text-sm bg-red/8 border-l-[3px] border-l-red">{g}</div>
+                )} />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {profile!.communication?.style && (
+        <div className="mb-7 animate-fade-in-up [animation-delay:0.35s]">
+          <div className="text-base font-semibold mb-3">沟通风格分析</div>
+          <Card>
+            <CardContent className="p-4 text-sm leading-[1.8]">
+              <div>{profile!.communication!.style}</div>
+              {(profile!.communication!.habits || []).length > 0 && (
+                <div className="mt-3">
+                  <strong className="text-[13px]">习惯</strong>
+                  <ul className="mt-1.5 pl-4.5 leading-[1.8]">
+                    {profile!.communication!.habits!.map((h, i) => <li key={i}>{h}</li>)}
+                  </ul>
+                </div>
+              )}
+              {(profile!.communication!.suggestions || []).length > 0 && (
+                <div className="mt-3">
+                  <strong className="text-[13px]">建议</strong>
+                  <ul className="mt-1.5 pl-4.5 leading-[1.8]">
+                    {profile!.communication!.suggestions!.map((s, i) => <li key={i}>{s}</li>)}
+                  </ul>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,378 @@
+import React, { useState, useEffect, useCallback } from "react";
+import {
+  Plus, Trash2, ChevronDown, ChevronRight, FlaskConical,
+  ArrowUp, ArrowDown, Eye, EyeOff, Loader2, CheckCircle2,
+  XCircle, Lock, AlertTriangle, KeyRound,
+} from "lucide-react";
+import { toast } from "sonner";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { getChannels, saveChannels, testChannel } from "@/api/settings";
+import type { ChannelHealth } from "@/types/channels";
+
+type ChannelData = Record<string, any>;
+
+interface ChannelManagerProps {
+  section: "llm" | "embedding" | "asr";
+  onDirty?: (dirty: boolean) => void;
+}
+
+const SECTION_DEFAULTS: Record<string, () => ChannelData> = {
+  llm: () => ({ id: "", name: "", api_base: "", keys: [""], model: "", temperature: 0.7, priority: 1, enabled: true, proxy: "" }),
+  embedding: () => ({ id: "", name: "", backend: "api", api_base: "", keys: [""], api_model: "", local_model: "", local_path: "", priority: 1, enabled: true, proxy: "" }),
+  asr: () => ({ id: "", name: "", keys: [""], model: "qwen3-asr-flash-filetrans", priority: 1, enabled: true, proxy: "" }),
+};
+
+const MASKED_RE = /^\*{3,}/;
+
+function SecretInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="relative">
+      <Input
+        type={visible ? "text" : "password"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="pr-9"
+      />
+      <button
+        type="button"
+        className="absolute right-2 top-1/2 -translate-y-1/2 text-dim hover:text-text"
+        onClick={() => setVisible(!visible)}
+      >
+        {visible ? <EyeOff size={15} /> : <Eye size={15} />}
+      </button>
+    </div>
+  );
+}
+
+function HealthDot({ health }: { health?: ChannelHealth }) {
+  if (!health) return <span className="w-2.5 h-2.5 rounded-full bg-dim/30" />;
+  if (!health.healthy) return <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" title="Cooldown" />;
+  if (health.error_count > 0) return <span className="w-2.5 h-2.5 rounded-full bg-yellow-500" title={`${health.error_count} errors`} />;
+  return <span className="w-2.5 h-2.5 rounded-full bg-green-500" title="Healthy" />;
+}
+
+export default function ChannelManager({ section, onDirty }: ChannelManagerProps) {
+  const [channels, setChannels] = useState<ChannelData[]>([]);
+  const [healthMap, setHealthMap] = useState<Record<string, ChannelHealth>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [editedKeys, setEditedKeys] = useState<Set<string>>(new Set());
+  const [testing, setTesting] = useState<Record<string, "loading" | "ok" | "error" | null>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [allData, setAllData] = useState<Record<string, any>>({});
+
+  const load = useCallback(async () => {
+    try {
+      const data = await getChannels();
+      setAllData(data);
+      const sec = data[section] || {};
+      setChannels(sec.channels || []);
+      const hm: Record<string, ChannelHealth> = {};
+      for (const h of sec.health || []) hm[h.id] = h;
+      setHealthMap(hm);
+      setEditedKeys(new Set());
+    } catch (e: any) {
+      toast.error("Failed to load channels: " + e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [section]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const updateChannel = (idx: number, patch: Partial<ChannelData>) => {
+    setChannels((prev) => prev.map((ch, i) => i === idx ? { ...ch, ...patch } : ch));
+    onDirty?.(true);
+  };
+
+  const addChannel = () => {
+    const ch = SECTION_DEFAULTS[section]();
+    ch.priority = channels.length + 1;
+    ch.name = `Channel ${channels.length + 1}`;
+    setChannels((prev) => [...prev, ch]);
+    setExpanded((prev) => ({ ...prev, [`new-${channels.length}`]: true }));
+    onDirty?.(true);
+  };
+
+  const removeChannel = (idx: number) => {
+    setChannels((prev) => prev.filter((_, i) => i !== idx));
+    onDirty?.(true);
+  };
+
+  const movePriority = (idx: number, dir: -1 | 1) => {
+    const target = idx + dir;
+    if (target < 0 || target >= channels.length) return;
+    setChannels((prev) => {
+      const next = [...prev];
+      [next[idx], next[target]] = [next[target], next[idx]];
+      return next.map((ch, i) => ({ ...ch, priority: i + 1 }));
+    });
+    onDirty?.(true);
+  };
+
+  const handleKeyChange = (chIdx: number, keyIdx: number, value: string) => {
+    const ch = channels[chIdx];
+    const keys = [...(ch.keys || [])];
+    keys[keyIdx] = value;
+    updateChannel(chIdx, { keys });
+    setEditedKeys((prev) => new Set(prev).add(`${chIdx}-${keyIdx}`));
+  };
+
+  const addKey = (chIdx: number) => {
+    const ch = channels[chIdx];
+    updateChannel(chIdx, { keys: [...(ch.keys || []), ""] });
+  };
+
+  const removeKey = (chIdx: number, keyIdx: number) => {
+    const ch = channels[chIdx];
+    const keys = (ch.keys || []).filter((_: any, i: number) => i !== keyIdx);
+    updateChannel(chIdx, { keys: keys.length ? keys : [""] });
+  };
+
+  const handleTest = async (idx: number) => {
+    const ch = channels[idx];
+    const chId = ch.id || `idx-${idx}`;
+    setTesting((prev) => ({ ...prev, [chId]: "loading" }));
+    try {
+      const testKeys = (ch.keys || []).filter((k: string) => k && !MASKED_RE.test(k));
+      const testKey = testKeys[0] || "";
+      const payload: any = { ...ch, api_key: testKey };
+      const res = await testChannel(section, payload);
+      setTesting((prev) => ({ ...prev, [chId]: res.ok ? "ok" : "error" }));
+      if (res.ok) {
+        toast.success(res.message || `Dimensions: ${res.dimensions || "OK"}`);
+      } else {
+        toast.error(res.error || "Test failed");
+      }
+    } catch (e: any) {
+      setTesting((prev) => ({ ...prev, [chId]: "error" }));
+      toast.error(e.message);
+    }
+    setTimeout(() => setTesting((prev) => ({ ...prev, [chId]: null })), 3000);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const cleanChannels = channels.map((ch) => {
+        const cleaned = { ...ch };
+        cleaned.keys = (cleaned.keys || []).map((k: string, ki: number) => {
+          if (MASKED_RE.test(k) && !editedKeys.has(`${channels.indexOf(ch)}-${ki}`)) {
+            return null;
+          }
+          return k;
+        }).filter(Boolean);
+        if (!cleaned.keys.length) cleaned.keys = undefined;
+        return cleaned;
+      });
+      const payload: any = { llm: [], embedding: [], asr: [] };
+      for (const sec of ["llm", "embedding", "asr"]) {
+        if (sec === section) {
+          payload[sec] = cleanChannels;
+        } else {
+          const raw = allData[sec]?.channels || [];
+          payload[sec] = raw;
+        }
+      }
+      await saveChannels(payload);
+      toast.success("Channels saved");
+      onDirty?.(false);
+      await load();
+    } catch (e: any) {
+      toast.error("Save failed: " + e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const embeddingModel = section === "embedding" ? (channels.find((c) => c.api_model)?.api_model || "") : "";
+
+  if (loading) {
+    return <div className="p-6 text-center text-dim"><Loader2 className="animate-spin inline mr-2" size={16} />Loading channels...</div>;
+  }
+
+  return (
+    <div className="space-y-3">
+      {channels.length === 0 && (
+        <div className="text-center py-6 text-dim text-sm">
+          No channels configured. Add one to get started.
+        </div>
+      )}
+
+      {channels.map((ch, idx) => {
+        const chId = ch.id || `idx-${idx}`;
+        const isOpen = expanded[chId] ?? (channels.length === 1);
+        const health = healthMap[ch.id];
+        const testState = testing[chId];
+
+        return (
+          <Card key={chId} className={`transition-all ${!ch.enabled ? "opacity-50" : ""}`}>
+            <div
+              className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none hover:bg-muted/30"
+              onClick={() => setExpanded((prev) => ({ ...prev, [chId]: !isOpen }))}
+            >
+              {isOpen ? <ChevronDown size={14} className="text-dim" /> : <ChevronRight size={14} className="text-dim" />}
+              <HealthDot health={health} />
+              <span className="font-medium text-sm flex-1">{ch.name || `Channel ${idx + 1}`}</span>
+              {ch.model && <Badge variant="secondary" className="text-[10px]">{ch.model}</Badge>}
+              <Badge variant="outline" className="text-[10px]">P{ch.priority}</Badge>
+              <span className="text-[10px] text-dim">{(ch.keys || []).length} key{(ch.keys || []).length !== 1 ? "s" : ""}</span>
+            </div>
+
+            {isOpen && (
+              <CardContent className="pt-0 pb-4 space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label className="text-xs">Name</Label>
+                    <Input value={ch.name} onChange={(e) => updateChannel(idx, { name: e.target.value })} placeholder="My Channel" className="h-8 text-sm" />
+                  </div>
+                  <div className="flex items-end gap-1">
+                    <div className="flex-1">
+                      <Label className="text-xs">Enabled</Label>
+                      <Button
+                        variant={ch.enabled ? "default" : "outline"}
+                        size="sm"
+                        className="w-full h-8 text-xs"
+                        onClick={() => updateChannel(idx, { enabled: !ch.enabled })}
+                      >
+                        {ch.enabled ? "Enabled" : "Disabled"}
+                      </Button>
+                    </div>
+                    <div className="flex gap-0.5">
+                      <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={(e) => { e.stopPropagation(); movePriority(idx, -1); }} disabled={idx === 0}>
+                        <ArrowUp size={14} />
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={(e) => { e.stopPropagation(); movePriority(idx, 1); }} disabled={idx === channels.length - 1}>
+                        <ArrowDown size={14} />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                {section !== "asr" && (
+                  <div>
+                    <Label className="text-xs">API Base URL</Label>
+                    <Input value={ch.api_base || ""} onChange={(e) => updateChannel(idx, { api_base: e.target.value })} placeholder="https://api.openai.com/v1" className="h-8 text-sm" />
+                  </div>
+                )}
+
+                <div>
+                  <Label className="text-xs">Proxy URL <span className="text-dim font-normal">(optional)</span></Label>
+                  <Input value={ch.proxy || ""} onChange={(e) => updateChannel(idx, { proxy: e.target.value })} placeholder="http://127.0.0.1:7890 or socks5://host:1080" className="h-8 text-sm" />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <Label className="text-xs flex items-center gap-1"><KeyRound size={12} /> API Keys</Label>
+                    <Button variant="ghost" size="sm" className="h-6 text-xs px-2" onClick={() => addKey(idx)}>
+                      <Plus size={12} className="mr-1" /> Add Key
+                    </Button>
+                  </div>
+                  <div className="space-y-1.5">
+                    {(ch.keys || [""]).map((key: string, ki: number) => (
+                      <div key={ki} className="flex gap-1.5">
+                        <div className="flex-1">
+                          <SecretInput
+                            value={key}
+                            onChange={(v) => handleKeyChange(idx, ki, v)}
+                            placeholder="sk-..."
+                          />
+                        </div>
+                        {(ch.keys || []).length > 1 && (
+                          <Button variant="ghost" size="sm" className="h-9 w-9 p-0 text-dim hover:text-red-500" onClick={() => removeKey(idx, ki)}>
+                            <Trash2 size={14} />
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {section === "embedding" ? (
+                    <div>
+                      <Label className="text-xs flex items-center gap-1">
+                        Model
+                        {idx > 0 && embeddingModel && <Lock size={10} className="text-dim" />}
+                      </Label>
+                      {idx === 0 ? (
+                        <Input
+                          value={ch.api_model || ""}
+                          onChange={(e) => {
+                            const model = e.target.value;
+                            setChannels((prev) => prev.map((c, i) => ({ ...c, api_model: i === 0 ? model : model })));
+                            onDirty?.(true);
+                          }}
+                          placeholder="Qwen3-Embedding-8B"
+                          className="h-8 text-sm"
+                        />
+                      ) : (
+                        <Input value={embeddingModel} disabled className="h-8 text-sm opacity-60" />
+                      )}
+                      {idx === 0 && channels.length > 1 && (
+                        <p className="text-[10px] text-dim mt-1 flex items-center gap-1">
+                          <AlertTriangle size={10} /> Model synced across all channels
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <Label className="text-xs">Model</Label>
+                      <Input value={ch.model || ""} onChange={(e) => updateChannel(idx, { model: e.target.value })} placeholder={section === "asr" ? "qwen3-asr-flash-filetrans" : "gpt-4o"} className="h-8 text-sm" />
+                    </div>
+                  )}
+                  {section === "llm" && (
+                    <div>
+                      <Label className="text-xs">Temperature</Label>
+                      <Input type="number" min={0} max={2} step={0.1} value={ch.temperature ?? 0.7} onChange={(e) => updateChannel(idx, { temperature: parseFloat(e.target.value) || 0.7 })} className="h-8 text-sm" />
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between pt-2 border-t border-border/50">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs text-red-500 hover:text-red-600 hover:bg-red-500/10"
+                    onClick={() => removeChannel(idx)}
+                  >
+                    <Trash2 size={13} className="mr-1" /> Remove
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-xs h-7"
+                    onClick={() => handleTest(idx)}
+                    disabled={testState === "loading"}
+                  >
+                    {testState === "loading" ? <Loader2 size={13} className="mr-1 animate-spin" /> :
+                     testState === "ok" ? <CheckCircle2 size={13} className="mr-1 text-green-500" /> :
+                     testState === "error" ? <XCircle size={13} className="mr-1 text-red-500" /> :
+                     <FlaskConical size={13} className="mr-1" />}
+                    Test
+                  </Button>
+                </div>
+              </CardContent>
+            )}
+          </Card>
+        );
+      })}
+
+      <div className="flex items-center justify-between pt-2">
+        <Button variant="outline" size="sm" className="text-xs" onClick={addChannel}>
+          <Plus size={14} className="mr-1" /> Add Channel
+        </Button>
+        <Button size="sm" className="text-xs" onClick={handleSave} disabled={saving}>
+          {saving ? <Loader2 size={13} className="mr-1 animate-spin" /> : null}
+          Save {section.toUpperCase()} Channels
+        </Button>
+      </div>
+    </div>
+  );
+}

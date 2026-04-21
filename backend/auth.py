@@ -1,0 +1,154 @@
+"""Authentication — users table, password hashing, JWT, FastAPI dependency."""
+import uuid
+import shutil
+import sqlite3
+import logging
+from datetime import datetime, timedelta
+
+import bcrypt
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import jwt, JWTError
+
+from backend.config import settings
+from backend.storage.database import get_db
+
+logger = logging.getLogger("uvicorn")
+
+bearer_scheme = HTTPBearer()
+
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_DAYS = 7
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+
+
+def _init_user_knowledge(user_id: str):
+    """Copy global knowledge base and topics.json to a new user's data directory."""
+    global_knowledge = settings.base_dir / "data" / "knowledge"
+    global_topics = settings.base_dir / "data" / "topics.json"
+
+    user_knowledge = settings.user_knowledge_path(user_id)
+    user_topics = settings.user_topics_path(user_id)
+
+    # Copy knowledge files if global source exists and user doesn't have them yet
+    if global_knowledge.exists() and not user_knowledge.exists():
+        shutil.copytree(global_knowledge, user_knowledge)
+        logger.info(f"Initialized knowledge for user {user_id}")
+
+    # Copy topics.json
+    if global_topics.exists() and not user_topics.exists():
+        user_topics.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(global_topics, user_topics)
+        logger.info(f"Initialized topics.json for user {user_id}")
+
+
+def ensure_default_user():
+    """Create default user from .env config if not exists."""
+    email = settings.default_email.lower().strip()
+    conn = get_db()
+    existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+    if existing:
+        return
+    uid = uuid.uuid4().hex[:8]
+    hashed = _hash_password(settings.default_password)
+    conn.execute(
+        "INSERT INTO users (id, email, password, name) VALUES (?, ?, ?, ?)",
+        (uid, email, hashed, settings.default_name),
+    )
+    conn.commit()
+    logger.info(f"Default user created: {email}")
+    _init_user_knowledge(uid)
+
+
+def create_user(email: str, password: str, name: str = "") -> dict:
+    if not settings.allow_registration:
+        raise HTTPException(403, "Registration is disabled")
+    uid = uuid.uuid4().hex[:8]
+    hashed = _hash_password(password)
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (id, email, password, name) VALUES (?, ?, ?, ?)",
+            (uid, email.lower().strip(), hashed, name),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "Email already registered")
+    _init_user_knowledge(uid)
+    return {"id": uid, "email": email.lower().strip(), "name": name}
+
+
+def authenticate_user(email: str, password: str) -> dict | None:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM users WHERE email = ?", (email.lower().strip(),)
+    ).fetchone()
+    if not row or not _verify_password(password, row["password"]):
+        return None
+    _init_user_knowledge(row["id"])
+    return {"id": row["id"], "email": row["email"], "name": row["name"]}
+
+
+def create_token(user_id: str) -> str:
+    expire = datetime.utcnow() + timedelta(days=JWT_EXPIRE_DAYS)
+    return jwt.encode(
+        {"sub": user_id, "exp": expire},
+        settings.jwt_secret,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
+def get_current_user(
+    cred: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> str:
+    """FastAPI dependency — returns user_id string."""
+    try:
+        payload = jwt.decode(
+            cred.credentials, settings.jwt_secret, algorithms=[JWT_ALGORITHM]
+        )
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(401, "Invalid token")
+        return user_id
+    except JWTError:
+        raise HTTPException(401, "Invalid or expired token")
+
+
+def get_user_by_id(user_id: str) -> dict | None:
+    conn = get_db()
+    row = conn.execute("SELECT id, email, name, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "email": row["email"], "name": row["name"], "created_at": row["created_at"]}
+
+
+def update_user_profile(user_id: str, name: str = None, email: str = None) -> dict:
+    conn = get_db()
+    if name is not None:
+        conn.execute("UPDATE users SET name = ? WHERE id = ?", (name.strip(), user_id))
+    if email is not None:
+        email = email.lower().strip()
+        existing = conn.execute("SELECT id FROM users WHERE email = ? AND id != ?", (email, user_id)).fetchone()
+        if existing:
+            raise HTTPException(409, "Email already in use")
+        conn.execute("UPDATE users SET email = ? WHERE id = ?", (email, user_id))
+    conn.commit()
+    return get_user_by_id(user_id)
+
+
+def change_user_password(user_id: str, current_password: str, new_password: str) -> bool:
+    conn = get_db()
+    row = conn.execute("SELECT password FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row or not _verify_password(current_password, row["password"]):
+        return False
+    hashed = _hash_password(new_password)
+    conn.execute("UPDATE users SET password = ? WHERE id = ?", (hashed, user_id))
+    conn.commit()
+    return True
