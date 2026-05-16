@@ -337,49 +337,57 @@ export async function generateKnowledge(topic: string, callbacks?: SSECallbacks)
   }, callbacks);
 }
 
-export interface RebuildCallbacks {
-  onProgress?: (message: string) => void;
-  onTopicDone?: (data: { topic: string; index: number; total: number }) => void;
-  onTopicError?: (data: { topic: string; message: string }) => void;
+export interface RebuildTaskSubmission {
+  ok: boolean;
+  task_id: string;
+  topic: string;
+  file_count: number;
+  message: string;
 }
 
-async function streamRebuild(url: string, callbacks: RebuildCallbacks): Promise<any> {
-  const res = await authFetch(url, { method: "POST" });
+export interface RebuildAllSubmission {
+  ok: boolean;
+  total: number;
+  tasks: { task_id: string; topic: string; file_count: number }[];
+  message: string;
+}
+
+export interface RebuildTaskStatus {
+  task_id: string;
+  user_id: string;
+  topic: string;
+  label: string;
+  state: "pending" | "running" | "completed" | "failed";
+  submitted_at: number;
+  started_at: number;
+  finished_at: number;
+  file_count: number;
+  retry_count: number;
+  error: string;
+  message: string;
+}
+
+/** Submit a single-topic rebuild. Returns immediately with task_id; poll status separately. */
+export async function rebuildTopicIndex(topic: string): Promise<RebuildTaskSubmission> {
+  const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/rebuild`, {
+    method: "POST",
+  });
   if (!res.ok) throw new Error(await res.text());
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let result: any = null;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      try {
-        const evt = JSON.parse(line.slice(6));
-        if (evt.type === "progress" && callbacks.onProgress) callbacks.onProgress(evt.message);
-        else if (evt.type === "topic_done" && callbacks.onTopicDone) callbacks.onTopicDone(evt.data);
-        else if (evt.type === "topic_error" && callbacks.onTopicError) callbacks.onTopicError(evt.data);
-        else if (evt.type === "complete") result = evt.data;
-        else if (evt.type === "error" && callbacks.onProgress) callbacks.onProgress("出错: " + evt.message);
-      } catch {
-        // skip malformed SSE
-      }
-    }
-  }
-  return result;
+  return res.json();
 }
 
-export async function rebuildTopicIndex(topic: string, callbacks: RebuildCallbacks = {}): Promise<any> {
-  return streamRebuild(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/rebuild`, callbacks);
+/** Submit rebuilds for all topics. Returns immediately with the list of task_ids. */
+export async function rebuildAllIndices(): Promise<RebuildAllSubmission> {
+  const res = await authFetch(`${API_BASE}/knowledge/rebuild-all`, { method: "POST" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
-export async function rebuildAllIndices(callbacks: RebuildCallbacks = {}): Promise<any> {
-  return streamRebuild(`${API_BASE}/knowledge/rebuild-all`, callbacks);
+/** Fetch all rebuild task statuses for the current user (newest first). */
+export async function getRebuildStatus(): Promise<{ tasks: RebuildTaskStatus[] }> {
+  const res = await authFetch(`${API_BASE}/knowledge/rebuild-status`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
 
 // ── Recording review ──

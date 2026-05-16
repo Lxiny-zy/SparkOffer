@@ -5,9 +5,32 @@ from fastapi import APIRouter, HTTPException, Depends
 
 from backend.config import settings
 from backend.indexer import load_topics, _index_cache, invalidate_topic_index, build_topic_index
+from backend.embedding_tasks import schedule_index_rebuild, get_task_queue
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api")
+
+
+def _count_files(user_id: str, topic_dir_name: str) -> int:
+    topic_dir = settings.user_knowledge_path(user_id) / topic_dir_name
+    return sum(1 for _ in topic_dir.glob("*.md")) if topic_dir.exists() else 0
+
+
+def _status_to_dict(st) -> dict:
+    return {
+        "task_id": st.task_id,
+        "user_id": st.user_id,
+        "topic": st.topic,
+        "label": st.label,
+        "state": st.state,
+        "submitted_at": st.submitted_at,
+        "started_at": st.started_at,
+        "finished_at": st.finished_at,
+        "file_count": st.file_count,
+        "retry_count": st.retry_count,
+        "error": st.error,
+        "message": st.message,
+    }
 
 
 @router.get("/knowledge/{topic}/core")
@@ -153,67 +176,74 @@ async def update_high_freq(topic: str, body: dict, user_id: str = Depends(get_cu
 
 @router.post("/knowledge/{topic}/rebuild")
 async def rebuild_topic_index(topic: str, user_id: str = Depends(get_current_user)):
-    """Force-rebuild a single topic's vector index. SSE progress stream."""
+    """Submit a single-topic rebuild to the background queue. Returns immediately.
+
+    The actual embedding work runs in EmbeddingTaskQueue workers. Poll
+    /knowledge/rebuild-status to track progress. Submitting an in-flight
+    rebuild for the same (user, topic) is a no-op (deduplicated by task_id).
+    """
     topics = load_topics(user_id)
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
 
-    from backend.utils.sse_helpers import streaming_response, sse_event
+    file_count = _count_files(user_id, topics[topic]["dir"])
+    label = f"重建 {topics[topic].get('name', topic)} 向量索引"
 
-    topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
-    file_count = 0
-    if topic_dir.exists():
-        file_count = sum(1 for _ in topic_dir.glob("*.md"))
+    # Invalidate cache synchronously so any concurrent reader doesn't get stale results;
+    # actual embedding rebuild runs in background.
+    await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+    task_id = schedule_index_rebuild(topic, user_id, file_count=file_count, label=label)
 
-    async def _gen():
-        yield sse_event({"type": "progress", "message": f"清理 {topic} 旧索引..."})
-        await asyncio.to_thread(invalidate_topic_index, topic, user_id)
-        yield sse_event({"type": "progress", "message": f"开始重建 {topic} 索引（{file_count} 个文件，预计 1-3 分钟）..."})
-        try:
-            await asyncio.to_thread(build_topic_index, topic, user_id, True)
-            yield sse_event({"type": "complete", "data": {"ok": True, "topic": topic, "file_count": file_count}})
-        except Exception as e:
-            yield sse_event({"type": "error", "message": str(e)})
-        yield sse_event({"type": "done"})
-
-    return streaming_response(_gen())
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "topic": topic,
+        "file_count": file_count,
+        "message": f"已提交 {topic} 索引重建任务（{file_count} 文件），可在状态接口查询进度",
+    }
 
 
 @router.post("/knowledge/rebuild-all")
 async def rebuild_all_topics(user_id: str = Depends(get_current_user)):
-    """Rebuild every topic's index sequentially. SSE progress stream."""
+    """Submit all topics' rebuild tasks. Returns the list of submitted task_ids."""
     topics = load_topics(user_id)
     if not topics:
         raise HTTPException(400, "No topics configured")
 
-    from backend.utils.sse_helpers import streaming_response, sse_event
+    submitted = []
+    for key, info in topics.items():
+        file_count = _count_files(user_id, info["dir"])
+        await asyncio.to_thread(invalidate_topic_index, key, user_id)
+        task_id = schedule_index_rebuild(
+            key, user_id, file_count=file_count,
+            label=f"重建 {info.get('name', key)} 向量索引",
+        )
+        submitted.append({"task_id": task_id, "topic": key, "file_count": file_count})
 
-    async def _gen():
-        total = len(topics)
-        succeeded = 0
-        failed = []
-        for i, key in enumerate(topics.keys(), start=1):
-            topic_dir = settings.user_knowledge_path(user_id) / topics[key]["dir"]
-            file_count = sum(1 for _ in topic_dir.glob("*.md")) if topic_dir.exists() else 0
-            yield sse_event({
-                "type": "progress",
-                "message": f"[{i}/{total}] 重建 {key}（{file_count} 文件）...",
-            })
-            try:
-                await asyncio.to_thread(invalidate_topic_index, key, user_id)
-                await asyncio.to_thread(build_topic_index, key, user_id, True)
-                succeeded += 1
-                yield sse_event({"type": "topic_done", "data": {"topic": key, "index": i, "total": total}})
-            except Exception as e:
-                failed.append({"topic": key, "message": str(e)})
-                yield sse_event({"type": "topic_error", "data": {"topic": key, "message": str(e)}})
-        yield sse_event({
-            "type": "complete",
-            "data": {"ok": True, "total": total, "succeeded": succeeded, "failed": failed},
-        })
-        yield sse_event({"type": "done"})
+    return {
+        "ok": True,
+        "total": len(submitted),
+        "tasks": submitted,
+        "message": f"已提交 {len(submitted)} 个重建任务，可在状态接口查询进度",
+    }
 
-    return streaming_response(_gen())
+
+@router.get("/knowledge/rebuild-status")
+async def get_rebuild_status(user_id: str = Depends(get_current_user)):
+    """Return all rebuild task statuses for the current user (newest first)."""
+    queue = get_task_queue()
+    statuses = queue.list_statuses(user_id=user_id, task_id_prefix=f"rebuild:{user_id}:")
+    return {"tasks": [_status_to_dict(s) for s in statuses]}
+
+
+@router.get("/knowledge/rebuild-status/{task_id:path}")
+async def get_rebuild_task_status(task_id: str, user_id: str = Depends(get_current_user)):
+    """Return a single rebuild task's status. 404 if unknown or not yours."""
+    queue = get_task_queue()
+    st = queue.get_status(task_id)
+    if not st or st.user_id != user_id:
+        raise HTTPException(404, "Task not found")
+    return _status_to_dict(st)
 
 
 @router.get("/knowledge/{topic}/stats")

@@ -1,11 +1,12 @@
-import { useState, useEffect, useCallback } from "react";
-import { Menu, X, Sparkles, ChevronRight, ChevronDown, Activity, Clock, FileText, RefreshCw, Loader2 } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Menu, X, Sparkles, ChevronRight, ChevronDown, Activity, Clock, FileText, RefreshCw, Loader2, CheckCircle2, XCircle, CircleDashed } from "lucide-react";
 import { toast } from "sonner";
 import { getTopicIcon, ICON_OPTIONS } from "../utils/topicIcons";
 import {
   getTopics, getCoreKnowledge, updateCoreKnowledge, createCoreKnowledge,
   deleteCoreKnowledge, getHighFreq, updateHighFreq, createTopic, deleteTopic, generateKnowledge,
-  getKnowledgeStats, rebuildTopicIndex, rebuildAllIndices,
+  getKnowledgeStats, rebuildTopicIndex, rebuildAllIndices, getRebuildStatus,
+  type RebuildTaskStatus,
 } from "../api/interview";
 import type { KnowledgeStats } from "../api/interview";
 import { cn } from "@/lib/utils";
@@ -69,9 +70,11 @@ export default function Knowledge() {
   const [newTopicName, setNewTopicName] = useState<string>("");
   const [newTopicIcon, setNewTopicIcon] = useState<string>("FileText");
 
-  const [rebuilding, setRebuilding] = useState<boolean>(false);
-  const [rebuildProgress, setRebuildProgress] = useState<string>("");
   const [showRebuildMenu, setShowRebuildMenu] = useState<boolean>(false);
+  const [rebuildTasks, setRebuildTasks] = useState<RebuildTaskStatus[]>([]);
+  const [submitting, setSubmitting] = useState<boolean>(false);
+  const pollRef = useRef<number | null>(null);
+  const lastNotifiedRef = useRef<Record<string, string>>({});
 
   const refreshTopics = useCallback(async () => {
     const t = await getTopics();
@@ -207,60 +210,98 @@ export default function Knowledge() {
     } catch (e: any) { toast.error("添加失败: " + e.message); }
   };
 
-  const handleRebuildCurrent = async () => {
-    if (!selected || rebuilding) return;
-    setShowRebuildMenu(false);
-    if (!confirm(`确定重新向量化「${topics[selected]?.name || selected}」？\n\n该操作会清空旧索引并重新对所有文件做 embedding，耗时取决于文件数量。`)) return;
-    setRebuilding(true);
-    setRebuildProgress("");
+  // ── Rebuild status polling ──────────────────────────────────────────────
+  // Workers run rebuilds in the backend queue; we just poll for state.
+  // Polling stops when no task is still pending/running, so idle pages don't hit the API.
+
+  const refreshStatus = useCallback(async () => {
     try {
-      const result = await rebuildTopicIndex(selected, {
-        onProgress: (msg) => setRebuildProgress(msg),
-      });
-      if (result?.ok) {
-        toast.success(`「${topics[selected]?.name}」索引重建完成（${result.file_count} 文件）`);
-        loadStats(selected);
-      } else {
-        toast.error("重建失败：" + (rebuildProgress || "未知错误"));
+      const { tasks } = await getRebuildStatus();
+      setRebuildTasks(tasks);
+
+      // Toast on state transitions we haven't notified about yet
+      for (const t of tasks) {
+        const prev = lastNotifiedRef.current[t.task_id];
+        if (prev !== t.state && (t.state === "completed" || t.state === "failed")) {
+          lastNotifiedRef.current[t.task_id] = t.state;
+          if (t.state === "completed") {
+            toast.success(`${t.label} 完成（${t.file_count} 文件）`);
+            if (selected && t.topic === selected) loadStats(selected);
+          } else {
+            toast.error(`${t.label} 失败：${t.error || "未知错误"}`);
+          }
+        } else if (!prev) {
+          // Seed initial state without notifying (page just opened mid-run)
+          lastNotifiedRef.current[t.task_id] = t.state;
+        }
       }
+
+      // Stop polling if everything finished
+      const stillActive = tasks.some(t => t.state === "pending" || t.state === "running");
+      if (!stillActive && pollRef.current) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    } catch {
+      // network glitch — keep the timer, next tick will retry
+    }
+  }, [selected, loadStats]);
+
+  const startPolling = useCallback(() => {
+    if (pollRef.current) return;
+    refreshStatus();  // immediate first poll
+    pollRef.current = window.setInterval(refreshStatus, 3000);
+  }, [refreshStatus]);
+
+  // On mount: pull current status — if a rebuild was already in progress, the UI resumes
+  useEffect(() => {
+    refreshStatus().then(() => {
+      // If any task still active after the initial fetch, start polling
+      setRebuildTasks((tasks) => {
+        if (tasks.some(t => t.state === "pending" || t.state === "running")) startPolling();
+        return tasks;
+      });
+    });
+    return () => {
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const hasActiveTask = rebuildTasks.some(t => t.state === "pending" || t.state === "running");
+
+  const handleRebuildCurrent = async () => {
+    if (!selected || submitting || hasActiveTask) return;
+    setShowRebuildMenu(false);
+    if (!confirm(`确定重新向量化「${topics[selected]?.name || selected}」？\n\n该操作会在后台异步执行，你可以关闭页面或切到其他界面，回来时仍能看到进度。`)) return;
+    setSubmitting(true);
+    try {
+      const result = await rebuildTopicIndex(selected);
+      toast.success(result.message);
+      startPolling();
     } catch (e: any) {
-      toast.error("重建失败：" + e.message);
+      toast.error("提交失败：" + e.message);
     } finally {
-      setRebuilding(false);
-      setRebuildProgress("");
+      setSubmitting(false);
     }
   };
 
   const handleRebuildAll = async () => {
+    if (submitting || hasActiveTask) return;
     setShowRebuildMenu(false);
-    if (rebuilding) return;
-    if (!confirm(`确定全量重建所有领域的向量索引？\n\n共 ${topicKeys.length} 个领域，将依次重建，可能需要 5-15 分钟。`)) return;
-    setRebuilding(true);
-    setRebuildProgress("");
+    if (!confirm(`确定全量重建所有领域的向量索引？\n\n共 ${topicKeys.length} 个领域，后台异步并行执行（worker 数受限会自动排队）。`)) return;
+    setSubmitting(true);
     try {
-      const result = await rebuildAllIndices({
-        onProgress: (msg) => setRebuildProgress(msg),
-        onTopicDone: ({ topic, index, total }) => {
-          setRebuildProgress(`✓ ${topic} 完成 (${index}/${total})`);
-        },
-        onTopicError: ({ topic, message }) => {
-          toast.error(`${topic} 失败: ${message}`);
-        },
-      });
-      if (result) {
-        const failed = result.failed || [];
-        if (failed.length === 0) {
-          toast.success(`全量重建完成：${result.succeeded}/${result.total}`);
-        } else {
-          toast.error(`部分失败：成功 ${result.succeeded}，失败 ${failed.length}`);
-        }
-        if (selected) loadStats(selected);
-      }
+      const result = await rebuildAllIndices();
+      toast.success(result.message);
+      startPolling();
     } catch (e: any) {
-      toast.error("全量重建失败：" + e.message);
+      toast.error("提交失败：" + e.message);
     } finally {
-      setRebuilding(false);
-      setRebuildProgress("");
+      setSubmitting(false);
     }
   };
 
@@ -385,35 +426,39 @@ export default function Knowledge() {
               {t === "core" ? "核心知识库" : "高频题库"}
             </button>
           ))}
-          <div className="ml-auto pr-1 relative">
-            {rebuilding ? (
-              <div className="flex items-center gap-2 text-xs text-dim px-3 py-1.5 rounded-lg bg-primary/8 border border-primary/20">
-                <Loader2 size={14} className="animate-spin text-primary" />
-                <span className="hidden sm:inline">{rebuildProgress || "重建中..."}</span>
-                <span className="sm:hidden">重建中</span>
+          <div className="ml-auto pr-1 relative flex items-center gap-2">
+            {hasActiveTask && (
+              <div className="hidden md:flex items-center gap-2 text-xs text-dim px-3 py-1.5 rounded-lg bg-primary/8 border border-primary/20 max-w-[280px]">
+                <Loader2 size={14} className="animate-spin text-primary shrink-0" />
+                <span className="truncate">
+                  {(() => {
+                    const active = rebuildTasks.find(t => t.state === "running") || rebuildTasks.find(t => t.state === "pending");
+                    if (!active) return "构建中...";
+                    return `${active.label}：${active.message || active.state}`;
+                  })()}
+                </span>
               </div>
-            ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5"
-                onClick={() => setShowRebuildMenu((v) => !v)}
-                disabled={topicKeys.length === 0}
-                title="重新向量化知识库"
-              >
-                <RefreshCw size={14} />
-                <span className="hidden sm:inline">初始化向量库</span>
-                <ChevronDown size={12} />
-              </Button>
             )}
-            {showRebuildMenu && !rebuilding && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => setShowRebuildMenu((v) => !v)}
+              disabled={topicKeys.length === 0 || submitting || hasActiveTask}
+              title={hasActiveTask ? "已有构建任务在跑" : "重新向量化知识库"}
+            >
+              {submitting ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              <span className="hidden sm:inline">{hasActiveTask ? "构建中..." : "初始化向量库"}</span>
+              <ChevronDown size={12} />
+            </Button>
+            {showRebuildMenu && (
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setShowRebuildMenu(false)} />
-                <div className="absolute right-0 top-full mt-1 z-40 w-56 bg-card border border-border rounded-xl shadow-lg overflow-hidden animate-fade-in">
+                <div className="absolute right-0 top-full mt-1 z-40 w-64 bg-card border border-border rounded-xl shadow-lg overflow-hidden animate-fade-in">
                   <button
                     className="w-full px-4 py-2.5 text-sm text-left hover:bg-secondary/60 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     onClick={handleRebuildCurrent}
-                    disabled={!selected}
+                    disabled={!selected || hasActiveTask}
                   >
                     <RefreshCw size={14} className="text-primary" />
                     <div className="flex-1">
@@ -423,15 +468,20 @@ export default function Knowledge() {
                   </button>
                   <div className="h-px bg-border" />
                   <button
-                    className="w-full px-4 py-2.5 text-sm text-left hover:bg-secondary/60 flex items-center gap-2"
+                    className="w-full px-4 py-2.5 text-sm text-left hover:bg-secondary/60 flex items-center gap-2 disabled:opacity-50"
                     onClick={handleRebuildAll}
+                    disabled={hasActiveTask}
                   >
                     <Sparkles size={14} className="text-primary" />
                     <div className="flex-1">
                       <div>全量重建（所有模块）</div>
-                      <div className="text-[11px] text-dim">{topicKeys.length} 个领域，依次重建</div>
+                      <div className="text-[11px] text-dim">{topicKeys.length} 个领域，提交后后台并行</div>
                     </div>
                   </button>
+                  <div className="h-px bg-border" />
+                  <div className="px-4 py-2 text-[11px] text-dim leading-relaxed bg-secondary/30">
+                    提交后任务在后台运行，关闭页面也不会中断；重新打开仍能看到进度。
+                  </div>
                 </div>
               </>
             )}
@@ -443,6 +493,52 @@ export default function Knowledge() {
             <div className="text-center py-15 text-dim text-sm">选择一个领域</div>
           ) : (
             <>
+              {/* ── 向量索引重建任务列表 ── 异步队列状态实时反映 ── */}
+              {rebuildTasks.length > 0 && (
+                <Card className="mb-4 border-primary/20">
+                  <CardContent className="p-3.5 md:p-4">
+                    <div className="flex items-center justify-between mb-2.5">
+                      <div className="flex items-center gap-2">
+                        <RefreshCw size={14} className={cn("text-primary", hasActiveTask && "animate-spin")} />
+                        <span className="text-[13px] font-semibold">向量索引重建任务</span>
+                        {hasActiveTask && (
+                          <Badge variant="outline" className="text-[10px] bg-primary/10 border-primary/30 text-primary">
+                            {rebuildTasks.filter(t => t.state === "running").length} 运行 / {rebuildTasks.filter(t => t.state === "pending").length} 等待
+                          </Badge>
+                        )}
+                      </div>
+                      <Button variant="ghost" size="sm" className="h-7 text-[11px] text-dim" onClick={refreshStatus}>刷新</Button>
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      {rebuildTasks.map((t) => {
+                        const icon = t.state === "completed" ? <CheckCircle2 size={14} className="text-green" />
+                                  : t.state === "failed"   ? <XCircle size={14} className="text-red" />
+                                  : t.state === "running"  ? <Loader2 size={14} className="animate-spin text-primary" />
+                                  : <CircleDashed size={14} className="text-dim" />;
+                        const stateText = ({pending: "等待", running: "运行中", completed: "已完成", failed: "失败"} as const)[t.state];
+                        const dur = t.finished_at && t.started_at
+                          ? `${Math.max(1, Math.round(t.finished_at - t.started_at))}s`
+                          : t.started_at ? `${Math.max(1, Math.round(Date.now()/1000 - t.started_at))}s+` : "";
+                        return (
+                          <div key={t.task_id} className="flex items-center gap-2 text-[12px] px-2 py-1.5 rounded-lg bg-secondary/30">
+                            {icon}
+                            <span className="font-mono text-dim shrink-0 w-12">{t.topic}</span>
+                            <span className="flex-1 truncate text-text/80">{t.message || stateText}</span>
+                            {t.file_count > 0 && <span className="text-dim text-[11px] shrink-0">{t.file_count} 文件</span>}
+                            {dur && <span className="text-dim text-[11px] shrink-0 font-mono">{dur}</span>}
+                            {t.error && (
+                              <span className="text-red text-[11px] shrink-0 truncate max-w-[120px]" title={t.error}>
+                                {t.error}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
               {/* ── 知识进化状态条 ── 用来验证自我进化与答题沉淀是否生效 ── */}
               {stats && (
                 <Card className="mb-4 border-primary/20 bg-gradient-to-br from-primary/5 via-card to-card">
