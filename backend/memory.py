@@ -37,7 +37,7 @@ def _get_profile_lock(user_id: str) -> threading.Lock:
 
 DEFAULT_PROFILE = {
     "name": "",
-    "target_role": "AI 应用开发实习生",
+    "target_role": "通用 Agent 工程师（Python 或 Java 后端方向）",
     "updated_at": "",
 
     # 技术掌握度 (topic → {level: 1-5, notes: str})
