@@ -174,6 +174,15 @@ async def update_high_freq(topic: str, body: dict, user_id: str = Depends(get_cu
     return {"ok": True}
 
 
+async def _submit_rebuild(topic: str, topic_info: dict, user_id: str) -> dict:
+    """Invalidate cache (sync, off-loop) and submit rebuild task. Returns the manifest."""
+    file_count = _count_files(user_id, topic_info["dir"])
+    label = f"重建 {topic_info.get('name', topic)} 向量索引"
+    await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+    task_id = schedule_index_rebuild(topic, user_id, file_count=file_count, label=label)
+    return {"task_id": task_id, "topic": topic, "file_count": file_count}
+
+
 @router.post("/knowledge/{topic}/rebuild")
 async def rebuild_topic_index(topic: str, user_id: str = Depends(get_current_user)):
     """Submit a single-topic rebuild to the background queue. Returns immediately.
@@ -186,20 +195,11 @@ async def rebuild_topic_index(topic: str, user_id: str = Depends(get_current_use
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
 
-    file_count = _count_files(user_id, topics[topic]["dir"])
-    label = f"重建 {topics[topic].get('name', topic)} 向量索引"
-
-    # Invalidate cache synchronously so any concurrent reader doesn't get stale results;
-    # actual embedding rebuild runs in background.
-    await asyncio.to_thread(invalidate_topic_index, topic, user_id)
-    task_id = schedule_index_rebuild(topic, user_id, file_count=file_count, label=label)
-
+    manifest = await _submit_rebuild(topic, topics[topic], user_id)
     return {
         "ok": True,
-        "task_id": task_id,
-        "topic": topic,
-        "file_count": file_count,
-        "message": f"已提交 {topic} 索引重建任务（{file_count} 文件），可在状态接口查询进度",
+        **manifest,
+        "message": f"已提交 {topic} 索引重建任务（{manifest['file_count']} 文件），可在状态接口查询进度",
     }
 
 
@@ -210,16 +210,10 @@ async def rebuild_all_topics(user_id: str = Depends(get_current_user)):
     if not topics:
         raise HTTPException(400, "No topics configured")
 
-    submitted = []
-    for key, info in topics.items():
-        file_count = _count_files(user_id, info["dir"])
-        await asyncio.to_thread(invalidate_topic_index, key, user_id)
-        task_id = schedule_index_rebuild(
-            key, user_id, file_count=file_count,
-            label=f"重建 {info.get('name', key)} 向量索引",
-        )
-        submitted.append({"task_id": task_id, "topic": key, "file_count": file_count})
-
+    submitted = [
+        await _submit_rebuild(key, info, user_id)
+        for key, info in topics.items()
+    ]
     return {
         "ok": True,
         "total": len(submitted),

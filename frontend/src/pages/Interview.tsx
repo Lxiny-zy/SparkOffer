@@ -3,6 +3,7 @@ import { useParams, useLocation, useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import { markdownComponents } from "../components/ChatBubble";
 import { Check, Minus, Star, Lightbulb, Eye, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import ChatBubble from "../components/ChatBubble";
 import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress } from "../api/interview";
 import useVoiceInput from "../hooks/useVoiceInput";
@@ -49,6 +50,7 @@ export default function Interview() {
   const [hintLoading, setHintLoading] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [restoring, setRestoring] = useState<boolean>(!initData.mode);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const restoredRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
 
@@ -113,11 +115,15 @@ export default function Interview() {
       })
       .catch((err: any) => {
         console.error("恢复面试失败:", err);
+        setRestoreError(err?.message || "无法加载会话，请返回首页重试");
       })
       .finally(() => setRestoring(false));
   }, [sessionId, initData.mode]);
 
-  // Debounced persist of in-progress state
+  // Debounced persist of in-progress state.
+  // Network failure is logged but not surfaced to the user every keystroke —
+  // saveErrorShownRef ensures at most one toast until a save succeeds again.
+  const saveErrorShownRef = useRef(false);
   useEffect(() => {
     if (!isBatchMode || !sessionId || restoring || finished) return;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
@@ -126,7 +132,15 @@ export default function Interview() {
         current_index: currentIndex,
         partial_answers: answers,
         hints,
-      }).catch(() => {});
+      })
+        .then(() => { saveErrorShownRef.current = false; })
+        .catch((err: any) => {
+          console.warn("保存进度失败:", err);
+          if (!saveErrorShownRef.current) {
+            saveErrorShownRef.current = true;
+            toast.error("进度保存失败，刷新可能丢失最近输入");
+          }
+        });
     }, 400);
     return () => {
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
@@ -319,6 +333,34 @@ export default function Interview() {
     return (
       <div className="flex-1 flex items-center justify-center">
         <Loader2 className="w-6 h-6 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  if (restoreError) {
+    return (
+      <div className="flex-1 flex items-center justify-center px-4">
+        <Card className="max-w-md w-full">
+          <CardContent className="p-6 text-center space-y-3">
+            <div className="text-base font-medium">面试会话加载失败</div>
+            <p className="text-sm text-dim">{restoreError}</p>
+            <Button variant="default" onClick={() => navigate("/")}>返回首页</Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (isBatchMode && questions.length === 0) {
+    return (
+      <div className="flex-1 flex items-center justify-center px-4">
+        <Card className="max-w-md w-full">
+          <CardContent className="p-6 text-center space-y-3">
+            <div className="text-base font-medium">会话已失效</div>
+            <p className="text-sm text-dim">没有题目数据，可能是会话已被清理。请重新开始一场面试。</p>
+            <Button variant="default" onClick={() => navigate("/")}>返回首页</Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }

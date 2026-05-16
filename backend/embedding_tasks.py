@@ -168,6 +168,7 @@ class EmbeddingTaskQueue:
         # task_id -> TaskStatus. Bounded retention via _gc_statuses().
         self._statuses: dict[str, "TaskStatus"] = {}
         self._status_retention = 3600.0  # keep finished tasks 1 hour
+        self._last_gc_at = 0.0           # rate-limit GC sweeps
 
     async def start(self):
         """Start background workers."""
@@ -281,6 +282,7 @@ class EmbeddingTaskQueue:
             finally:
                 self._active_tasks.discard(task.task_id)
                 self._queue.task_done()
+                self._gc_statuses()
 
     async def _execute_task(self, task: EmbeddingTask):
         """Execute a single task with circuit breaker and retry logic."""
@@ -364,9 +366,18 @@ class EmbeddingTaskQueue:
             if hasattr(st, k):
                 setattr(st, k, v)
 
-    def _gc_statuses(self):
-        """Drop finished statuses older than retention window to bound memory."""
-        cutoff = time.time() - self._status_retention
+    def _gc_statuses(self, *, force: bool = False):
+        """Drop finished statuses older than retention window to bound memory.
+
+        Rate-limited to at most once per minute unless force=True. Called both
+        from submit() (new task arriving) and from worker (task completing) so
+        long-idle queues don't permanently leak status entries.
+        """
+        now = time.time()
+        if not force and now - self._last_gc_at < 60.0:
+            return
+        self._last_gc_at = now
+        cutoff = now - self._status_retention
         stale = [
             tid for tid, st in self._statuses.items()
             if st.state in ("completed", "failed") and st.finished_at and st.finished_at < cutoff

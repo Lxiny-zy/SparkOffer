@@ -121,7 +121,17 @@ export default function GeometricNetwork() {
     resize();
     draw();
 
-    const onResize = () => resize();
+    // Debounce resize: dragging a window edge fires hundreds of events; we only
+    // need to re-measure once the user stops, otherwise we keep rebuilding the
+    // node array and dropping frames.
+    let resizeTimer: number | null = null;
+    const onResize = () => {
+      if (resizeTimer !== null) window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        resize();
+        resizeTimer = null;
+      }, 150);
+    };
     window.addEventListener("resize", onResize);
 
     const observer = new MutationObserver(() => { colors = readColors(); });
@@ -129,6 +139,7 @@ export default function GeometricNetwork() {
 
     return () => {
       cancelAnimationFrame(raf);
+      if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       window.removeEventListener("resize", onResize);
       observer.disconnect();
     };

@@ -281,7 +281,8 @@ async def get_history(
 @router.get("/interview/session/{session_id}")
 async def get_interview_session(session_id: str, user_id: str = Depends(get_current_user)):
     """Full session state for resuming an in-progress drill / job_prep."""
-    session = get_session(session_id, user_id=user_id)
+    import asyncio
+    session = await asyncio.to_thread(get_session, session_id, user_id=user_id)
     if not session:
         raise HTTPException(404, "Session not found.")
     # Re-populate live_store if the backend has been restarted since session start
@@ -310,15 +311,17 @@ async def save_session_progress(
     user_id: str = Depends(get_current_user),
 ):
     """Persist mid-drill progress (current_index, partial_answers, hints) to meta.progress."""
-    if get_session(session_id, user_id=user_id) is None:
-        raise HTTPException(404, "Session not found.")
-    save_drill_progress(
+    import asyncio
+    ok = await asyncio.to_thread(
+        save_drill_progress,
         session_id,
         int(body.get("current_index", 0)),
         body.get("partial_answers", {}) or {},
         body.get("hints", {}) or {},
         user_id=user_id,
     )
+    if not ok:
+        raise HTTPException(404, "Session not found.")
     return {"ok": True}
 
 

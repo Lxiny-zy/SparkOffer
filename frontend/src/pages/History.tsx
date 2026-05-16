@@ -33,8 +33,10 @@ export default function History() {
 
   useEffect(() => { getInterviewTopics().then(setTopics).catch(() => {}); }, []);
 
-  const fetchSessions = useCallback((reset: boolean) => {
-    const offset = reset ? 0 : sessions.length;
+  // sessions.length intentionally NOT in deps — that would refetch every time
+  // setSessions runs and re-create the callback. Loaders pass their own offset.
+  const fetchSessions = useCallback((reset: boolean, currentLen = 0) => {
+    const offset = reset ? 0 : currentLen;
     const setter = reset ? setLoading : setLoadingMore;
     setter(true);
     const mode = modeFilter === "all" ? null : modeFilter;
@@ -46,9 +48,9 @@ export default function History() {
       })
       .catch(() => {})
       .finally(() => setter(false));
-  }, [modeFilter, topicFilter, statusFilter, sessions.length]);
+  }, [modeFilter, topicFilter, statusFilter]);
 
-  useEffect(() => { fetchSessions(true); }, [modeFilter, topicFilter, statusFilter]);
+  useEffect(() => { fetchSessions(true); }, [modeFilter, topicFilter, statusFilter, fetchSessions]);
 
   const handleModeChange = (mode: string) => {
     if (mode === "resume") setTopicFilter("all");
@@ -219,7 +221,7 @@ export default function History() {
             <Button
               variant="outline"
               className="block w-full py-3 mt-4"
-              onClick={() => fetchSessions(false)}
+              onClick={() => fetchSessions(false, sessions.length)}
               disabled={loadingMore}
             >
               {loadingMore ? "加载中..." : `加载更多 (${sessions.length}/${total})`}

@@ -278,6 +278,8 @@ def main():
                         help="Recover 面试题集.md from git HEAD and split into high_freq files.")
     parser.add_argument("--keep-old-dirs", action="store_true",
                         help="Don't delete original numbered directories after copy (default deletes them).")
+    parser.add_argument("--allow-rerun", action="store_true",
+                        help="Override the safety check that refuses to re-run on already-migrated dirs.")
     args = parser.parse_args()
 
     knowledge_roots = find_user_knowledge_roots()
@@ -298,6 +300,25 @@ def main():
         if ans.strip().lower() not in ("y", "yes"):
             print("已取消。")
             sys.exit(0)
+
+    # Refuse to re-run on already-migrated roots unless the user passes --allow-rerun.
+    # Running twice silently would re-backup the new structure as if it were old,
+    # then redundantly copy files — overwriting any post-migration manual edits.
+    if not args.dry_run and not args.allow_rerun:
+        for label, root in knowledge_roots:
+            old_dirs_present = any((root / name).is_dir() for name in MIGRATION_MAP)
+            new_dirs_populated = all(
+                (root / NEW_TOPICS[k]["dir"]).is_dir() and
+                any((root / NEW_TOPICS[k]["dir"]).glob("*.md"))
+                for k in NEW_TOPICS
+            )
+            if new_dirs_populated and not old_dirs_present:
+                print(
+                    f"\n[REFUSED] {label}: already migrated ({root} contains python/java/agent "
+                    f"with content but no legacy numbered dirs). Pass --allow-rerun to override "
+                    f"(will re-backup and re-copy, potentially overwriting manual edits)."
+                )
+                sys.exit(1)
 
     # 1. Backup each knowledge root
     for label, root in knowledge_roots:

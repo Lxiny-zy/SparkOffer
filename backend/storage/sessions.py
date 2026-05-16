@@ -76,15 +76,19 @@ def save_review(session_id: str, review: str, scores: list = None,
 
 
 def save_drill_progress(session_id: str, current_index: int,
-                        partial_answers: dict, hints: dict, *, user_id: str):
-    """中途保存 drill / job_prep 进度到 meta.progress，不需要 schema 迁移。"""
+                        partial_answers: dict, hints: dict, *, user_id: str) -> bool:
+    """中途保存 drill / job_prep 进度到 meta.progress，不需要 schema 迁移。
+
+    Returns True if the row was updated, False if no such session exists for
+    this user — callers should treat False as 404.
+    """
     conn = get_db()
     row = conn.execute(
         "SELECT meta FROM sessions WHERE session_id = ? AND user_id = ?",
         (session_id, user_id),
     ).fetchone()
     if not row:
-        return
+        return False
     meta = json.loads(row["meta"] or "{}")
     meta["progress"] = {
         "current_index": current_index,
@@ -98,6 +102,7 @@ def save_drill_progress(session_id: str, current_index: int,
         (json.dumps(meta, ensure_ascii=False), session_id, user_id),
     )
     conn.commit()
+    return True
 
 
 def get_session(session_id: str, *, user_id: str) -> dict | None:

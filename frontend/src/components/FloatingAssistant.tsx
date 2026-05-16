@@ -462,13 +462,17 @@ export default function FloatingAssistant() {
       )}
 
       {/* Peeking Cat (hidden edge state on mobile) */}
-      {isPeeking && !isOpen && (
+      {/* Clamp the bottom so a stale btnPos from a larger viewport doesn't push the peek off-screen. */}
+      {isPeeking && !isOpen && (() => {
+        const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+        const peekBottom = Math.max(0, Math.min(vh - 80, btnPos.y + 16));
+        return (
         <button
           onClick={handlePeekClick}
           onMouseEnter={() => setIsPeekHovered(true)}
           onMouseLeave={() => setIsPeekHovered(false)}
           className="fixed right-0 z-50 flex items-end cursor-pointer group transition-[bottom] duration-200"
-          style={{ height: "80px", bottom: btnPos.y + 16 }}
+          style={{ height: "80px", bottom: peekBottom }}
         >
           {/* Peek body — a strip showing the cat peeking from right edge */}
           <div className="relative overflow-hidden animate-cat-peek">
@@ -501,7 +505,8 @@ export default function FloatingAssistant() {
             </div>
           </div>
         </button>
-      )}
+        );
+      })()}
 
       {/* Floating Cat Bubble (normal / draggable) */}
       {!isOpen && !isPeeking && (

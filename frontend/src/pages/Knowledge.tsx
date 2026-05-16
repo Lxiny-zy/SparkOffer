@@ -219,9 +219,16 @@ export default function Knowledge() {
       const { tasks } = await getRebuildStatus();
       setRebuildTasks(tasks);
 
-      // Toast on state transitions we haven't notified about yet
+      // Toast on state transitions we haven't notified about yet.
+      // Initial mid-run page loads seed the ref without firing toasts.
+      const liveIds = new Set<string>();
       for (const t of tasks) {
+        liveIds.add(t.task_id);
         const prev = lastNotifiedRef.current[t.task_id];
+        if (prev === undefined) {
+          lastNotifiedRef.current[t.task_id] = t.state;
+          continue;
+        }
         if (prev !== t.state && (t.state === "completed" || t.state === "failed")) {
           lastNotifiedRef.current[t.task_id] = t.state;
           if (t.state === "completed") {
@@ -230,13 +237,17 @@ export default function Knowledge() {
           } else {
             toast.error(`${t.label} 失败：${t.error || "未知错误"}`);
           }
-        } else if (!prev) {
-          // Seed initial state without notifying (page just opened mid-run)
-          lastNotifiedRef.current[t.task_id] = t.state;
         }
       }
 
-      // Stop polling if everything finished
+      // Drop notification entries for tasks the server no longer reports — keeps
+      // the ref from growing unbounded across many rebuild cycles.
+      for (const k of Object.keys(lastNotifiedRef.current)) {
+        if (!liveIds.has(k)) delete lastNotifiedRef.current[k];
+      }
+
+      // Stop polling if everything finished. Checked here (not via state) so the
+      // decision uses the freshly-fetched tasks, not a stale render.
       const stillActive = tasks.some(t => t.state === "pending" || t.state === "running");
       if (!stillActive && pollRef.current) {
         window.clearInterval(pollRef.current);
@@ -254,14 +265,16 @@ export default function Knowledge() {
   }, [refreshStatus]);
 
   // On mount: pull current status — if a rebuild was already in progress, the UI resumes
+  // and starts polling. refreshStatus does the fetch; we kick off polling here if needed.
   useEffect(() => {
-    refreshStatus().then(() => {
-      // If any task still active after the initial fetch, start polling
-      setRebuildTasks((tasks) => {
-        if (tasks.some(t => t.state === "pending" || t.state === "running")) startPolling();
-        return tasks;
-      });
-    });
+    (async () => {
+      const { tasks } = await getRebuildStatus().catch(() => ({ tasks: [] as RebuildTaskStatus[] }));
+      // Seed the notified ref so we don't fire a toast for tasks that completed
+      // before this page was opened.
+      for (const t of tasks) lastNotifiedRef.current[t.task_id] = t.state;
+      setRebuildTasks(tasks);
+      if (tasks.some(t => t.state === "pending" || t.state === "running")) startPolling();
+    })();
     return () => {
       if (pollRef.current) {
         window.clearInterval(pollRef.current);
