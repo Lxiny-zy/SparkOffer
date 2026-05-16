@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
+import { markdownComponents } from "../components/ChatBubble";
 import {
   Library, Trash2, Download, Tag, ChevronDown, ChevronUp,
   Filter, X, Edit3, Check, Code2, ExternalLink, Search,
@@ -142,20 +143,23 @@ export default function AlgorithmCollection() {
   };
 
   return (
-    <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
+    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
       {/* Header */}
-      <div className="mb-8 animate-fade-in">
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <Library size={20} className="text-primary" />
-            <h1 className="text-2xl md:text-[28px] font-display font-bold">算法收藏</h1>
-            <Badge variant="secondary" className="ml-2">{total} 题</Badge>
+      <div className="mb-8 animate-fade-in relative">
+        <div className="absolute -top-6 -left-6 w-[180px] h-[120px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
+        <div className="relative">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Library size={20} className="text-primary" />
+              <h1 className="text-2xl md:text-[28px] font-display font-bold aurora-text">算法收藏</h1>
+              <Badge variant="secondary" className="ml-2">{total} 题</Badge>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => navigate("/algorithm")}>
+              <Code2 size={14} /> 去解题
+            </Button>
           </div>
-          <Button variant="outline" size="sm" onClick={() => navigate("/algorithm")}>
-            <Code2 size={14} /> 去解题
-          </Button>
+          <p className="text-sm text-dim">保存的算法题解答，方便复习回顾</p>
         </div>
-        <p className="text-sm text-dim">保存的算法题解答，方便复习回顾</p>
       </div>
 
       {/* Filters & Actions */}
@@ -325,7 +329,7 @@ export default function AlgorithmCollection() {
                       <div>
                         <div className="text-xs font-semibold text-dim mb-1">解答</div>
                         <div className="md-content bg-secondary rounded-lg px-3.5 py-3 text-sm leading-[1.8]">
-                          <ReactMarkdown>{item.solution}</ReactMarkdown>
+                          <ReactMarkdown components={markdownComponents}>{item.solution}</ReactMarkdown>
                         </div>
                       </div>
                     )}

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
+import { markdownComponents } from "../components/ChatBubble";
 import {
   Star, Trash2, Download, Tag, ChevronDown, ChevronUp,
   Filter, SortAsc, X, Edit3, Check,
@@ -128,14 +129,17 @@ export default function Favorites() {
   const topics = [...new Set(items.map((it) => it.topic).filter(Boolean))];
 
   return (
-    <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
-      <div className="mb-8 animate-fade-in">
-        <div className="flex items-center gap-2 mb-2">
-          <Star size={20} className="text-yellow-400 fill-yellow-400" />
-          <h1 className="text-2xl md:text-[28px] font-display font-bold">收藏夹</h1>
-          <Badge variant="secondary" className="ml-2">{total} 题</Badge>
+    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
+      <div className="mb-8 animate-fade-in relative">
+        <div className="absolute -top-6 -left-6 w-[180px] h-[120px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
+        <div className="relative">
+          <div className="flex items-center gap-2 mb-2">
+            <Star size={20} className="text-yellow-400 fill-yellow-400" />
+            <h1 className="text-2xl md:text-[28px] font-display font-bold aurora-text">收藏夹</h1>
+            <Badge variant="secondary" className="ml-2">{total} 题</Badge>
+          </div>
+          <p className="text-sm text-dim">收藏的面试题目，支持标签管理和导出</p>
         </div>
-        <p className="text-sm text-dim">收藏的面试题目，支持标签管理和导出</p>
       </div>
 
       {/* Filters & Actions */}
@@ -288,7 +292,7 @@ export default function Favorites() {
                       <div>
                         <div className="text-xs font-semibold text-dim mb-1">参考答案</div>
                         <div className="md-content bg-secondary rounded-lg px-3.5 py-3 text-sm leading-[1.8]">
-                          <ReactMarkdown>{item.reference_answer}</ReactMarkdown>
+                          <ReactMarkdown components={markdownComponents}>{item.reference_answer}</ReactMarkdown>
                         </div>
                       </div>
                     )}

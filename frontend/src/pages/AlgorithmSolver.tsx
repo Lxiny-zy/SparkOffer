@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
+import { markdownComponents } from "../components/ChatBubble";
 import {
   Code2, Send, Save, Play, Library, Loader2, X,
 } from "lucide-react";
@@ -131,19 +132,22 @@ export default function AlgorithmSolver() {
   };
 
   return (
-    <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
+    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
       {/* Header */}
-      <div className="mb-8 animate-fade-in">
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <Code2 size={20} className="text-primary" />
-            <h1 className="text-2xl md:text-[28px] font-display font-bold">算法解题</h1>
+      <div className="mb-8 animate-fade-in relative">
+        <div className="absolute -top-6 -left-6 w-[180px] h-[120px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
+        <div className="relative">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Code2 size={20} className="text-primary" />
+              <h1 className="text-2xl md:text-[28px] font-display font-bold aurora-text">算法解题</h1>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => navigate("/algorithm/collection")}>
+              <Library size={14} /> 算法收藏
+            </Button>
           </div>
-          <Button variant="outline" size="sm" onClick={() => navigate("/algorithm/collection")}>
-            <Library size={14} /> 算法收藏
-          </Button>
+          <p className="text-sm text-dim">粘贴算法题目，AI 帮你分析解答，支持多轮对话修改</p>
         </div>
-        <p className="text-sm text-dim">粘贴算法题目，AI 帮你分析解答，支持多轮对话修改</p>
       </div>
 
       {/* Input Section */}
@@ -156,30 +160,32 @@ export default function AlgorithmSolver() {
             onChange={(e) => setProblemText(e.target.value)}
             disabled={solving}
           />
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2 sm:gap-3">
             <Input
               placeholder="题目链接 (可选)"
-              className="flex-1 min-w-0 md:min-w-[200px] h-9 text-sm"
+              className="w-full sm:flex-1 sm:min-w-[200px] h-10 sm:h-9 text-sm"
               value={sourceUrl}
               onChange={(e) => setSourceUrl(e.target.value)}
               disabled={solving}
             />
-            <select
-              className="bg-card border border-border rounded-lg px-3 py-1.5 text-sm h-9"
-              value={language}
-              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setLanguage(e.target.value)}
-              disabled={solving}
-            >
-              {LANGUAGES.map((l) => (
-                <option key={l.value} value={l.value}>{l.label}</option>
-              ))}
-            </select>
-            <Button onClick={handleSolve} disabled={!problemText.trim() || solving}>
-              {solving ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-              {solving ? "解题中..." : "开始解题"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <select
+                className="bg-card border border-border rounded-lg px-3 py-2 sm:py-1.5 text-sm h-10 sm:h-9 flex-1 sm:flex-none"
+                value={language}
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setLanguage(e.target.value)}
+                disabled={solving}
+              >
+                {LANGUAGES.map((l) => (
+                  <option key={l.value} value={l.value}>{l.label}</option>
+                ))}
+              </select>
+              <Button onClick={handleSolve} disabled={!problemText.trim() || solving} className="h-10 sm:h-9 whitespace-nowrap">
+                {solving ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                {solving ? "解题中..." : "开始解题"}
+              </Button>
+            </div>
             {sessionId && (
-              <Button variant="ghost" size="sm" onClick={handleReset}>
+              <Button variant="ghost" size="sm" onClick={handleReset} className="self-start sm:self-center">
                 <X size={14} /> 重新开始
               </Button>
             )}
@@ -222,7 +228,7 @@ export default function AlgorithmSolver() {
             <Card className="mb-6">
               <CardContent className="p-4 md:p-5">
                 <div className="md-content text-[15px] leading-[1.8]">
-                  <ReactMarkdown>{solution}</ReactMarkdown>
+                  <ReactMarkdown components={markdownComponents}>{solution}</ReactMarkdown>
                 </div>
               </CardContent>
             </Card>

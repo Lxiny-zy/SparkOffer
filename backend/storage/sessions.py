@@ -75,6 +75,31 @@ def save_review(session_id: str, review: str, scores: list = None,
     conn.commit()
 
 
+def save_drill_progress(session_id: str, current_index: int,
+                        partial_answers: dict, hints: dict, *, user_id: str):
+    """中途保存 drill / job_prep 进度到 meta.progress，不需要 schema 迁移。"""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT meta FROM sessions WHERE session_id = ? AND user_id = ?",
+        (session_id, user_id),
+    ).fetchone()
+    if not row:
+        return
+    meta = json.loads(row["meta"] or "{}")
+    meta["progress"] = {
+        "current_index": current_index,
+        "partial_answers": {str(k): v for k, v in (partial_answers or {}).items()},
+        "hints": {str(k): v for k, v in (hints or {}).items()},
+        "updated_at": datetime.now().isoformat(),
+    }
+    conn.execute(
+        "UPDATE sessions SET meta = ?, updated_at = CURRENT_TIMESTAMP "
+        "WHERE session_id = ? AND user_id = ?",
+        (json.dumps(meta, ensure_ascii=False), session_id, user_id),
+    )
+    conn.commit()
+
+
 def get_session(session_id: str, *, user_id: str) -> dict | None:
     conn = get_db()
     row = conn.execute(
@@ -119,10 +144,16 @@ def list_sessions(
     offset: int = 0,
     mode: str | None = None,
     topic: str | None = None,
+    status: str = "completed",
 ) -> dict:
     conn = get_db()
 
-    where = ["review IS NOT NULL", "user_id = ?"]
+    if status == "in_progress":
+        where = ["review IS NULL", "user_id = ?"]
+    elif status == "all":
+        where = ["user_id = ?"]
+    else:
+        where = ["review IS NOT NULL", "user_id = ?"]
     params: list = [user_id]
     if mode:
         where.append("mode = ?")

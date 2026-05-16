@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
-function priorityVariant(priority: string): string {
+function priorityVariant(priority: string): "destructive" | "blue" | "secondary" {
   if (priority === "high") return "destructive";
   if (priority === "medium") return "blue";
   return "secondary";
@@ -94,10 +94,10 @@ export default function JobPrep() {
   };
 
   return (
-    <div className="flex-1 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
+    <div className="flex-1 overflow-y-auto min-h-0 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
       <div className="w-full max-w-[860px]">
         <div className="mb-8 animate-fade-in">
-          <h1 className="text-2xl md:text-[28px] font-display font-bold mb-2">JD 定向备面</h1>
+          <h1 className="text-2xl md:text-[28px] font-display font-bold mb-2 aurora-text">JD 定向备面</h1>
           <p className="text-sm text-dim">贴入岗位 JD，AI 先拆解岗位重点，再结合你的简历和历史画像生成定向追问。</p>
         </div>
 
@@ -158,17 +158,8 @@ export default function JobPrep() {
           </div>
         )}
 
-        <div className="flex flex-col md:flex-row gap-3 mb-8 animate-fade-in-up [animation-delay:0.05s]">
-          <Button variant="default" size="lg" className="md:flex-1" disabled={!canPreview} onClick={handlePreview}>
-            {previewing ? <><Loader2 size={18} className="animate-spin" /> {previewProgress || "分析中..."}</> : <><Sparkles size={18} /> 先分析这个岗位</>}
-          </Button>
-          <Button variant="outline" size="lg" className="md:w-[220px]" disabled={!canStart} onClick={handleStart}>
-            {starting ? <><Loader2 size={18} className="animate-spin" /> {startProgress || "初始化中..."}</> : "开始定向训练"}
-          </Button>
-        </div>
-
         {previewStale && (
-          <div className="mb-6 px-4 py-3 rounded-xl bg-warning/10 border border-warning/20 text-sm text-warning">
+          <div className="mb-4 px-4 py-3 rounded-xl bg-warning/10 border border-warning/20 text-sm text-warning animate-fade-in">
             你修改了 JD 或岗位信息，请重新分析后再开始训练。
           </div>
         )}
@@ -306,6 +297,59 @@ export default function JobPrep() {
 
         <div className="mt-6">
           <Button variant="ghost" onClick={() => navigate("/")}>返回首页</Button>
+        </div>
+
+        {/* Spacer for sticky action bar */}
+        <div className="h-24" />
+
+        {/* Sticky action bar — always-visible Preview / Start CTA */}
+        <div className="sticky bottom-0 z-20 -mx-4 md:-mx-6 px-4 md:px-6 pb-4 pt-3 mt-2 bg-gradient-to-t from-bg via-bg/95 to-bg/0 backdrop-blur-md">
+          <div className="max-w-[860px] mx-auto">
+            <div className="rounded-2xl glass-strong border border-border/50 p-3 shadow-[0_-4px_24px_rgba(0,0,0,0.08)]">
+              <div className="flex flex-col md:flex-row gap-2.5">
+                <Button
+                  variant="default"
+                  size="lg"
+                  className={cn("md:flex-1 transition-all", canPreview && !preview && "shadow-[0_0_18px_var(--glow-primary)]")}
+                  disabled={!canPreview}
+                  onClick={handlePreview}
+                >
+                  {previewing
+                    ? <><Loader2 size={18} className="animate-spin" /> {previewProgress || "分析中..."}</>
+                    : <><Sparkles size={18} /> {preview ? "重新分析岗位" : "先分析这个岗位"}</>}
+                </Button>
+                <Button
+                  variant={canStart ? "default" : "outline"}
+                  size="lg"
+                  className={cn(
+                    "md:w-[240px] transition-all",
+                    canStart && "shadow-[0_0_22px_var(--glow-accent)] cta-gradient"
+                  )}
+                  disabled={!canStart}
+                  onClick={handleStart}
+                >
+                  {starting
+                    ? <><Loader2 size={18} className="animate-spin" /> {startProgress || "初始化中..."}</>
+                    : "开始定向训练"}
+                </Button>
+              </div>
+              {/* Status hint line */}
+              <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-dim">
+                {!canPreview && payload.jd_text.length < 50 && (
+                  <span>📝 JD 至少 50 字才能开始分析（当前 {payload.jd_text.length}）</span>
+                )}
+                {canPreview && !preview && (
+                  <span className="text-primary">→ 表单已就绪，点击分析</span>
+                )}
+                {preview && !previewStale && (
+                  <span className="text-green">✓ 分析完成，可以开始训练</span>
+                )}
+                {previewStale && (
+                  <span className="text-warning">⚠ 表单已修改，请重新分析</span>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

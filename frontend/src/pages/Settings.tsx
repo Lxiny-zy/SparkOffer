@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   Bot, Database, Mic, Cloud, Eye, EyeOff, Loader2,
-  CheckCircle2, XCircle, Save, RotateCcw, User, Lock,
+  CheckCircle2, XCircle, Save, RotateCcw, User, Lock, Activity,
 } from "lucide-react";
-import { toast, Toaster } from "sonner";
+import { toast } from "sonner";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,9 +12,90 @@ import { Separator } from "@/components/ui/separator";
 import {
   getAIConfig, saveAIConfig, testQiniu,
   getMe, updateProfile, changePassword,
+  getChannelsHealth,
 } from "@/api/settings";
 import { useAuth } from "@/contexts/AuthContext";
 import ChannelManager from "@/components/ChannelManager";
+
+// ─────────────────────────────────────────────────────────────
+// 网关健康仪表盘 ── L1 hero
+// ─────────────────────────────────────────────────────────────
+interface SectionHealth { healthy: number; total: number; }
+interface HealthSummary { llm: SectionHealth; embedding: SectionHealth; asr: SectionHealth; }
+
+function HealthRing({ healthy, total, label, color, icon }: {
+  healthy: number; total: number; label: string; color: string; icon: React.ReactNode;
+}) {
+  const radius = 26;
+  const c = 2 * Math.PI * radius;
+  const pct = total > 0 ? healthy / total : 0;
+  const offset = c * (1 - pct);
+  const empty = total === 0;
+  return (
+    <div className="flex items-center gap-3 group">
+      <div className="relative w-[68px] h-[68px] shrink-0">
+        <svg className="w-full h-full -rotate-90" viewBox="0 0 64 64">
+          <circle cx="32" cy="32" r={radius} stroke="var(--border)" strokeWidth="5" fill="none" />
+          {!empty && (
+            <circle
+              cx="32" cy="32" r={radius}
+              stroke={color} strokeWidth="5" fill="none"
+              strokeDasharray={c}
+              strokeDashoffset={offset}
+              strokeLinecap="round"
+              className="transition-all duration-1000 ease-out"
+              style={{ filter: `drop-shadow(0 0 6px ${color}66)` }}
+            />
+          )}
+        </svg>
+        <div className="absolute inset-0 flex items-center justify-center text-[var(--color)]"
+             style={{ color }}>
+          <div className="transition-transform duration-300 group-hover:scale-110">{icon}</div>
+        </div>
+      </div>
+      <div className="min-w-0">
+        <div className="text-[11px] font-mono uppercase tracking-[0.18em] text-dim mb-0.5">{label}</div>
+        <div className="flex items-baseline gap-1">
+          <span className="text-2xl font-bold score-pop" style={{ color: empty ? "var(--muted-fg)" : color }}>
+            {empty ? "—" : healthy}
+          </span>
+          {!empty && <span className="text-sm text-dim">/ {total}</span>}
+        </div>
+        <div className="text-[11px] text-dim">{empty ? "未配置" : `${healthy === total ? "全部健康" : `${total - healthy} 个异常`}`}</div>
+      </div>
+    </div>
+  );
+}
+
+function HealthDashboard({ summary }: { summary: HealthSummary | null }) {
+  const s = summary || { llm: {healthy:0,total:0}, embedding: {healthy:0,total:0}, asr: {healthy:0,total:0} };
+  const allHealthy = s.llm.healthy === s.llm.total && s.embedding.healthy === s.embedding.total && s.asr.healthy === s.asr.total;
+  const anyConfigured = s.llm.total + s.embedding.total + s.asr.total > 0;
+  return (
+    <Card className="mb-6 stat-card-gradient relative overflow-hidden card-hover-lift animate-fade-in-up">
+      <div
+        className="absolute -top-16 -right-16 w-[260px] h-[260px] rounded-full pointer-events-none opacity-30 morph-blob"
+        style={{ background: `radial-gradient(circle, ${allHealthy && anyConfigured ? "var(--glow-accent)" : "rgba(253,203,110,0.4)"}, transparent 70%)` }}
+      />
+      <CardContent className="p-5 md:p-6 relative">
+        <div className="flex items-center gap-2 mb-4">
+          <Activity size={16} className="text-primary" />
+          <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-primary/70">Gateway Health</span>
+          {anyConfigured && (
+            <span className={`ml-auto text-[11px] font-medium px-2 py-0.5 rounded-full ${allHealthy ? "bg-green/15 text-green status-dot-bg" : "bg-orange/15 text-orange"}`}>
+              {allHealthy ? "● 全部健康" : "● 部分异常"}
+            </span>
+          )}
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5 md:gap-4">
+          <HealthRing healthy={s.llm.healthy} total={s.llm.total} label="LLM"       color="var(--aurora-1)" icon={<Bot size={20} />} />
+          <HealthRing healthy={s.embedding.healthy} total={s.embedding.total} label="Embedding" color="var(--tertiary)"  icon={<Database size={20} />} />
+          <HealthRing healthy={s.asr.healthy} total={s.asr.total} label="ASR"       color="var(--teal)"    icon={<Mic size={20} />} />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 const SOURCE_LABELS: Record<string, string> = { json: "JSON", env: "ENV", default: "Default" };
 const SOURCE_COLORS: Record<string, string> = {
@@ -92,9 +173,6 @@ function ConfigField({ label, source, children }: { label: string; source?: stri
   );
 }
 
-// Track which secret fields were edited (to avoid sending masked values back)
-const MASKED_MARKER = "****";
-
 function AccountSection() {
   const { user, updateUser } = useAuth();
   const [name, setName] = useState(user?.name || "");
@@ -137,7 +215,7 @@ function AccountSection() {
     }
     setSavingPassword(true);
     try {
-      await changePassword({ current_password: currentPassword, new_password: newPassword });
+      await changePassword({ old_password: currentPassword, new_password: newPassword });
       toast.success("Password changed successfully");
       setCurrentPassword("");
       setNewPassword("");
@@ -224,11 +302,34 @@ export default function Settings() {
   const [config, setConfig] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
 
   const [qiniu, setQiniu] = useState({ access_key: "", secret_key: "", bucket: "", domain: "" });
-  const [editedSecrets, setEditedSecrets] = useState<Set<string>>(new Set());
   const [testStatus, setTestStatus] = useState<Record<string, string>>({});
   const [testMsg, setTestMsg] = useState<Record<string, string>>({});
+
+  const loadHealth = useCallback(async () => {
+    try {
+      const data = await getChannelsHealth();
+      const summarize = (list: any[] | undefined): SectionHealth => {
+        const arr = Array.isArray(list) ? list : [];
+        const healthy = arr.filter((h) => h.healthy).length;
+        return { healthy, total: arr.length };
+      };
+      setHealthSummary({
+        llm: summarize(data.llm),
+        embedding: summarize(data.embedding),
+        asr: summarize(data.asr),
+      });
+    } catch { /* silent */ }
+  }, []);
+
+  useEffect(() => {
+    loadHealth();
+    const onFocus = () => loadHealth();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadHealth]);
 
   const loadConfig = useCallback(async () => {
     try {
@@ -242,7 +343,6 @@ export default function Settings() {
         return result;
       };
       setQiniu((prev) => ({ ...prev, ...extract("qiniu") }));
-      setEditedSecrets(new Set());
     } catch (e: any) {
       toast.error("Failed to load config: " + e.message);
     } finally {
@@ -254,7 +354,6 @@ export default function Settings() {
 
   const handleSecretChange = (section: string, key: string, value: string) => {
     if (section === "qiniu") setQiniu((prev) => ({ ...prev, [key]: value }));
-    setEditedSecrets((prev) => new Set(prev).add(`${section}.${key}`));
   };
 
   const handleChange = (section: string, key: string, value: any) => {
@@ -264,15 +363,14 @@ export default function Settings() {
   const handleSaveQiniu = async () => {
     setSaving(true);
     try {
-      const clean = (data: Record<string, any>, secrets: string[]) => {
+      const clean = (data: Record<string, any>) => {
         const result: Record<string, any> = {};
         for (const [key, value] of Object.entries(data)) {
-          if (secrets.includes(key) && !editedSecrets.has(`qiniu.${key}`)) continue;
           result[key] = value === "" || value === undefined ? "" : value;
         }
         return Object.keys(result).length ? result : undefined;
       };
-      await saveAIConfig({ qiniu: clean(qiniu, ["access_key", "secret_key"]) });
+      await saveAIConfig({ qiniu: clean(qiniu) });
       toast.success("Qiniu configuration saved");
       await loadConfig();
     } catch (e: any) {
@@ -303,9 +401,7 @@ export default function Settings() {
     }
   };
 
-  const getTestValue = (section: string, key: string, formValue: string) => {
-    if (editedSecrets.has(`${section}.${key}`)) return formValue;
-    if (formValue.includes(MASKED_MARKER)) return "";
+  const getTestValue = (_section: string, _key: string, formValue: string) => {
     return formValue;
   };
 
@@ -320,15 +416,15 @@ export default function Settings() {
   const getSource = (section: string, key: string) => config?.[section]?.[key]?.source;
 
   return (
-    <div className="max-w-3xl mx-auto p-4 md:p-8 space-y-6">
-      <Toaster position="top-right" richColors />
-
-      <div className="space-y-1">
-        <h1 className="text-2xl font-bold text-text">Settings</h1>
+    <div className="flex-1 overflow-y-auto min-h-0 w-full"><div className="max-w-3xl mx-auto p-4 md:p-8 space-y-6">
+      <div className="space-y-1 animate-fade-in">
+        <h1 className="text-2xl md:text-[28px] font-display font-bold aurora-text">设置</h1>
         <p className="text-dim text-sm">
           Manage your account and AI provider configuration.
         </p>
       </div>
+
+      <HealthDashboard summary={healthSummary} />
 
       <AccountSection />
 
@@ -458,6 +554,7 @@ export default function Settings() {
           {saving ? "Saving..." : "Save Qiniu"}
         </Button>
       </div>
+    </div>
     </div>
   );
 }

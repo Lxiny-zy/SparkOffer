@@ -10,7 +10,7 @@ from backend.indexer import load_topics, save_topics, _index_cache
 from backend.memory import get_profile, _load_profile, _save_profile
 from backend.storage.sessions import (
     get_session, list_sessions, list_sessions_by_topic,
-    delete_session, list_distinct_topics,
+    delete_session, list_distinct_topics, save_drill_progress,
 )
 from backend.auth import get_current_user
 
@@ -269,9 +269,57 @@ async def get_review(session_id: str, user_id: str = Depends(get_current_user)):
 async def get_history(
     limit: int = 20, offset: int = 0,
     mode: str = None, topic: str = None,
+    status: str = "completed",
     user_id: str = Depends(get_current_user),
 ):
-    return list_sessions(user_id=user_id, limit=limit, offset=offset, mode=mode, topic=topic)
+    return list_sessions(
+        user_id=user_id, limit=limit, offset=offset,
+        mode=mode, topic=topic, status=status,
+    )
+
+
+@router.get("/interview/session/{session_id}")
+async def get_interview_session(session_id: str, user_id: str = Depends(get_current_user)):
+    """Full session state for resuming an in-progress drill / job_prep."""
+    session = get_session(session_id, user_id=user_id)
+    if not session:
+        raise HTTPException(404, "Session not found.")
+    # Re-populate live_store if the backend has been restarted since session start
+    from backend.live_store import drill_sessions, job_prep_sessions, save_live
+    mode = session.get("mode")
+    if mode == "topic_drill" and session_id not in drill_sessions:
+        save_live(drill_sessions, session_id, "drill", user_id, {
+            "topic": session.get("topic"),
+            "questions": session.get("questions", []),
+            "user_id": user_id,
+        })
+    elif mode == "jd_prep" and session_id not in job_prep_sessions:
+        meta = session.get("meta", {}) or {}
+        save_live(job_prep_sessions, session_id, "job_prep", user_id, {
+            "questions": session.get("questions", []),
+            "preview": meta.get("preview", {}),
+            "meta": meta,
+            "user_id": user_id,
+        })
+    return session
+
+
+@router.post("/interview/session/{session_id}/progress")
+async def save_session_progress(
+    session_id: str, body: dict,
+    user_id: str = Depends(get_current_user),
+):
+    """Persist mid-drill progress (current_index, partial_answers, hints) to meta.progress."""
+    if get_session(session_id, user_id=user_id) is None:
+        raise HTTPException(404, "Session not found.")
+    save_drill_progress(
+        session_id,
+        int(body.get("current_index", 0)),
+        body.get("partial_answers", {}) or {},
+        body.get("hints", {}) or {},
+        user_id=user_id,
+    )
+    return {"ok": True}
 
 
 @router.delete("/interview/session/{session_id}")

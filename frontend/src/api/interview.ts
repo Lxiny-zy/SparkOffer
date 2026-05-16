@@ -209,12 +209,38 @@ export async function getReferenceAnswer(
   }, callbacks);
 }
 
-export async function getHistory(limit: number = 20, offset: number = 0, mode: string | null = null, topic: string | null = null): Promise<any> {
-  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+export async function getHistory(
+  limit: number = 20,
+  offset: number = 0,
+  mode: string | null = null,
+  topic: string | null = null,
+  status: "completed" | "in_progress" | "all" = "completed",
+): Promise<any> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset), status });
   if (mode) params.set("mode", mode);
   if (topic) params.set("topic", topic);
   const res = await authFetch(`${API_BASE}/interview/history?${params}`);
   return res.json();
+}
+
+export async function getInterviewSession(sessionId: string): Promise<any> {
+  const res = await authFetch(`${API_BASE}/interview/session/${sessionId}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export interface DrillProgressPayload {
+  current_index: number;
+  partial_answers: Record<string | number, string>;
+  hints: Record<string | number, any>;
+}
+
+export async function saveDrillProgress(sessionId: string, payload: DrillProgressPayload): Promise<void> {
+  await authFetch(`${API_BASE}/interview/session/${sessionId}/progress`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function deleteSession(sessionId: string): Promise<any> {
@@ -353,6 +379,23 @@ export async function updateHighFreq(topic: string, content: string): Promise<an
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export interface KnowledgeStats {
+  topic: string;
+  file_count: number;
+  last_any_update_at: number;
+  last_evolved_at: number;
+  last_evolved_file: string;
+  evolution_count: number;
+  last_high_freq_at: number;
+  high_freq_size: number;
+}
+
+export async function getKnowledgeStats(topic: string): Promise<KnowledgeStats> {
+  const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/stats`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

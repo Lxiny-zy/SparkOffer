@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useLocation, useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
+import { markdownComponents } from "../components/ChatBubble";
 import { Check, Minus, Star, Lightbulb, Eye, Loader2 } from "lucide-react";
 import ChatBubble from "../components/ChatBubble";
-import { sendMessage, endInterview, getReferenceAnswer } from "../api/interview";
+import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress } from "../api/interview";
 import useVoiceInput from "../hooks/useVoiceInput";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -25,8 +26,10 @@ export default function Interview() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const initData: any = location.state || {};
-  const isBatchMode = initData.mode === "topic_drill" || initData.mode === "jd_prep";
-  const isJobPrep = initData.mode === "jd_prep";
+  const [restoredMeta, setRestoredMeta] = useState<any>(null);
+  const effectiveInit: any = initData.mode ? initData : (restoredMeta || {});
+  const isBatchMode = effectiveInit.mode === "topic_drill" || effectiveInit.mode === "jd_prep";
+  const isJobPrep = effectiveInit.mode === "jd_prep";
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -36,7 +39,7 @@ export default function Interview() {
   const [reviewing, setReviewing] = useState(false);
   const [progress, setProgress] = useState(initData.progress || "");
 
-  const [questions] = useState<Question[]>(initData.questions || []);
+  const [questions, setQuestions] = useState<Question[]>(initData.questions || []);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [drillInput, setDrillInput] = useState("");
@@ -44,6 +47,10 @@ export default function Interview() {
   const [evalProgress, setEvalProgress] = useState("");
   const [hints, setHints] = useState<Record<number, HintState>>({});
   const [hintLoading, setHintLoading] = useState(false);
+  const [showEndConfirm, setShowEndConfirm] = useState(false);
+  const [restoring, setRestoring] = useState<boolean>(!initData.mode);
+  const restoredRef = useRef(false);
+  const saveTimerRef = useRef<number | null>(null);
 
   const drillVoice = useVoiceInput({
     onResult: useCallback((text: string) => setDrillInput((prev) => prev + text), []),
@@ -57,6 +64,85 @@ export default function Interview() {
       setMessages([{ role: "assistant", content: initData.message }]);
     }
   }, []);
+
+  // Restore from backend when location.state is empty (page refresh / direct visit)
+  useEffect(() => {
+    if (initData.mode || !sessionId || restoredRef.current) return;
+    restoredRef.current = true;
+    setRestoring(true);
+    getInterviewSession(sessionId)
+      .then((sess: any) => {
+        const meta = sess.meta || {};
+        const progress = meta.progress || {};
+        setRestoredMeta({
+          mode: sess.mode,
+          topic: sess.topic,
+          questions: sess.questions || [],
+          company: meta.company,
+          position: meta.position,
+          meta,
+        });
+        if (sess.questions?.length) setQuestions(sess.questions);
+        if (progress.partial_answers) {
+          const parsed: Record<number, string> = {};
+          for (const [k, v] of Object.entries(progress.partial_answers)) {
+            parsed[Number(k)] = v as string;
+          }
+          setAnswers(parsed);
+        }
+        if (typeof progress.current_index === "number") setCurrentIndex(progress.current_index);
+        if (progress.hints) {
+          const parsedH: Record<number, HintState> = {};
+          for (const [k, v] of Object.entries(progress.hints)) {
+            parsedH[Number(k)] = v as HintState;
+          }
+          setHints(parsedH);
+        }
+        // Restore last typed draft into drillInput
+        const restoredAnswers = progress.partial_answers || {};
+        const qList = sess.questions || [];
+        const idx = progress.current_index ?? 0;
+        const qid = qList[idx]?.id;
+        if (qid != null && restoredAnswers[String(qid)]) {
+          setDrillInput(restoredAnswers[String(qid)]);
+        }
+        // Resume mode: replay transcript
+        if (sess.mode === "resume" && Array.isArray(sess.transcript)) {
+          setMessages(sess.transcript.map((m: any) => ({ role: m.role, content: m.content })));
+        }
+      })
+      .catch((err: any) => {
+        console.error("恢复面试失败:", err);
+      })
+      .finally(() => setRestoring(false));
+  }, [sessionId, initData.mode]);
+
+  // Debounced persist of in-progress state
+  useEffect(() => {
+    if (!isBatchMode || !sessionId || restoring || finished) return;
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      saveDrillProgress(sessionId, {
+        current_index: currentIndex,
+        partial_answers: answers,
+        hints,
+      }).catch(() => {});
+    }, 400);
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    };
+  }, [currentIndex, answers, hints, sessionId, isBatchMode, restoring, finished]);
+
+  // Sync drillInput → answers so the draft survives refresh
+  useEffect(() => {
+    if (!isBatchMode || restoring) return;
+    const q = questions[currentIndex];
+    if (!q) return;
+    setAnswers((prev) => {
+      if (prev[q.id] === drillInput) return prev;
+      return { ...prev, [q.id]: drillInput };
+    });
+  }, [drillInput, currentIndex, questions, isBatchMode, restoring]);
 
   useEffect(() => {
     if (!isBatchMode) chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -104,8 +190,8 @@ export default function Interview() {
     }
     setHintLoading(true);
     try {
-      const topic = initData.topic || "";
-      const data = await getReferenceAnswer(topic, currentQ.question, sessionId, String(qid), false, nextMode);
+      const topic = effectiveInit.topic || "";
+      const data = await getReferenceAnswer(topic, currentQ.question, sessionId, Number(qid), false, nextMode);
       setHints((p) => ({
         ...p,
         [qid]: { ...p[qid], [nextMode]: data.reference_answer, stage: nextMode },
@@ -118,6 +204,7 @@ export default function Interview() {
   };
 
   const handleEndBatch = async () => {
+    setShowEndConfirm(false);
     setSubmitting(true);
     setEvalProgress("");
     try {
@@ -135,11 +222,11 @@ export default function Interview() {
           overall: data.overall,
           questions,
           answers: answerList,
-          mode: initData.mode,
-          topic: initData.topic,
-          company: initData.company,
-          position: initData.position,
-          meta: data.meta || initData.meta,
+          mode: effectiveInit.mode,
+          topic: effectiveInit.topic,
+          company: effectiveInit.company,
+          position: effectiveInit.position,
+          meta: data.meta || effectiveInit.meta,
         },
       });
     } catch (err: any) {
@@ -172,6 +259,7 @@ export default function Interview() {
   };
 
   const handleEndResume = async () => {
+    setShowEndConfirm(false);
     setReviewing(true);
     setEvalProgress("");
     try {
@@ -203,7 +291,7 @@ export default function Interview() {
 
   const modeBadge = isJobPrep
     ? { text: "JD 备面", variant: "blue" }
-    : initData.mode === "topic_drill"
+    : effectiveInit.mode === "topic_drill"
       ? { text: "专项训练", variant: "success" }
       : { text: "简历面试", variant: "default" };
 
@@ -227,27 +315,35 @@ export default function Interview() {
     </button>
   );
 
+  if (restoring) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <Loader2 className="w-6 h-6 animate-spin text-primary" />
+      </div>
+    );
+  }
+
   if (isBatchMode) {
     return (
       <div className="flex-1 flex flex-col h-full">
-        <div className="flex items-center justify-between px-4 py-3 md:px-6 border-b border-border bg-card">
-          <div className="flex items-center gap-2 md:gap-3 flex-wrap">
+        <div className="flex items-center justify-between px-3 py-2.5 md:px-6 md:py-3 border-b border-border/50 bg-card/70 backdrop-blur-sm flex-wrap gap-2">
+          <div className="flex items-center gap-2 md:gap-3 flex-wrap min-w-0">
             <Badge variant={modeBadge.variant as any}>{modeBadge.text}</Badge>
             {isJobPrep
               ? (
-                <span className="text-sm text-dim">
-                  {initData.company ? `${initData.company} · ` : ""}{initData.position || "目标岗位"}
+                <span className="text-sm text-dim truncate">
+                  {effectiveInit.company ? `${effectiveInit.company} · ` : ""}{effectiveInit.position || "目标岗位"}
                 </span>
               )
-              : initData.topic && <span className="text-sm text-dim">{initData.topic}</span>}
-            <span className="text-[13px] text-dim">{answeredCount}/{totalQ} 已答</span>
+              : effectiveInit.topic && <span className="text-sm text-dim truncate">{effectiveInit.topic}</span>}
+            <span className="text-[13px] text-dim whitespace-nowrap">{answeredCount}/{totalQ} 已答</span>
           </div>
-          <Button variant="destructive" size="sm" onClick={handleEndBatch} disabled={submitting}>
+          <Button variant="destructive" size="sm" onClick={() => finished ? handleEndBatch() : setShowEndConfirm(true)} disabled={submitting} className="shrink-0">
             {submitting ? "评估中..." : finished ? "查看评估" : isJobPrep ? "结束备面" : "结束训练"}
           </Button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 py-6 md:px-6 md:py-8 flex flex-col items-center gap-5">
+        <div className="flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-8 flex flex-col items-center gap-4 md:gap-5">
           {submitting ? (
             <div className="w-full max-w-[720px] flex flex-col items-center justify-center gap-4 py-15 text-dim text-base">
               <div className="flex gap-2">
@@ -286,49 +382,63 @@ export default function Interview() {
             </div>
           ) : currentQ ? (
             <>
-              <div className="w-full max-w-[720px] flex items-center gap-2">
+              <div className="w-full max-w-[720px] flex items-center gap-3">
                 <div className="flex-1 h-1 rounded-full bg-border overflow-hidden">
                   <div className="h-full rounded-full bg-primary transition-[width] duration-300 ease-in-out" style={{ width: `${(currentIndex / totalQ) * 100}%` }} />
                 </div>
-                <span className="text-[13px] text-dim whitespace-nowrap">{currentIndex + 1} / {totalQ}</span>
+                <span className="text-[12px] text-dim whitespace-nowrap font-mono">{currentIndex + 1} / {totalQ}</span>
               </div>
 
-              <Card className="w-full max-w-[720px] animate-fade-in">
-                <CardContent className="p-5 md:p-8">
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center gap-2">
-                      <Badge variant="outline" className="text-primary border-primary/30">
-                        Q{currentQ.id}
-                      </Badge>
+              {/* L1 — 题号 + 分类侧边栏 */}
+              <div className="w-full max-w-[720px] flex gap-3 md:gap-5 animate-fade-in">
+                <div className="hidden md:flex flex-col items-center gap-2 pt-1 shrink-0">
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-dim/60">Q{String(currentQ.id).padStart(2, "0")}</span>
+                  {currentQ.difficulty && (
+                    <div className="flex flex-col items-center gap-0.5">
+                      {Array.from({ length: 5 }, (_, i) => (
+                        <Star key={i} size={8} className={i < currentQ.difficulty! ? "text-primary fill-primary" : "text-border"} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* L2 — 题目主卡（站 C 位） */}
+                <Card className="flex-1 min-w-0 card-hover-lift question-hero">
+                  <CardContent className="p-5 md:p-8">
+                    {/* 顶栏：标签 */}
+                    <div className="flex items-center gap-2 flex-wrap mb-5 md:mb-6">
                       {currentQ.category && (
                         <Badge variant={isJobPrep ? "blue" as any : "secondary"}>{currentQ.category}</Badge>
                       )}
-                    </div>
-                    <div className="flex items-center gap-2">
                       {currentQ.focus_area && (
-                        <Badge variant="secondary">{currentQ.focus_area}</Badge>
+                        <Badge variant="outline" className="text-dim border-border/60">{currentQ.focus_area}</Badge>
                       )}
                       {currentQ.difficulty && (
-                        <span className="flex items-center gap-0.5">
+                        <div className="md:hidden flex items-center gap-0.5 ml-auto">
                           {Array.from({ length: 5 }, (_, i) => (
-                            <Star key={i} size={13} className={i < currentQ.difficulty! ? "text-primary fill-primary" : "text-dim"} />
+                            <Star key={i} size={11} className={i < currentQ.difficulty! ? "text-primary fill-primary" : "text-dim"} />
                           ))}
-                        </span>
+                        </div>
                       )}
                     </div>
-                  </div>
-                  <div className="text-base leading-[1.8]">
-                    <div className="md-content">
-                      <ReactMarkdown>{currentQ.question}</ReactMarkdown>
-                    </div>
-                  </div>
-                  {isJobPrep && currentQ.intent && (
-                    <div className="mt-4 rounded-xl bg-tertiary/8 border border-tertiary/15 px-4 py-3 text-sm leading-relaxed text-dim">
-                      <span className="text-tertiary font-medium">面试官在看什么：</span> {currentQ.intent}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
+
+                    {/* L3 — 题目正文（最大最醒目） */}
+                    <h2 className="text-lg md:text-[22px] font-bold leading-[1.65] text-text tracking-tight mb-4">
+                      <div className="md-content">
+                        <ReactMarkdown components={markdownComponents}>{currentQ.question}</ReactMarkdown>
+                      </div>
+                    </h2>
+
+                    {/* L4 — 面试官视角（仅 JD 模式） */}
+                    {isJobPrep && currentQ.intent && (
+                      <div className="rounded-xl bg-tertiary/8 border border-tertiary/15 px-4 py-3 text-sm leading-relaxed text-dim">
+                        <span className="text-tertiary font-semibold text-xs uppercase tracking-wider mr-1.5">面试官在看什么</span>
+                        {currentQ.intent}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
 
               {/* Hint / Reference Answer */}
               {(() => {
@@ -368,7 +478,7 @@ export default function Interview() {
                           )}
                         </div>
                         <div className="md-content">
-                          <ReactMarkdown>{content}</ReactMarkdown>
+                          <ReactMarkdown components={markdownComponents}>{content}</ReactMarkdown>
                         </div>
                       </div>
                     )}
@@ -380,7 +490,7 @@ export default function Interview() {
                 <div className="flex-1 relative">
                   <textarea
                     ref={textareaRef}
-                    className="w-full min-h-[80px] max-h-[240px] px-4 py-3 rounded-xl border border-border bg-input text-text resize-none text-sm leading-relaxed pl-12 placeholder:text-dim/50 focus-visible:outline-none focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary/30"
+                    className="w-full min-h-[100px] md:min-h-[80px] max-h-[240px] px-4 py-3 rounded-xl border border-border bg-input text-text resize-none text-[15px] md:text-sm leading-relaxed pl-12 placeholder:text-dim/50 focus-visible:outline-none focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary/30"
                     value={drillInput}
                     onChange={(e) => setDrillInput(e.target.value)}
                     onKeyDown={handleKeyDown}
@@ -393,11 +503,11 @@ export default function Interview() {
                     </div>
                   )}
                 </div>
-                <div className="flex items-center justify-end gap-3">
-                  <Button variant="ghost" size="sm" onClick={handleSkip}>
+                <div className="flex items-center justify-between sm:justify-end gap-3">
+                  <Button variant="ghost" size="sm" onClick={handleSkip} className="text-[13px]">
                     跳过
                   </Button>
-                  <Button variant="default" className="px-7 py-3.5 text-[15px]" disabled={!drillInput.trim()} onClick={handleDrillSubmit}>
+                  <Button variant="default" className="px-6 py-3 md:px-7 md:py-3.5 text-[14px] md:text-[15px] flex-1 sm:flex-none" disabled={!drillInput.trim()} onClick={handleDrillSubmit}>
                     {currentIndex < totalQ - 1 ? "下一题" : "完成"}
                   </Button>
                 </div>
@@ -419,10 +529,10 @@ export default function Interview() {
 
   return (
     <div className="flex-1 flex flex-col h-full">
-      <div className="flex items-center justify-between px-4 py-3 md:px-6 border-b border-border bg-card">
+      <div className="flex items-center justify-between px-4 py-3 md:px-6 border-b border-border/50 bg-card/70 backdrop-blur-sm">
         <div className="flex items-center gap-2 md:gap-3 flex-wrap">
           <Badge variant={modeBadge.variant as any}>{modeBadge.text}</Badge>
-          {initData.topic && <span className="text-sm text-dim">{initData.topic}</span>}
+          {effectiveInit.topic && <span className="text-sm text-dim">{effectiveInit.topic}</span>}
           {progress && (
             <span className="text-[13px] text-dim flex items-center gap-1.5">
               <span className="text-border">|</span>
@@ -430,7 +540,7 @@ export default function Interview() {
             </span>
           )}
         </div>
-        <Button variant="destructive" size="sm" onClick={handleEndResume} disabled={reviewing}>
+        <Button variant="destructive" size="sm" onClick={() => finished ? handleEndResume() : setShowEndConfirm(true)} disabled={reviewing}>
           {reviewing ? (evalProgress || "生成复盘中...") : finished ? "查看复盘" : "结束面试"}
         </Button>
       </div>
@@ -450,11 +560,11 @@ export default function Interview() {
         <div ref={chatEndRef} />
       </div>
 
-        <div className="px-4 pt-4 pb-5 md:px-6 md:pb-6 flex justify-center">
+        <div className="px-3 pt-3 pb-4 md:px-6 md:pt-4 md:pb-6 flex justify-center safe-area-bottom border-t border-border/50 backdrop-blur-sm bg-card/30">
           <div className="relative w-full max-w-3xl">
             <textarea
               ref={textareaRef}
-              className="w-full px-4 py-4 md:px-5 pl-12 min-h-[80px] max-h-[240px] rounded-2xl border border-border bg-card text-text resize-none text-[15px] leading-normal placeholder:text-dim/50 focus-visible:outline-none focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary/30"
+              className="w-full px-4 py-3.5 md:px-5 md:py-4 pl-12 min-h-[72px] md:min-h-[80px] max-h-[200px] md:max-h-[240px] rounded-2xl border border-border bg-bg/80 backdrop-blur-sm text-text resize-none text-[15px] leading-normal placeholder:text-dim/50 focus-visible:outline-none focus-visible:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/30 transition-all"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -463,12 +573,35 @@ export default function Interview() {
               rows={3}
             />
             {chatVoice.isSupported && !finished && (
-              <div className="absolute bottom-4 left-3">
+              <div className="absolute bottom-3.5 left-3">
                 <MicButton voice={chatVoice} />
               </div>
             )}
           </div>
         </div>
+    {/* End confirmation dialog */}
+    {showEndConfirm && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <Card className="w-full max-w-sm mx-4 animate-fade-in">
+          <CardContent className="p-5 text-center space-y-4">
+            <h3 className="text-lg font-semibold">
+              {isBatchMode ? (isJobPrep ? "确定结束备面？" : "确定结束训练？") : "确定结束面试？"}
+            </h3>
+            <p className="text-sm text-dim">
+              {isBatchMode
+                ? `已完成 ${Object.keys(answers).filter((k) => answers[Number(k)]).length}/${questions.length} 题，结束后将进入 AI 评估。`
+                : "结束后将生成面试复盘报告。"}
+            </p>
+            <div className="flex justify-center gap-3 pt-2">
+              <Button variant="outline" onClick={() => setShowEndConfirm(false)}>继续答题</Button>
+              <Button variant="destructive" onClick={isBatchMode ? handleEndBatch : handleEndResume}>
+                确认结束
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )}
     </div>
   );
 }

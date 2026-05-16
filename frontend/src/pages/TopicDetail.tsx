@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
+import { markdownComponents } from "../components/ChatBubble";
 import { ArrowLeft } from "lucide-react";
 import { getTopicIcon } from "../utils/topicIcons";
 import { getProfile, getTopics, getTopicRetrospective, getTopicHistory } from "../api/interview";
@@ -51,7 +52,7 @@ export default function TopicDetail() {
 
   if (loading) {
     return (
-      <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full space-y-4">
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full space-y-4">
         <Skeleton className="h-4 w-20" />
         <Skeleton className="h-10 w-64" />
         <Skeleton className="h-20" />
@@ -64,7 +65,7 @@ export default function TopicDetail() {
   const masteryScore = mastery.score ?? (mastery.level ? mastery.level * 20 : 0);
 
   return (
-    <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
+    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
       <button
         className="text-sm text-dim hover:text-text cursor-pointer mb-4 inline-flex items-center gap-1 transition-colors"
         onClick={() => navigate("/profile")}
@@ -72,9 +73,10 @@ export default function TopicDetail() {
         <ArrowLeft size={16} /> 返回画像
       </button>
 
-      <div className="flex items-center gap-3 md:gap-4 mb-8 animate-fade-in">
-        <div className="text-dim">{getTopicIcon(topicInfo?.icon, 36)}</div>
-        <div className="flex-1">
+      <div className="flex items-center gap-3 md:gap-4 mb-8 animate-fade-in relative">
+        <div className="absolute -top-6 -left-4 w-[160px] h-[120px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
+        <div className="text-dim relative">{getTopicIcon(topicInfo?.icon, 36)}</div>
+        <div className="flex-1 relative">
           <div className="text-2xl md:text-[28px] font-display font-bold">{topicInfo?.name || topic}</div>
           <div className="text-sm text-dim mt-1">
             {sessions.length} 次训练记录
@@ -115,7 +117,7 @@ export default function TopicDetail() {
           <Card>
             <CardContent className="p-5 md:p-6 leading-[1.8] text-[15px]">
               <div className="md-content">
-                <ReactMarkdown>{retrospective}</ReactMarkdown>
+                <ReactMarkdown components={markdownComponents}>{retrospective}</ReactMarkdown>
               </div>
             </CardContent>
           </Card>

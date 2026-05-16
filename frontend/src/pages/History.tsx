@@ -1,21 +1,16 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { X } from "lucide-react";
+import { X, Clock, MessageSquare } from "lucide-react";
+import { toast } from "sonner";
 import { getHistory, deleteSession, getInterviewTopics } from "../api/interview";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { getModeBadge, getScoreBand } from "@/lib/badge-presets";
 
 const PAGE_SIZE = 15;
-
-const MODE_BADGES: Record<string, { text: string; variant: string }> = {
-  resume: { text: "简历面试", variant: "default" },
-  topic_drill: { text: "专项训练", variant: "success" },
-  jd_prep: { text: "JD 备面", variant: "blue" },
-  recording: { text: "录音复盘", variant: "blue" },
-};
 
 const FILTER_OPTIONS = [
   { key: "all", label: "全部" },
@@ -33,6 +28,7 @@ export default function History() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [modeFilter, setModeFilter] = useState("all");
   const [topicFilter, setTopicFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState<"completed" | "in_progress">("completed");
   const [topics, setTopics] = useState<string[]>([]);
 
   useEffect(() => { getInterviewTopics().then(setTopics).catch(() => {}); }, []);
@@ -43,16 +39,16 @@ export default function History() {
     setter(true);
     const mode = modeFilter === "all" ? null : modeFilter;
     const topic = topicFilter === "all" ? null : topicFilter;
-    getHistory(PAGE_SIZE, offset, mode, topic)
+    getHistory(PAGE_SIZE, offset, mode, topic, statusFilter)
       .then((data: any) => {
         setSessions((prev) => (reset ? data.items : [...prev, ...data.items]));
         setTotal(data.total);
       })
       .catch(() => {})
       .finally(() => setter(false));
-  }, [modeFilter, topicFilter, sessions.length]);
+  }, [modeFilter, topicFilter, statusFilter, sessions.length]);
 
-  useEffect(() => { fetchSessions(true); }, [modeFilter, topicFilter]);
+  useEffect(() => { fetchSessions(true); }, [modeFilter, topicFilter, statusFilter]);
 
   const handleModeChange = (mode: string) => {
     if (mode === "resume") setTopicFilter("all");
@@ -66,14 +62,15 @@ export default function History() {
       await deleteSession(sessionId);
       setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
       setTotal((prev) => prev - 1);
+      toast.success("记录已删除");
     } catch (err: any) {
-      alert("删除失败: " + err.message);
+      toast.error("删除失败: " + err.message);
     }
   };
 
   if (loading) {
     return (
-      <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full space-y-4">
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full space-y-4">
         <Skeleton className="h-8 w-40" />
         <Skeleton className="h-10 w-full" />
         {[...Array(5)].map((_, i) => <Skeleton key={i} className="h-14 w-full" />)}
@@ -84,30 +81,60 @@ export default function History() {
   const hasFilters = modeFilter !== "all" || topicFilter !== "all";
 
   return (
-    <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
-      <div className="flex items-baseline justify-between mb-5 animate-fade-in">
-        <div className="text-2xl md:text-[28px] font-display font-bold">历史记录</div>
+    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
+      <div className="flex items-baseline justify-between mb-5 animate-fade-in relative">
+        <div className="absolute -top-6 -left-6 w-[180px] h-[120px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
+        <div className="text-2xl md:text-[28px] font-display font-bold aurora-text relative">历史记录</div>
         <div className="text-sm text-dim">共 {total} 条记录</div>
       </div>
 
+      <div className="flex items-center gap-1 mb-4 p-1 rounded-full bg-card/50 border border-border w-fit">
+        {([
+          { key: "completed", label: "已完成" },
+          { key: "in_progress", label: "进行中" },
+        ] as const).map((opt) => {
+          const active = statusFilter === opt.key;
+          return (
+            <button
+              key={opt.key}
+              onClick={() => setStatusFilter(opt.key)}
+              className={cn(
+                "px-4 py-1.5 rounded-full text-[12px] font-medium transition-all duration-200 cursor-pointer",
+                active
+                  ? "bg-primary text-primary-foreground shadow-[0_0_12px_var(--glow-primary)]"
+                  : "text-dim hover:text-text"
+              )}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+
       <div className="flex items-center gap-2 mb-5 flex-wrap animate-fade-in-up">
-        {FILTER_OPTIONS.map((m) => (
-          <Button
-            key={m.key}
-            variant={modeFilter === m.key ? "secondary" : "ghost"}
-            size="sm"
-            className={modeFilter === m.key ? "border-primary border text-text" : ""}
-            onClick={() => handleModeChange(m.key)}
-          >
-            {m.label}
-          </Button>
-        ))}
+        {FILTER_OPTIONS.map((m) => {
+          const active = modeFilter === m.key;
+          return (
+            <button
+              key={m.key}
+              onClick={() => handleModeChange(m.key)}
+              className={cn(
+                "px-3.5 py-1.5 rounded-full text-[12px] font-medium transition-all duration-200 border cursor-pointer",
+                active
+                  ? "bg-primary/15 text-primary border-primary/30 ring-2 ring-primary/15 shadow-[0_0_12px_var(--glow-primary)]"
+                  : "bg-card/50 text-dim border-border hover:text-text hover:border-primary/40 hover:bg-card hover:-translate-y-px"
+              )}
+            >
+              {m.label}
+            </button>
+          );
+        })}
 
         {modeFilter !== "resume" && modeFilter !== "jd_prep" && topics.length > 0 && (
           <>
             <div className="w-px h-5 bg-border mx-1" />
             <select
-              className="px-3.5 py-1.5 rounded-lg text-[13px] bg-input-bg text-text border border-border outline-none cursor-pointer"
+              className="px-3.5 py-1.5 rounded-full text-[12px] bg-card/50 text-text border border-border outline-none cursor-pointer hover:border-primary/40 transition-colors"
               value={topicFilter}
               onChange={(e) => setTopicFilter(e.target.value)}
             >
@@ -126,34 +153,61 @@ export default function History() {
         <>
           <div className="flex flex-col gap-2.5 stagger-children">
             {sessions.map((s) => {
-              const badge = MODE_BADGES[s.mode] || MODE_BADGES.resume;
-              const title = s.meta?.position || s.topic || "综合";
+              const badge = getModeBadge(s.mode);
+              const title = s.meta?.position || s.topic || "综合面试";
               const subtitle = s.meta?.company || "";
+              const timeRaw = s.created_at?.slice(0, 16)?.replace("T", " ") || "";
+              const qCount = s.question_count ?? s.questions?.length;
+              const shortId = s.session_id?.slice(-6);
 
               return (
                 <Card
                   key={s.session_id}
-                  className="cursor-pointer hover:border-primary/50 hover:-translate-y-px hover:shadow-sm transition-all"
-                  onClick={() => navigate(`/review/${s.session_id}`)}
+                  className="group cursor-pointer hover:border-primary/50 hover:-translate-y-px hover:shadow-[0_6px_20px_var(--glow-primary)] transition-all duration-300 overflow-hidden card-hover-lift"
+                  onClick={() => navigate(
+                    statusFilter === "in_progress" ? `/interview/${s.session_id}` : `/review/${s.session_id}`
+                  )}
                 >
-                  <CardContent className="p-3.5 md:p-4 flex items-center justify-between">
-                    <div className="flex items-center gap-2 md:gap-2.5 min-w-0 flex-1 flex-wrap">
-                      <Badge variant={badge.variant as any}>{badge.text}</Badge>
-                      <span className="text-sm text-text font-medium truncate">{title}</span>
-                      {subtitle && <span className="text-xs text-dim truncate">{subtitle}</span>}
-                      <span className="text-xs text-dim shrink-0 hidden md:inline">#{s.session_id}</span>
-                    </div>
-                    <div className="flex items-center gap-2 md:gap-3 shrink-0">
-                      <ScorePill score={s.avg_score} />
-                      <span className="text-[11px] text-dim whitespace-nowrap md:hidden">{s.created_at?.slice(5, 10)}</span>
-                      <span className="text-[13px] text-dim whitespace-nowrap hidden md:inline">{s.created_at?.slice(0, 10)}</span>
-                      <button
-                        className="p-1.5 rounded-md text-dim text-[15px] opacity-50 hover:text-red hover:opacity-100 transition-all cursor-pointer"
-                        title="删除"
-                        onClick={(e) => handleDelete(e, s.session_id)}
-                      >
-                        <X size={14} />
-                      </button>
+                  <CardContent className="p-3.5 md:p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        {/* L1 — Mode + Title + Subtitle */}
+                        <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                          <Badge variant={badge.variant as any} className="shrink-0 text-[10px]">{badge.text}</Badge>
+                          <span className="text-sm text-text font-medium truncate">{title}</span>
+                          {subtitle && <span className="text-xs text-dim truncate">· {subtitle}</span>}
+                        </div>
+                        {/* L2 — Meta */}
+                        <div className="flex items-center gap-2 text-[11px] text-dim">
+                          {timeRaw && (
+                            <span className="flex items-center gap-1 font-mono">
+                              <Clock size={11} className="opacity-60" /> {timeRaw}
+                            </span>
+                          )}
+                          {qCount != null && (
+                            <>
+                              <span className="opacity-40">·</span>
+                              <span className="flex items-center gap-1">
+                                <MessageSquare size={11} className="opacity-60" /> {qCount} 轮
+                              </span>
+                            </>
+                          )}
+                          {shortId && (
+                            <span className="font-mono text-dim/50 ml-auto">#{shortId}</span>
+                          )}
+                        </div>
+                      </div>
+                      {/* Right rail */}
+                      <div className="flex items-center gap-2 shrink-0">
+                        <ScorePill score={s.avg_score} />
+                        <button
+                          className="p-1.5 rounded-md text-dim opacity-0 group-hover:opacity-100 hover:text-red hover:bg-red/10 transition-all cursor-pointer"
+                          title="删除"
+                          onClick={(e) => handleDelete(e, s.session_id)}
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
@@ -181,13 +235,9 @@ function ScorePill({ score }: { score: number | null | undefined }) {
   if (score == null) {
     return <Badge variant="secondary" className="min-w-[52px] justify-center text-[13px]">--</Badge>;
   }
-  let bg: string, color: string;
-  if (score >= 8) { bg = "rgba(34,197,94,0.15)"; color = "var(--green)"; }
-  else if (score >= 6) { bg = "rgba(245,158,11,0.15)"; color = "var(--ai-glow)"; }
-  else if (score >= 4) { bg = "rgba(253,203,110,0.2)"; color = "#e2b93b"; }
-  else { bg = "rgba(239,68,68,0.15)"; color = "var(--red)"; }
+  const band = getScoreBand(score);
   return (
-    <Badge variant="outline" className="min-w-[52px] justify-center font-semibold text-[13px]" style={{ background: bg, borderColor: "transparent", color }}>
+    <Badge variant="outline" className="min-w-[52px] justify-center font-semibold text-[13px] transition-transform group-hover:scale-105" style={{ background: band.bg, borderColor: "transparent", color: band.color }}>
       {score}/10
     </Badge>
   );

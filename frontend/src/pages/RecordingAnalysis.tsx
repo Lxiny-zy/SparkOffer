@@ -70,10 +70,10 @@ export default function RecordingAnalysis() {
   const canAnalyze = transcript.trim() && !analyzing;
 
   return (
-    <div className="flex-1 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
+    <div className="flex-1 overflow-y-auto min-h-0 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
       <div className="w-full max-w-[700px]">
         <div className="mb-8 animate-fade-in">
-          <h1 className="text-2xl md:text-[28px] font-display font-bold mb-2">录音复盘</h1>
+          <h1 className="text-2xl md:text-[28px] font-display font-bold mb-2 aurora-text">录音复盘</h1>
           <p className="text-sm text-dim">上传面试录音或粘贴转写文字，AI 自动识别涉及领域并分析复盘</p>
         </div>
 

@@ -101,8 +101,8 @@ export default function Graph() {
   const topicEntries = Object.entries(topics);
 
   return (
-    <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
-      <h1 className="text-2xl md:text-[28px] font-display font-bold mb-6 animate-fade-in">题目图谱</h1>
+    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
+      <h1 className="text-2xl md:text-[28px] font-display font-bold mb-6 animate-fade-in aurora-text">题目图谱</h1>
 
       <div className="flex flex-wrap gap-2 mb-6 animate-fade-in-up">
         {topicEntries.map(([key, info]) => (
@@ -135,8 +135,28 @@ export default function Graph() {
           )}
 
           {selectedTopic && !loading && graphData && graphData.nodes.length === 0 && (
-            <div className="flex items-center justify-center h-[280px] text-dim text-sm">
-              该领域暂无已评分的训练记录
+            <div className="flex flex-col items-center justify-center h-[280px] text-dim text-sm gap-2 px-4 text-center">
+              <div>该领域暂无已评分的训练记录</div>
+              {graphData.meta && (
+                <div className="text-[12px] text-dim/80 leading-relaxed mt-1">
+                  {graphData.meta.sessions_total > 0 ? (
+                    <>
+                      共找到 <span className="text-text font-mono">{graphData.meta.sessions_total}</span> 条训练记录，其中
+                      <span className="text-text font-mono"> {graphData.meta.sessions_with_scores}</span> 条已评分。
+                      {graphData.meta.sessions_without_review > 0 && (
+                        <span className="text-warning"> · {graphData.meta.sessions_without_review} 条评分未完成（流式被中断？）</span>
+                      )}
+                      {graphData.meta.sessions_total > 0 && graphData.meta.sessions_with_scores === 0 && (
+                        <div className="mt-1 text-warning/80">
+                          所有记录都缺少 scores —— 提交答案后请等评估完成再离开页面。
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>未在该领域下找到任何训练记录，请确认 topic key 与训练时一致。</>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

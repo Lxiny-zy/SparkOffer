@@ -10,6 +10,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import ScoreTrendChart from "@/components/charts/ScoreTrendChart";
 import TopicRadarChart from "@/components/charts/TopicRadarChart";
 import SessionFrequencyChart from "@/components/charts/SessionFrequencyChart";
+import DimensionTrendChart from "@/components/charts/DimensionTrendChart";
+import LearningHeatmap from "@/components/charts/LearningHeatmap";
+import KnowledgeTreemap from "@/components/charts/KnowledgeTreemap";
 import type { Profile as ProfileType } from "../types/api";
 
 const MODE_META: Record<string, { color: string; label: string }> = {
@@ -60,7 +63,7 @@ export default function Profile() {
 
   if (loading) {
     return (
-      <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full space-y-4">
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full space-y-4">
         <Skeleton className="h-8 w-32" />
         <Skeleton className="h-4 w-64" />
         <div className="grid grid-cols-2 gap-3"><Skeleton className="h-24" /><Skeleton className="h-24" /></div>
@@ -70,15 +73,15 @@ export default function Profile() {
   }
 
   const hasData = profile && (
-    profile.stats?.total_sessions > 0 ||
-    profile.stats?.total_answers > 0 ||
+    (profile.stats?.total_sessions ?? 0) > 0 ||
+    (profile.stats?.total_answers ?? 0) > 0 ||
     (profile.weak_points || []).length > 0 ||
     (profile.strong_points || []).length > 0
   );
 
   if (!hasData) {
     return (
-      <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
         <div className="text-2xl md:text-[28px] font-display font-bold mb-2 animate-fade-in">个人画像</div>
         <div className="text-center py-15 text-dim animate-fade-in-up">
           <p>还没有面试数据</p>
@@ -91,14 +94,15 @@ export default function Profile() {
     );
   }
 
-  const stats = profile!.stats || {};
+  const stats = profile!.stats ?? ({} as NonNullable<typeof profile.stats>);
   const weakActive = (profile!.weak_points || []).filter((w) => !w.improved);
   const weakImproved = (profile!.weak_points || []).filter((w) => w.improved);
 
   return (
-    <div className="flex-1 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
-      <div className="flex items-center justify-between mb-2 animate-fade-in">
-        <div className="text-2xl md:text-[28px] font-display font-bold">个人画像</div>
+    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
+      <div className="flex items-center justify-between mb-2 animate-fade-in relative">
+        <div className="absolute -top-8 -left-6 w-[200px] h-[140px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
+        <div className="text-2xl md:text-[32px] font-display font-bold aurora-text relative">成长报告</div>
         <Button
           variant="outline"
           size="sm"
@@ -132,60 +136,60 @@ export default function Profile() {
           练习统计
         </div>
         <div className="grid grid-cols-2 gap-3 mb-3">
-          <Card className="hover:shadow-sm transition-shadow">
+          <Card className="stat-card-gradient card-hover-lift">
             <CardContent className="p-4 text-center">
-              <div className="text-[28px] font-bold text-primary">{stats.total_sessions}</div>
+              <div className="text-[28px] font-bold text-primary score-emphasis">{stats.total_sessions}</div>
               <div className="text-xs text-dim mt-1">总练习次数</div>
             </CardContent>
           </Card>
-          <Card className="hover:shadow-sm transition-shadow">
+          <Card className="stat-card-gradient card-hover-lift">
             <CardContent className="p-4 text-center">
-              <div className="text-[32px] font-bold text-green">{stats.avg_score || "-"}</div>
+              <div className="text-[32px] font-bold text-green score-emphasis">{stats.avg_score || "-"}</div>
               <div className="text-xs text-dim mt-1">综合平均分</div>
             </CardContent>
           </Card>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <Card className="border-l-[3px] border-l-primary">
+          <Card className="border-l-[3px] border-l-primary card-hover-lift">
             <CardContent className="p-3.5">
               <div className="text-[13px] font-semibold text-primary mb-2.5">简历面试</div>
               <div className="flex gap-3">
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-primary">{stats.resume_sessions || 0}</div>
+                  <div className="text-[22px] font-bold text-primary score-emphasis">{stats.resume_sessions || 0}</div>
                   <div className="text-[11px] text-dim mt-0.5">次数</div>
                 </div>
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-primary">{stats.resume_avg_score ?? "-"}</div>
+                  <div className="text-[22px] font-bold text-primary score-emphasis" style={{animationDelay: "0.1s"}}>{stats.resume_avg_score ?? "-"}</div>
                   <div className="text-[11px] text-dim mt-0.5">平均分</div>
                 </div>
               </div>
             </CardContent>
           </Card>
-          <Card className="border-l-[3px] border-l-green">
+          <Card className="border-l-[3px] border-l-green card-hover-lift">
             <CardContent className="p-3.5">
               <div className="text-[13px] font-semibold text-green mb-2.5">专项训练</div>
               <div className="flex gap-3">
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-green">{stats.drill_sessions || 0}</div>
+                  <div className="text-[22px] font-bold text-green score-emphasis">{stats.drill_sessions || 0}</div>
                   <div className="text-[11px] text-dim mt-0.5">次数</div>
                 </div>
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-green">{stats.drill_avg_score ?? "-"}</div>
+                  <div className="text-[22px] font-bold text-green score-emphasis" style={{animationDelay: "0.1s"}}>{stats.drill_avg_score ?? "-"}</div>
                   <div className="text-[11px] text-dim mt-0.5">平均分</div>
                 </div>
               </div>
             </CardContent>
           </Card>
-          <Card className="border-l-[3px] border-l-tertiary">
+          <Card className="border-l-[3px] border-l-tertiary card-hover-lift">
             <CardContent className="p-3.5">
               <div className="text-[13px] font-semibold text-tertiary mb-2.5">JD 备面</div>
               <div className="flex gap-3">
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-tertiary">{stats.job_prep_sessions || 0}</div>
+                  <div className="text-[22px] font-bold text-tertiary score-emphasis">{stats.job_prep_sessions || 0}</div>
                   <div className="text-[11px] text-dim mt-0.5">次数</div>
                 </div>
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-tertiary">{stats.job_prep_avg_score ?? "-"}</div>
+                  <div className="text-[22px] font-bold text-tertiary score-emphasis" style={{animationDelay: "0.1s"}}>{stats.job_prep_avg_score ?? "-"}</div>
                   <div className="text-[11px] text-dim mt-0.5">平均分</div>
                 </div>
               </div>
@@ -200,9 +204,23 @@ export default function Profile() {
             <TrendingUp size={18} className="text-primary" />
             成长趋势
           </div>
-          <Card>
+          <Card variant="tech">
             <CardContent className="p-4 md:p-6">
               <ScoreTrendChart history={stats.score_history} />
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {(stats.score_history || []).some((h: any) => h.dimension_scores) && (
+        <div className="mb-7 animate-fade-in-up [animation-delay:0.11s]">
+          <div className="flex items-center gap-2 text-base font-semibold mb-3">
+            <BarChart3 size={18} className="text-primary" />
+            维度评分趋势
+          </div>
+          <Card variant="tech">
+            <CardContent className="p-4 md:p-6">
+              <DimensionTrendChart history={stats.score_history} />
             </CardContent>
           </Card>
         </div>
@@ -212,11 +230,11 @@ export default function Profile() {
         <div className="mb-7 animate-fade-in-up [animation-delay:0.12s]">
           <div className="flex items-center gap-2 text-base font-semibold mb-3">
             <BarChart3 size={18} className="text-primary" />
-            训练频率
+            学习热力图
           </div>
-          <Card>
+          <Card variant="tech">
             <CardContent className="p-4 md:p-6">
-              <SessionFrequencyChart history={stats.score_history} />
+              <LearningHeatmap history={stats.score_history} />
             </CardContent>
           </Card>
         </div>
@@ -228,30 +246,44 @@ export default function Profile() {
             <Target size={18} className="text-primary" />
             领域掌握度
           </div>
-          <Card className="mb-4">
+          <Card variant="tech" className="mb-4">
             <CardContent className="p-4 md:p-6">
-              <TopicRadarChart mastery={profile!.topic_mastery} />
+              <TopicRadarChart mastery={profile!.topic_mastery} previousMastery={profile!.previous_topic_mastery} />
             </CardContent>
           </Card>
+          {Object.keys(profile!.topic_mastery || {}).length >= 2 && (
+            <Card variant="tech" className="mb-4">
+              <CardContent className="p-4 md:p-6">
+                <div className="text-sm font-medium text-dim mb-2">知识掌握全景</div>
+                <KnowledgeTreemap mastery={profile!.topic_mastery} />
+              </CardContent>
+            </Card>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-2.5 stagger-children">
             {Object.entries(profile!.topic_mastery!).map(([topic, data]) => (
               <Card
                 key={topic}
-                className="cursor-pointer hover:border-primary/50 hover:-translate-y-px hover:shadow-sm transition-all"
+                className="cursor-pointer card-hover-lift card-spotlight transition-all"
                 onClick={() => navigate(`/profile/topic/${topic}`)}
               >
                 <CardContent className="p-4">
                   <div className="flex justify-between items-center mb-1.5">
                     <span className="text-sm font-medium">{topic}</span>
                     <span className="text-xs text-dim flex items-center gap-0.5">
-                      {data.score ?? (data.level ? data.level * 20 : 0)}/100 <ChevronRight size={14} />
+                      <span className="font-semibold text-primary">{data.score ?? (data.level ? data.level * 20 : 0)}</span>/100 <ChevronRight size={14} />
                     </span>
                   </div>
-                  <div className="h-1.5 rounded-full bg-border overflow-hidden">
+                  <div className="h-2 rounded-full bg-border/50 overflow-hidden relative">
                     <div
-                      className="h-full rounded-full bg-gradient-to-r from-primary to-primary-hover transition-[width] duration-500 ease-in-out"
-                      style={{ width: `${data.score ?? (data.level ? data.level * 20 : 0)}%` }}
-                    />
+                      className="h-full rounded-full transition-[width] duration-700 ease-[cubic-bezier(0.2,0,0,1)] relative overflow-hidden"
+                      style={{
+                        width: `${data.score ?? (data.level ? data.level * 20 : 0)}%`,
+                        background: "linear-gradient(90deg, var(--aurora-1), var(--aurora-2))",
+                        boxShadow: "0 0 8px var(--tech-glow)",
+                      }}
+                    >
+                      <div className="absolute inset-0 opacity-40" style={{ background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)", backgroundSize: "200% 100%", animation: "text-shimmer 3s ease-in-out infinite" }} />
+                    </div>
                   </div>
                   {data.notes && <div className="text-xs text-dim mt-1.5">{data.notes}</div>}
                 </CardContent>
@@ -300,14 +332,14 @@ export default function Profile() {
       {weakImproved.length > 0 && (
         <div className="mb-7 animate-fade-in-up [animation-delay:0.25s]">
           <div className="flex items-center gap-2 text-base font-semibold mb-3">
-            已改善 <Badge variant="success" as any>{weakImproved.length}</Badge>
+            已改善 <Badge variant="success">{weakImproved.length}</Badge>
           </div>
           <div className="flex flex-col gap-2">
             {weakImproved.map((w, i) => (
               <Card key={i} className="opacity-70">
                 <CardContent className="p-3.5 flex justify-between items-center">
                   <span className="flex-1 line-through text-sm">{w.point}</span>
-                  <Badge variant="success" as any>已改善</Badge>
+                  <Badge variant="success">已改善</Badge>
                 </CardContent>
               </Card>
             ))}

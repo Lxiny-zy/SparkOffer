@@ -1,10 +1,13 @@
-import { lazy, Suspense, ReactNode } from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { Loader2 } from "lucide-react";
+import { lazy, Suspense, ReactNode, useState, useEffect, useCallback } from "react";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
+import { Loader2, AlertTriangle } from "lucide-react";
+import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { onSessionExpired, resetSessionExpired } from "./api/client";
 import Sidebar from "./components/Sidebar";
 import FloatingAssistant from "./components/FloatingAssistant";
 import ErrorBoundary from "./components/ErrorBoundary";
+import GeometricNetwork from "./components/GeometricNetwork";
 import Landing from "./pages/Landing";
 import Login from "./pages/Login";
 import Home from "./pages/Home";
@@ -26,16 +29,27 @@ const Settings = lazy(() => import("./pages/Settings"));
 const QAArena = lazy(() => import("./pages/QAArena"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
+function AppBootScreen() {
+  return (
+    <div className="min-h-screen bg-bg flex items-center justify-center">
+      <div className="flex flex-col items-center gap-3 text-muted-foreground">
+        <Loader2 className="w-6 h-6 animate-spin text-primary" />
+        <p className="text-sm">正在恢复会话...</p>
+      </div>
+    </div>
+  );
+}
+
 function ProtectedRoute({ children }: { children: ReactNode }) {
   const { token, loading } = useAuth();
-  if (loading) return null;
+  if (loading) return <AppBootScreen />;
   if (!token) return <Navigate to="/" replace />;
   return children;
 }
 
 function PublicHome() {
   const { token, loading } = useAuth();
-  if (loading) return null;
+  if (loading) return <AppBootScreen />;
   if (token)
     return (
       <AppShell>
@@ -47,7 +61,7 @@ function PublicHome() {
 
 function AuthPage() {
   const { token, loading } = useAuth();
-  if (loading) return null;
+  if (loading) return <AppBootScreen />;
   if (token) return <Navigate to="/" replace />;
   return <Login />;
 }
@@ -56,14 +70,27 @@ function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="flex flex-col md:flex-row h-screen bg-bg">
       <Sidebar />
-      <main className="flex-1 overflow-y-auto flex flex-col md:m-3 md:ml-0 md:rounded-3xl md:bg-surface">
-        <Suspense fallback={
-          <div className="flex-1 flex items-center justify-center">
-            <Loader2 className="w-6 h-6 animate-spin text-primary" />
+      <main className="flex-1 overflow-hidden flex flex-col md:m-3 md:ml-0 md:rounded-3xl md:bg-surface relative">
+        {/* Sticky wrapper (height 0, doesn't push content) so the absolute decor layer stays glued to viewport while content scrolls */}
+        <div className="hidden md:block sticky top-0 left-0 h-0 w-full z-0 pointer-events-none">
+          <div className="absolute top-0 left-0 right-0 h-screen overflow-hidden md:rounded-3xl">
+            {/* Subtle grid floor */}
+            <div className="absolute inset-0 bg-grid opacity-25" />
+            {/* Geometric network — nodes drift and connect by distance */}
+            <GeometricNetwork />
+            {/* Noise overlay for grain */}
+            <div className="absolute inset-0 bg-noise" />
           </div>
-        }>
-          {children}
-        </Suspense>
+        </div>
+        <div className="relative z-[1] flex-1 flex flex-col min-h-0">
+          <Suspense fallback={
+            <div className="flex-1 flex items-center justify-center">
+              <Loader2 className="w-6 h-6 animate-spin text-primary" />
+            </div>
+          }>
+            {children}
+          </Suspense>
+        </div>
       </main>
       <FloatingAssistant />
     </div>
@@ -105,12 +132,51 @@ function AppRoutes() {
   );
 }
 
+function SessionExpiredModal() {
+  const [show, setShow] = useState(false);
+  const { logout } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    return onSessionExpired(() => setShow(true));
+  }, []);
+
+  const handleReLogin = useCallback(() => {
+    setShow(false);
+    resetSessionExpired();
+    logout();
+    navigate("/login", { replace: true });
+  }, [logout, navigate]);
+
+  if (!show) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+      <div className="bg-card border border-border rounded-2xl p-6 max-w-sm mx-4 shadow-2xl animate-fade-in text-center space-y-4">
+        <div className="w-12 h-12 rounded-full bg-orange/10 flex items-center justify-center mx-auto">
+          <AlertTriangle className="w-6 h-6 text-orange" />
+        </div>
+        <h3 className="text-lg font-semibold">登录已过期</h3>
+        <p className="text-sm text-dim">你的登录状态已失效，请重新登录。当前页面内容不会丢失。</p>
+        <button
+          onClick={handleReLogin}
+          className="w-full px-4 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+        >
+          重新登录
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
         <ErrorBoundary>
+          <SessionExpiredModal />
           <AppRoutes />
+          <Toaster position="top-right" richColors closeButton expand={false} duration={3500} />
         </ErrorBoundary>
       </BrowserRouter>
     </AuthProvider>
