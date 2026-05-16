@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, KeyboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
+import { markdownComponents, remarkPlugins } from "./ChatBubble";
 import { X, Send, Trash2 } from "lucide-react";
 import { streamAssistantChat, fetchAssistantHistory, clearAssistantHistory, fetchWelcomeMessage } from "../api/assistant";
 import { startInterview } from "../api/interview";
@@ -20,6 +21,43 @@ interface AssistantAction {
   [key: string]: any;
 }
 
+const SNAP_THRESHOLD = 40;
+const DRAG_THRESHOLD = 5; // px movement before treating gesture as a drag (otherwise click)
+const BTN_SIZE = 64;
+const STORAGE_KEY = "sparkoffer.assistant.position";
+
+interface SavedPosition {
+  x: number;
+  y: number;
+  peeking: boolean;
+}
+
+function loadSavedPosition(): SavedPosition {
+  if (typeof window === "undefined") return { x: 20, y: 0, peeking: false };
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { x: 20, y: 0, peeking: false };
+    const p = JSON.parse(raw);
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    return {
+      x: typeof p.x === "number" ? Math.max(0, Math.min(vw - BTN_SIZE, p.x)) : 20,
+      y: typeof p.y === "number" ? Math.max(0, Math.min(vh - BTN_SIZE - 60, p.y)) : 0,
+      peeking: !!p.peeking,
+    };
+  } catch {
+    return { x: 20, y: 0, peeking: false };
+  }
+}
+
+function savePosition(pos: SavedPosition) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(pos));
+  } catch {
+    // ignore storage failures (quota, private mode, etc.)
+  }
+}
+
 export default function FloatingAssistant() {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -28,9 +66,37 @@ export default function FloatingAssistant() {
   const [isHovered, setIsHovered] = useState(false);
   const [isIdle, setIsIdle] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+
+  // --- Drag & peek state ---
+  const [isMobile, setIsMobile] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isPeekHovered, setIsPeekHovered] = useState(false);
+  // Hydrate from localStorage on first render so refresh keeps user's chosen spot.
+  const [isPeeking, setIsPeeking] = useState(() => loadSavedPosition().peeking);
+  const [btnPos, setBtnPos] = useState(() => {
+    const p = loadSavedPosition();
+    return { x: p.x, y: p.y };
+  });
+  // Refs for drag-vs-click discrimination: dragStartRef holds the pointer-down anchor,
+  // didDragRef flips true once the pointer crosses DRAG_THRESHOLD so we can swallow the
+  // synthetic onClick that follows a real drag.
+  const dragStartRef = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+  const didDragRef = useRef(false);
+  const hasOpenedOnceRef = useRef(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const rafRef = useRef<number | null>(null);
+  const isStreamingRef = useRef(false);
   const navigate = useNavigate();
+
+  // Detect mobile
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 640);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
 
   // Load chat history & welcome message on first open
   useEffect(() => {
@@ -42,7 +108,6 @@ export default function FloatingAssistant() {
         if (history.length > 0) {
           setMessages(history.map((m: any) => ({ role: m.role, content: m.content })));
         } else {
-          // No history — try welcome message
           const welcome = await fetchWelcomeMessage();
           if (welcome) {
             setMessages([{ role: "assistant", content: welcome }]);
@@ -59,16 +124,123 @@ export default function FloatingAssistant() {
   }, [isOpen]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    if (!scrollRef.current) return;
+    // Skip smooth-scroll during streaming — flushUpdate handles instant scroll
+    if (isStreamingRef.current) return;
+    scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, isStreaming]);
 
-  // Idle detection: flip to idle after 30s of no streaming
+  // Idle detection
   useEffect(() => {
     setIsIdle(false);
     if (!isOpen || isStreaming || messages.length === 0) return;
     const timer = setTimeout(() => setIsIdle(true), 30000);
     return () => clearTimeout(timer);
   }, [isStreaming, messages.length, isOpen]);
+
+  // Reset peek state when the user closes an opened chat — but preserve the
+  // restored peek state on initial mount (otherwise refreshing would always
+  // drop the user back to the floating bubble).
+  useEffect(() => {
+    if (isOpen) {
+      hasOpenedOnceRef.current = true;
+    } else if (hasOpenedOnceRef.current) {
+      setIsPeeking(false);
+    }
+  }, [isOpen]);
+
+  // Persist position + peek state so refresh keeps the user's setup.
+  useEffect(() => {
+    if (isDragging) return; // avoid spamming storage during a drag — save on release
+    savePosition({ x: btnPos.x, y: btnPos.y, peeking: isPeeking });
+  }, [btnPos, isPeeking, isDragging]);
+
+  // Re-clamp position when the window shrinks so the button never escapes the viewport.
+  useEffect(() => {
+    const handle = () => {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      setBtnPos((prev) => ({
+        x: Math.max(0, Math.min(vw - BTN_SIZE, prev.x)),
+        y: Math.max(0, Math.min(vh - BTN_SIZE - 60, prev.y)),
+      }));
+    };
+    window.addEventListener("resize", handle);
+    return () => window.removeEventListener("resize", handle);
+  }, []);
+
+  // --- Drag handlers ---
+  // Pattern: pointer-down records the start point; pointer-move only enters
+  // drag mode once movement exceeds DRAG_THRESHOLD (so a quick tap still opens
+  // chat). On pointer-up we either snap-to-edge (if dragged) or let the
+  // synthetic click event fire onClick → open chat.
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    dragStartRef.current = { x: btnPos.x, y: btnPos.y, px: e.clientX, py: e.clientY };
+    didDragRef.current = false;
+  }, [btnPos]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    const start = dragStartRef.current;
+    if (!start) return;
+    const dx = e.clientX - start.px;
+    const dy = e.clientY - start.py;
+
+    if (!didDragRef.current) {
+      // Still below threshold → treat as potential click
+      if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+      didDragRef.current = true;
+      setIsDragging(true);
+    }
+    e.preventDefault();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const nextX = start.x - dx; // dx>0 (pointer right) → reduce right offset → button moves right
+    const nextY = start.y - dy;
+    setBtnPos({
+      x: Math.max(0, Math.min(vw - BTN_SIZE, nextX)),
+      y: Math.max(0, Math.min(vh - BTN_SIZE - 60, nextY)),
+    });
+  }, []);
+
+  const handlePointerUp = useCallback((e: React.PointerEvent) => {
+    const start = dragStartRef.current;
+    if (!start) return;
+    (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
+    dragStartRef.current = null;
+    const wasDrag = didDragRef.current;
+    setIsDragging(false);
+
+    if (wasDrag) {
+      // Snap to right edge → peek mode. Use functional update so we read latest pos.
+      setBtnPos((prev) => {
+        if (prev.x < SNAP_THRESHOLD) {
+          setIsPeeking(true);
+          return { ...prev, x: 0 };
+        }
+        return prev;
+      });
+    }
+    // didDragRef is reset in handleButtonClick (which fires right after pointer-up)
+  }, []);
+
+  const handleButtonClick = useCallback(() => {
+    if (didDragRef.current) {
+      didDragRef.current = false; // clear for next gesture
+      return; // swallow click that was actually the end of a drag
+    }
+    setIsOpen(true);
+  }, []);
+
+  const handlePeekClick = useCallback(() => {
+    setIsPeeking(false);
+    setIsOpen(true);
+  }, []);
+
+  // Mobile chat panel: push the interview input area down
+  const chatPanelClass = isMobile
+    ? "bottom-0 right-0 left-0 sm:left-auto w-full sm:w-[400px] sm:max-w-[calc(100vw-2rem)] h-[100dvh] sm:h-[600px] sm:max-h-[calc(100vh-4rem)] sm:bottom-6 sm:right-6 rounded-t-3xl sm:rounded-3xl"
+    : "bottom-6 right-6 w-[400px] max-w-[calc(100vw-2rem)] h-[600px] max-h-[calc(100vh-4rem)] rounded-3xl";
 
   const handleClearHistory = useCallback(async () => {
     try {
@@ -106,19 +278,33 @@ export default function FloatingAssistant() {
     setMessages(newMessages);
     setInput("");
     setIsStreaming(true);
+    isStreamingRef.current = true;
 
     let assistantContent = "";
+    let pendingUpdate = false;
     setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+    const flushUpdate = () => {
+      rafRef.current = null;
+      pendingUpdate = false;
+      setMessages((prev) => {
+        const updated = [...prev];
+        updated[updated.length - 1] = { role: "assistant", content: assistantContent };
+        return updated;
+      });
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
+    };
 
     try {
       for await (const event of streamAssistantChat(text)) {
         if (event.type === "token") {
           assistantContent += event.content;
-          setMessages((prev) => {
-            const updated = [...prev];
-            updated[updated.length - 1] = { role: "assistant", content: assistantContent };
-            return updated;
-          });
+          if (!pendingUpdate) {
+            pendingUpdate = true;
+            rafRef.current = requestAnimationFrame(flushUpdate);
+          }
         } else if (event.type === "action") {
           handleAction(event as any);
         } else if (event.type === "done") {
@@ -127,12 +313,17 @@ export default function FloatingAssistant() {
       }
     } catch (err: any) {
       assistantContent = `出错了: ${err.message}`;
+    } finally {
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
       setMessages((prev) => {
         const updated = [...prev];
         updated[updated.length - 1] = { role: "assistant", content: assistantContent };
         return updated;
       });
-    } finally {
+      isStreamingRef.current = false;
       setIsStreaming(false);
     }
   };
@@ -146,38 +337,21 @@ export default function FloatingAssistant() {
 
   return (
     <>
-      {/* Floating Cat Bubble */}
-      {!isOpen && (
-        <button
-          onClick={() => setIsOpen(true)}
-          onMouseEnter={() => setIsHovered(true)}
-          onMouseLeave={() => setIsHovered(false)}
-          className="fixed bottom-5 right-5 z-50 w-16 h-16 rounded-full shadow-lg hover:shadow-xl transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] active:scale-[0.9] flex items-center justify-center group bg-card border border-border/50 hover:border-primary/30"
-          title="找小鱼学姐聊聊～"
-        >
-          <CatAvatar
-            size={52}
-            mood={isHovered ? "curious" : "idle"}
-            className={cn(
-              "transition-transform duration-300",
-              isHovered ? "scale-110 -translate-y-0.5" : ""
-            )}
-          />
-          {/* Notification dot */}
-          <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-tertiary border-2 border-card animate-pulse-dot" />
-        </button>
-      )}
-
       {/* Chat Panel */}
       {isOpen && (
-        <div className="fixed bottom-0 right-0 sm:bottom-6 sm:right-6 z-50 w-full sm:w-[400px] sm:max-w-[calc(100vw-2rem)] h-[calc(100vh-3rem)] sm:h-[600px] sm:max-h-[calc(100vh-4rem)] rounded-t-3xl sm:rounded-3xl bg-card shadow-2xl flex flex-col overflow-hidden animate-fade-in border border-border/50">
+        <div
+          className={cn(
+            "fixed z-50 bg-card shadow-2xl flex flex-col overflow-hidden animate-fade-in border border-border/50",
+            chatPanelClass
+          )}
+        >
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-border/50 bg-gradient-to-r from-tertiary/5 to-primary/5">
             <div className="flex items-center gap-2.5">
               <CatAvatar size={36} mood={isStreaming ? "thinking" : (isIdle ? "sleepy" : "happy")} />
               <div>
-                <div className="text-sm font-medium text-text">小鱼学姐 🐟</div>
-                <div className="text-[11px] text-muted-fg">你的面试陪练伙伴～</div>
+                <div className="text-sm font-medium text-text">小鱼学姐</div>
+                <div className="text-[11px] text-muted-fg">你的面试陪练伙伴</div>
               </div>
             </div>
             <div className="flex items-center gap-1">
@@ -204,8 +378,8 @@ export default function FloatingAssistant() {
             {messages.length === 0 && (
               <div className="text-center py-6">
                 <CatAvatar size={64} className="mx-auto mb-3" mood="happy" />
-                <div className="text-sm font-medium text-text mb-1">嗨～我是小鱼 🐟</div>
-                <div className="text-[13px] text-muted-fg mb-4">有什么面试问题都可以问我呀～</div>
+                <div className="text-sm font-medium text-text mb-1">嗨～我是小鱼</div>
+                <div className="text-[13px] text-muted-fg mb-4">有什么面试问题都可以问我呀</div>
                 <div className="flex flex-col gap-2">
                   {["帮我分析一下现在的水平", "有哪些知识点该复习了？", "帮我开始一场面试", "我的思维模式有什么特点？"].map((q) => (
                     <button
@@ -221,7 +395,6 @@ export default function FloatingAssistant() {
             )}
 
             {messages.map((msg, i) => {
-              // Skip empty assistant messages that are still streaming (shown as dots below)
               if (msg.role === "assistant" && !msg.content && isStreaming && i === messages.length - 1) return null;
               return (
               <div key={i} className={cn("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
@@ -240,7 +413,7 @@ export default function FloatingAssistant() {
                 >
                   {msg.role === "assistant" ? (
                     <div className="md-content">
-                      <ReactMarkdown>{msg.content || "..."}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{msg.content || "..."}</ReactMarkdown>
                     </div>
                   ) : (
                     msg.content
@@ -286,6 +459,89 @@ export default function FloatingAssistant() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Peeking Cat (hidden edge state on mobile) */}
+      {isPeeking && !isOpen && (
+        <button
+          onClick={handlePeekClick}
+          onMouseEnter={() => setIsPeekHovered(true)}
+          onMouseLeave={() => setIsPeekHovered(false)}
+          className="fixed right-0 z-50 flex items-end cursor-pointer group transition-[bottom] duration-200"
+          style={{ height: "80px", bottom: btnPos.y + 16 }}
+        >
+          {/* Peek body — a strip showing the cat peeking from right edge */}
+          <div className="relative overflow-hidden animate-cat-peek">
+            {/* Cat peek preview: only the left half of the cat face showing from right edge */}
+            <div
+              className={cn(
+                "relative transition-all duration-300",
+                isPeekHovered ? "w-[72px] opacity-100" : "w-[48px] opacity-90"
+              )}
+              style={{ height: "72px" }}
+            >
+              {/* Background pill */}
+              <div className="absolute inset-0 bg-card rounded-l-2xl shadow-lg border border-border/50 flex items-center justify-center overflow-hidden">
+                {/* Sway wrapper: gentle peek-out motion when not hovered (looks like the cat
+                    is actually peeking from behind the edge), settles on hover for stability. */}
+                <div className={isPeekHovered ? "" : "animate-cat-peek-sway"}>
+                  <CatAvatar
+                    size={isPeekHovered ? 52 : 44}
+                    mood={isPeekHovered ? "curious" : "idle"}
+                    className="transition-all duration-300"
+                  />
+                </div>
+                {/* "Tap me!" bubble on hover */}
+                {isPeekHovered && (
+                  <div className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-1 rounded-lg bg-primary text-primary-foreground text-[11px] font-medium shadow-md animate-fade-in-up">
+                    点我聊聊
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </button>
+      )}
+
+      {/* Floating Cat Bubble (normal / draggable) */}
+      {!isOpen && !isPeeking && (
+        <button
+          onClick={handleButtonClick}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onMouseEnter={() => setIsHovered(true)}
+          onMouseLeave={() => setIsHovered(false)}
+          className={cn(
+            "fixed z-50 w-16 h-16 rounded-full shadow-lg",
+            "flex items-center justify-center group bg-card border border-border/50",
+            "hover:border-primary/30 hover:shadow-xl",
+            isDragging ? "cursor-grabbing shadow-xl scale-105" : "cursor-grab",
+            isMobile && "active:scale-[0.9]"
+          )}
+          style={{
+            right: btnPos.x,
+            bottom: btnPos.y + 16,
+            // No transition while dragging — pointer drives position 1:1.
+            // After release, smoothly settle into the final spot.
+            transition: isDragging
+              ? "none"
+              : "right 0.25s cubic-bezier(0.2,0,0,1), bottom 0.25s cubic-bezier(0.2,0,0,1), box-shadow 0.2s, transform 0.2s",
+            touchAction: "none", // prevent page scrolling while dragging on touch devices
+          }}
+          title="拖动我或点我聊聊～（拖到右边缘会收起为偷看状态）"
+        >
+          <CatAvatar
+            size={52}
+            mood={isDragging ? "curious" : isHovered ? "curious" : "idle"}
+            className={cn(
+              "transition-transform duration-300",
+              isHovered ? "scale-110 -translate-y-0.5" : ""
+            )}
+          />
+          <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-tertiary border-2 border-card animate-pulse-dot" />
+        </button>
       )}
     </>
   );

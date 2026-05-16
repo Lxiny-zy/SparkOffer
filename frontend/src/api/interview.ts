@@ -337,6 +337,51 @@ export async function generateKnowledge(topic: string, callbacks?: SSECallbacks)
   }, callbacks);
 }
 
+export interface RebuildCallbacks {
+  onProgress?: (message: string) => void;
+  onTopicDone?: (data: { topic: string; index: number; total: number }) => void;
+  onTopicError?: (data: { topic: string; message: string }) => void;
+}
+
+async function streamRebuild(url: string, callbacks: RebuildCallbacks): Promise<any> {
+  const res = await authFetch(url, { method: "POST" });
+  if (!res.ok) throw new Error(await res.text());
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: any = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      try {
+        const evt = JSON.parse(line.slice(6));
+        if (evt.type === "progress" && callbacks.onProgress) callbacks.onProgress(evt.message);
+        else if (evt.type === "topic_done" && callbacks.onTopicDone) callbacks.onTopicDone(evt.data);
+        else if (evt.type === "topic_error" && callbacks.onTopicError) callbacks.onTopicError(evt.data);
+        else if (evt.type === "complete") result = evt.data;
+        else if (evt.type === "error" && callbacks.onProgress) callbacks.onProgress("出错: " + evt.message);
+      } catch {
+        // skip malformed SSE
+      }
+    }
+  }
+  return result;
+}
+
+export async function rebuildTopicIndex(topic: string, callbacks: RebuildCallbacks = {}): Promise<any> {
+  return streamRebuild(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/rebuild`, callbacks);
+}
+
+export async function rebuildAllIndices(callbacks: RebuildCallbacks = {}): Promise<any> {
+  return streamRebuild(`${API_BASE}/knowledge/rebuild-all`, callbacks);
+}
+
 // ── Recording review ──
 
 export async function transcribeRecording(audioBlob: Blob, mode: string = "dual"): Promise<any> {
