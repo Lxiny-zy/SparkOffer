@@ -22,7 +22,11 @@ data/topics.json
 !data/user_profile/.gitkeep
 !data/high_freq/.gitkeep
 data/interviews.db
+data/interviews.db-shm
+data/interviews.db-wal
 data/ai_config.json
+data/knowledge.backup-*/
+data/qa_notes/
 
 # Generated / cache
 data/.index_cache/
@@ -43,3 +47,4 @@ local_tools/
 # Claude / IDE / playwright local state
 .claude/
 .playwright-mcp/
+.tocodex/

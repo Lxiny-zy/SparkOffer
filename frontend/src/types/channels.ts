@@ -1,3 +1,5 @@
+export type ReasoningEffort = "" | "minimal" | "low" | "medium" | "high";
+
 export interface LLMChannel {
   id: string;
   name: string;
@@ -5,6 +7,7 @@ export interface LLMChannel {
   keys: string[];
   model: string;
   temperature: number;
+  reasoning_effort?: ReasoningEffort;
   priority: number;
   enabled: boolean;
   proxy?: string;

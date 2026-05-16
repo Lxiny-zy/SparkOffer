@@ -166,6 +166,7 @@ class TestLLMRequest(BaseModel):
     api_key: str
     model: str
     temperature: float = 0.7
+    reasoning_effort: str = ""
 
 class TestEmbeddingRequest(BaseModel):
     backend: str = "api"
@@ -192,6 +193,7 @@ class LLMChannelConfig(BaseModel):
     keys: list[str]
     model: str
     temperature: float = 0.7
+    reasoning_effort: str = ""
     priority: int = 1
     enabled: bool = True
     proxy: str = ""

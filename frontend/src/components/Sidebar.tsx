@@ -9,7 +9,6 @@ import { useAuth } from "../contexts/AuthContext";
 import { cn } from "@/lib/utils";
 import CatAvatar from "./CatAvatar";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import {
   Tooltip,
   TooltipContent,
@@ -23,24 +22,44 @@ interface NavItem {
   icon: LucideIcon;
 }
 
-const NAV_ITEMS: NavItem[] = [
-  { path: "/", label: "我的基地", icon: Home },
-  { path: "/profile", label: "成长报告", icon: User },
-  { path: "/knowledge", label: "刷题馆", icon: BookOpen },
-  { path: "/graph", label: "能力星图", icon: GitFork },
-  { path: "/history", label: "时光机", icon: Clock },
-  { path: "/favorites", label: "宝藏夹", icon: Star },
-  { path: "/algorithm", label: "算法竞技场", icon: Code2 },
-  { path: "/qa-arena", label: "问答演练场", icon: MessageSquare },
-  { path: "/job-prep", label: "定向备战", icon: BriefcaseBusiness },
-  { path: "/recording", label: "回放实验室", icon: Mic },
-  { path: "/settings", label: "设置", icon: Settings },
+interface NavGroup {
+  label: string;
+  items: NavItem[];
+}
+
+const NAV_GROUPS: NavGroup[] = [
+  {
+    label: "训练",
+    items: [
+      { path: "/", label: "我的基地", icon: Home },
+      { path: "/algorithm", label: "算法竞技场", icon: Code2 },
+      { path: "/qa-arena", label: "问答演练场", icon: MessageSquare },
+      { path: "/job-prep", label: "定向备战", icon: BriefcaseBusiness },
+      { path: "/recording", label: "回放实验室", icon: Mic },
+    ],
+  },
+  {
+    label: "数据",
+    items: [
+      { path: "/profile", label: "成长报告", icon: User },
+      { path: "/graph", label: "能力星图", icon: GitFork },
+      { path: "/history", label: "时光机", icon: Clock },
+      { path: "/favorites", label: "宝藏夹", icon: Star },
+    ],
+  },
+  {
+    label: "工具",
+    items: [
+      { path: "/knowledge", label: "知识库", icon: BookOpen },
+      { path: "/settings", label: "设置", icon: Settings },
+    ],
+  },
 ];
 
 export default function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, logout } = useAuth()!;
+  const { user, logout } = useAuth();
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
   const [open, setOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -61,20 +80,27 @@ export default function Sidebar() {
     navigate("/login", { replace: true });
   };
 
-  const navItem = ({ path, label, icon: Icon }: NavItem) => {
+  const renderNavItem = ({ path, label, icon: Icon }: NavItem) => {
     const active = isActive(path);
     const btn = (
       <button
         onClick={() => navigate(path)}
         className={cn(
-          "flex items-center gap-3 w-full px-3 py-2.5 rounded-full text-[13px] font-medium transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] text-left group relative active:scale-[0.97]",
+          "flex items-center gap-3 w-full px-3 py-2.5 rounded-2xl text-[13px] font-medium transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] text-left group relative active:scale-[0.97]",
           active
-            ? "bg-secondary text-secondary-foreground"
+            ? "glass-subtle text-text shadow-[0_2px_12px_var(--glow-primary)]"
             : "text-muted-fg hover:text-text hover:bg-primary/8",
           collapsed && "justify-center px-0 rounded-2xl"
         )}
       >
-        <Icon size={18} className={cn("shrink-0", active ? "text-primary" : "text-muted-fg group-hover:text-text")} />
+        {active && !collapsed && <span className="nav-active-indicator" />}
+        <Icon
+          size={18}
+          className={cn(
+            "shrink-0 transition-all duration-300",
+            active ? "text-primary scale-110 drop-shadow-[0_0_6px_var(--tech-glow)]" : "text-muted-fg group-hover:text-text"
+          )}
+        />
         {!collapsed && <span className="truncate">{label}</span>}
       </button>
     );
@@ -83,9 +109,9 @@ export default function Sidebar() {
       return (
         <Tooltip key={path} delayDuration={0}>
           <TooltipTrigger asChild>
-            <div className="flex flex-col items-center">
+            <div className="flex flex-col items-center relative">
               {btn}
-              {active && <div className="w-8 h-1 rounded-full bg-primary mt-0.5" />}
+              {active && <div className="w-6 h-0.5 rounded-full mt-1" style={{ background: "linear-gradient(90deg, var(--aurora-1), var(--aurora-2))" }} />}
             </div>
           </TooltipTrigger>
           <TooltipContent side="right" sideOffset={8}>{label}</TooltipContent>
@@ -95,34 +121,87 @@ export default function Sidebar() {
     return <div key={path}>{btn}</div>;
   };
 
+  const renderGroup = (group: NavGroup) => (
+    <div key={group.label} className={cn("mb-1", !collapsed && "mb-3")}>
+      {!collapsed && (
+        <div className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-fg/60">
+          {group.label}
+        </div>
+      )}
+      {collapsed && <div className="h-2" />}
+      <div className="flex flex-col gap-0.5">
+        {group.items.map(renderNavItem)}
+      </div>
+    </div>
+  );
+
   const nav = (
     <aside className={cn(
-      "flex flex-col h-full bg-sidebar transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)]",
+      "flex flex-col h-full bg-sidebar relative transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] overflow-hidden",
       collapsed ? "w-[72px]" : "w-[260px]"
     )}>
-      <div className={cn("flex items-center shrink-0 px-4 py-4", collapsed ? "justify-center" : "gap-2.5")}>
-        <CatAvatar size={32} mood="static" className="shrink-0" />
+      {/* Subtle aurora glow at top */}
+      <div className="absolute top-0 left-0 right-0 h-32 pointer-events-none opacity-40" style={{ background: "radial-gradient(ellipse at top, var(--aurora-2), transparent 70%)" }} />
+
+      {/* Brand */}
+      <div className={cn("flex items-center shrink-0 px-4 py-5 relative z-10", collapsed ? "justify-center" : "gap-2.5")}>
+        <CatAvatar size={collapsed ? 28 : 32} mood="idle" className="shrink-0" />
         {!collapsed && (
-          <span className="text-lg font-display font-bold text-sidebar-foreground">SparkOffer</span>
+          <span className="text-lg font-display font-bold gradient-text-vivid">SparkOffer</span>
         )}
       </div>
 
-      <Separator />
+      <div className="divider-gradient mx-4" />
 
       <TooltipProvider delayDuration={0}>
-        <nav className={cn("flex-1 flex flex-col gap-0.5 overflow-y-auto py-3", collapsed ? "px-2" : "px-3")}>
-          {NAV_ITEMS.map(navItem)}
+        <nav className={cn("flex-1 flex flex-col overflow-y-auto py-3 relative z-10", collapsed ? "px-2" : "px-3")}>
+          {NAV_GROUPS.map(renderGroup)}
         </nav>
 
-        <Separator />
+      <div className="divider-gradient mx-4" />
 
-        <div className={cn("py-2 space-y-0.5", collapsed ? "px-2" : "px-3")}>
+        {/* Bottom section */}
+        <div className={cn("py-3 space-y-0.5 relative z-10", collapsed ? "px-2" : "px-3")}>
+          {/* User card */}
+          {user && !collapsed && (
+            <div className="mb-2 px-3 py-2.5 rounded-2xl glass-subtle flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold text-white shrink-0" style={{ background: "linear-gradient(135deg, var(--aurora-1), var(--aurora-2))" }}>
+                {(user.name || user.email).slice(0, 1).toUpperCase()}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-[13px] font-medium text-text truncate flex items-center gap-1.5">
+                  {user.name || user.email.split("@")[0]}
+                  <span className="status-dot shrink-0" />
+                </div>
+                <div className="text-[10px] text-dim truncate">{user.email}</div>
+              </div>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button onClick={handleLogout} className="text-muted-fg hover:text-red transition-colors p-1 rounded-lg hover:bg-red/10">
+                    <LogOut size={14} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top">退出登录</TooltipContent>
+              </Tooltip>
+            </div>
+          )}
+          {user && collapsed && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button onClick={handleLogout} className="flex items-center justify-center w-full py-2.5 rounded-2xl text-muted-fg hover:text-red hover:bg-red/10 transition-all duration-300 active:scale-[0.97]">
+                  <LogOut size={18} />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right" sideOffset={8}>退出登录</TooltipContent>
+            </Tooltip>
+          )}
+
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 onClick={toggleTheme}
                 className={cn(
-                  "flex items-center gap-3 w-full py-2.5 px-3 rounded-full text-[13px] font-medium text-muted-fg hover:text-text hover:bg-primary/8 transition-all duration-300 active:scale-[0.97]",
+                  "flex items-center gap-3 w-full py-2.5 px-3 rounded-2xl text-[13px] font-medium text-muted-fg hover:text-text hover:bg-primary/8 transition-all duration-300 active:scale-[0.97]",
                   collapsed && "justify-center px-0"
                 )}
               >
@@ -133,34 +212,18 @@ export default function Sidebar() {
             {collapsed && <TooltipContent side="right" sideOffset={8}>{theme === "dark" ? "浅色模式" : "深色模式"}</TooltipContent>}
           </Tooltip>
 
-          {user && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={handleLogout}
-                  className={cn(
-                    "flex items-center gap-3 w-full py-2.5 px-3 rounded-full text-[13px] font-medium text-muted-fg hover:text-red hover:bg-red/8 transition-all duration-300 active:scale-[0.97]",
-                    collapsed && "justify-center px-0"
-                  )}
-                >
-                  <LogOut size={18} />
-                  {!collapsed && <span className="truncate">{user.name || user.email}</span>}
-                </button>
-              </TooltipTrigger>
-              {collapsed && <TooltipContent side="right" sideOffset={8}>退出登录</TooltipContent>}
-            </Tooltip>
-          )}
-
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 onClick={() => setCollapsed((c: boolean) => !c)}
                 className={cn(
-                  "flex items-center gap-3 w-full py-2.5 px-3 rounded-full text-[13px] font-medium text-muted-fg hover:text-text hover:bg-primary/8 transition-all duration-300 active:scale-[0.97] mt-1",
+                  "flex items-center gap-3 w-full py-2.5 px-3 rounded-2xl text-[13px] font-medium text-muted-fg hover:text-text hover:bg-primary/8 transition-all duration-300 active:scale-[0.97] group",
                   collapsed && "justify-center px-0"
                 )}
               >
-                {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+                <span className="transition-transform duration-300 group-hover:translate-x-0.5">
+                  {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+                </span>
                 {!collapsed && "收起侧栏"}
               </button>
             </TooltipTrigger>
@@ -176,7 +239,7 @@ export default function Sidebar() {
       <div className="md:hidden flex items-center justify-between px-4 py-3 bg-card/80 backdrop-blur-md border-b border-border shrink-0">
         <div className="flex items-center gap-2.5 cursor-pointer" onClick={() => navigate("/")}>
           <CatAvatar size={28} mood="static" />
-          <span className="text-base font-display font-bold text-text">SparkOffer</span>
+          <span className="text-base font-display font-bold aurora-text">SparkOffer</span>
         </div>
         <Button variant="ghost" size="icon" onClick={() => setOpen((o: boolean) => !o)}>
           {open ? <X size={18} /> : <Menu size={18} />}

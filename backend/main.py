@@ -28,6 +28,14 @@ async def lifespan(app: FastAPI):
     init_config()
     init_all_tables()
 
+    # Security check: warn if JWT secret is the default value
+    if settings.jwt_secret == "change-me-in-production":
+        logger.warning(
+            "⚠️  JWT_SECRET is using the default value! "
+            "Set JWT_SECRET in .env for production deployments. "
+            "Anyone can forge authentication tokens with the default secret."
+        )
+
     emb_backend = get_effective("embedding", "backend") or settings.embedding_backend_mode()
     emb_model = get_effective("embedding", "api_model") or settings.active_embedding_target()
     logger.info("Initializing embedding backend=%s target=%s", emb_backend, emb_model)
@@ -45,9 +53,17 @@ async def lifespan(app: FastAPI):
             enabled = sum(1 for c in chs if c.get("enabled", True))
             logger.info("Multi-channel %s: %d channels (%d enabled)", sec.upper(), len(chs), enabled)
 
+    # Start background embedding task queue
+    from backend.embedding_tasks import get_task_queue
+    await get_task_queue().start()
+
     logger.info("Startup complete.")
 
     yield
+
+    # Graceful shutdown: stop embedding task queue
+    from backend.embedding_tasks import get_task_queue as _get_tq
+    await _get_tq().stop()
 
 
 app = FastAPI(title="SparkOffer", version="0.3.0", lifespan=lifespan)

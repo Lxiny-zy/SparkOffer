@@ -1,5 +1,6 @@
 """LLM / Embedding provider with multi-channel failover support."""
 import logging
+from urllib.parse import urlparse, urlunparse, quote
 
 import httpx
 from langchain_openai import ChatOpenAI
@@ -16,6 +17,35 @@ _embedding_config_version = -1
 
 _CUSTOM_HEADERS = {"User-Agent": "curl/7.88.1"}
 _LLM_TIMEOUT = httpx.Timeout(connect=15.0, read=240.0, write=30.0, pool=30.0)
+_EMBED_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=30.0)  # Embedding 超时配置
+
+_REASONING_EFFORTS = {"minimal", "low", "medium", "high"}
+
+
+def _resolve_reasoning_effort(value) -> str | None:
+    """Normalize reasoning_effort. Returns one of {minimal,low,medium,high} or None to skip."""
+    if not value:
+        return None
+    v = str(value).strip().lower()
+    if v in ("", "none", "off"):
+        return None
+    return v if v in _REASONING_EFFORTS else None
+
+
+def _normalize_proxy_url(proxy: str) -> str:
+    """Ensure proxy credentials are properly URL-encoded."""
+    if not proxy or "@" not in proxy:
+        return proxy
+    parsed = urlparse(proxy)
+    if not parsed.username:
+        return proxy
+    username = quote(parsed.username, safe="")
+    password = quote(parsed.password or "", safe="")
+    host_port = parsed.hostname or ""
+    if parsed.port:
+        host_port += f":{parsed.port}"
+    new_netloc = f"{username}:{password}@{host_port}"
+    return urlunparse(parsed._replace(netloc=new_netloc))
 
 
 def _build_http_clients(proxy: str = "", *, timeout: httpx.Timeout | None = _LLM_TIMEOUT):
@@ -24,7 +54,7 @@ def _build_http_clients(proxy: str = "", *, timeout: httpx.Timeout | None = _LLM
     if timeout:
         kw["timeout"] = timeout
     if proxy:
-        kw["proxy"] = proxy
+        kw["proxy"] = _normalize_proxy_url(proxy)
     return httpx.Client(**kw), httpx.AsyncClient(**kw)
 
 
@@ -53,6 +83,8 @@ class ResilientChatModel:
     @staticmethod
     def _make_llm(channel: dict) -> ChatOpenAI:
         sync_c, async_c = _build_http_clients(channel.get("proxy", ""))
+        effort = _resolve_reasoning_effort(channel.get("reasoning_effort"))
+        model_kwargs = {"extra_body": {"reasoning_effort": effort}} if effort else {}
         return ChatOpenAI(
             model=channel.get("model", ""),
             api_key=channel.get("api_key", ""),
@@ -62,6 +94,7 @@ class ResilientChatModel:
             http_client=sync_c,
             http_async_client=async_c,
             default_headers=_CUSTOM_HEADERS,
+            model_kwargs=model_kwargs,
         )
 
     def invoke(self, messages, **kwargs):
@@ -126,6 +159,8 @@ def get_langchain_llm():
     if has_channels("llm"):
         return ResilientChatModel()
     sync_c, async_c = _build_http_clients()
+    effort = _resolve_reasoning_effort(get_effective("llm", "reasoning_effort"))
+    model_kwargs = {"extra_body": {"reasoning_effort": effort}} if effort else {}
     return ChatOpenAI(
         model=get_effective("llm", "model"),
         api_key=get_effective("llm", "api_key"),
@@ -135,6 +170,7 @@ def get_langchain_llm():
         http_client=sync_c,
         http_async_client=async_c,
         default_headers=_CUSTOM_HEADERS,
+        model_kwargs=model_kwargs,
     )
 
 
@@ -147,21 +183,29 @@ def get_llama_llm():
         if has_channels("llm"):
             ch = get_channel("llm")
             if ch:
+                add_kw: dict = {"extra_headers": _CUSTOM_HEADERS}
+                effort = _resolve_reasoning_effort(ch.get("reasoning_effort"))
+                if effort:
+                    add_kw["extra_body"] = {"reasoning_effort": effort}
                 _llama_llm_instance = OpenAILike(
                     model=ch["model"], api_key=ch["api_key"], api_base=ch["api_base"],
                     temperature=float(ch.get("temperature", 0.7)),
                     is_chat_model=True,
-                    additional_kwargs={"extra_headers": _CUSTOM_HEADERS},
+                    additional_kwargs=add_kw,
                 )
                 _llama_config_version = ver
                 return _llama_llm_instance
+        add_kw: dict = {"extra_headers": _CUSTOM_HEADERS}
+        effort = _resolve_reasoning_effort(get_effective("llm", "reasoning_effort"))
+        if effort:
+            add_kw["extra_body"] = {"reasoning_effort": effort}
         _llama_llm_instance = OpenAILike(
             model=get_effective("llm", "model"),
             api_key=get_effective("llm", "api_key"),
             api_base=get_effective("llm", "api_base"),
             temperature=float(get_effective("llm", "temperature") or 0.7),
             is_chat_model=True,
-            additional_kwargs={"extra_headers": _CUSTOM_HEADERS},
+            additional_kwargs=add_kw,
         )
         _llama_config_version = ver
     return _llama_llm_instance
@@ -188,7 +232,7 @@ def _create_embedding():
             backend = ch.get("backend", "api")
             if backend == "api":
                 from llama_index.embeddings.openai import OpenAIEmbedding
-                sync_c, _ = _build_http_clients(ch.get("proxy", ""), timeout=None)
+                sync_c, _ = _build_http_clients(ch.get("proxy", ""), timeout=_EMBED_TIMEOUT)
                 kwargs = {
                     "model_name": ch.get("api_model", ""),
                     "api_key": ch.get("api_key", ""),

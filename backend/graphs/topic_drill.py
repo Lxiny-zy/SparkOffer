@@ -1,4 +1,5 @@
 """模式2: 专项强化训练 — 批量出题 + 批量评估（不再使用 LangGraph）."""
+import concurrent.futures
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -12,6 +13,23 @@ from backend.memory import get_profile_summary, get_profile_summary_for_drill, g
 from backend.prompts.interviewer import DRILL_QUESTION_GEN_PROMPT, DRILL_BATCH_EVAL_PROMPT
 
 _logger = logging.getLogger("uvicorn")
+
+# Timeout for knowledge retrieval operations (seconds)
+_RETRIEVAL_TIMEOUT = 60.0
+
+
+def _safe_retrieve(topic: str, question: str, user_id: str, top_k: int = 5) -> list[str]:
+    """Synchronous retrieve with timeout protection."""
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(retrieve_topic_context, topic, question, user_id, top_k)
+            return future.result(timeout=_RETRIEVAL_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        _logger.warning(f"Knowledge retrieval timed out ({_RETRIEVAL_TIMEOUT}s) for topic={topic}")
+        return []
+    except Exception as e:
+        _logger.warning(f"Knowledge retrieval failed for topic={topic}: {e}")
+        return []
 
 
 def _get_topic_display(user_id: str) -> dict[str, str]:
@@ -86,7 +104,7 @@ def generate_drill_questions(topic: str, user_id: str) -> list[dict]:
 
     all_chunks = []
     for q in queries:
-        all_chunks.extend(retrieve_topic_context(topic, q, user_id, top_k=5))
+        all_chunks.extend(_safe_retrieve(topic, q, user_id, top_k=5))
     # Deduplicate and limit
     seen = set()
     unique_chunks = []
@@ -191,7 +209,7 @@ def evaluate_drill_answers(topic: str, questions: list[dict], answers: list[dict
         answer = answer_map[qid]
         qa_lines.append(f"### Q{qid} (难度 {q.get('difficulty', '?')}/5)\n**题目**: {q['question']}\n**回答**: {answer}")
 
-        refs = retrieve_topic_context(topic, q["question"], user_id, top_k=2)
+        refs = _safe_retrieve(topic, q["question"], user_id, top_k=2)
         if refs:
             ref_lines.append(f"### Q{qid} 参考\n" + "\n".join(refs)[:800])
 
@@ -242,7 +260,7 @@ async def stream_evaluate_drill_answers(
         qid = q["id"]
         answer = answer_map[qid]
         qa_lines.append(f"### Q{qid} (难度 {q.get('difficulty', '?')}/5)\n**题目**: {q['question']}\n**回答**: {answer}")
-        refs = retrieve_topic_context(topic, q["question"], user_id, top_k=2)
+        refs = _safe_retrieve(topic, q["question"], user_id, top_k=2)
         if refs:
             ref_lines.append(f"### Q{qid} 参考\n" + "\n".join(refs)[:800])
 

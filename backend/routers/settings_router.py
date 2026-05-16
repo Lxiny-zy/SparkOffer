@@ -35,9 +35,12 @@ def update_ai_settings(req: AIConfigUpdate, user_id: str = Depends(get_current_u
 async def test_llm_connection(req: TestLLMRequest, user_id: str = Depends(get_current_user)):
     try:
         from langchain_openai import ChatOpenAI
+        from backend.llm_provider import _resolve_reasoning_effort
         http_client = _httpx.Client(
             headers={"User-Agent": "curl/7.88.1"}, follow_redirects=True
         )
+        effort = _resolve_reasoning_effort(req.reasoning_effort)
+        model_kwargs = {"extra_body": {"reasoning_effort": effort}} if effort else {}
         llm = ChatOpenAI(
             model=req.model,
             api_key=req.api_key,
@@ -46,6 +49,7 @@ async def test_llm_connection(req: TestLLMRequest, user_id: str = Depends(get_cu
             http_client=http_client,
             default_headers={"User-Agent": "curl/7.88.1"},
             max_tokens=20,
+            model_kwargs=model_kwargs,
         )
         resp = await llm.ainvoke("Say hello in one word.")
         return {"ok": True, "message": resp.content[:100]}
@@ -110,19 +114,10 @@ def get_channels_config(user_id: str = Depends(get_current_user)):
     from backend.ai_config import get_channels
     from backend.channel_manager import get_health
 
-    def mask_keys(channels: list[dict]) -> list[dict]:
-        result = []
-        for ch in channels:
-            c = dict(ch)
-            if "keys" in c:
-                c["keys"] = [_mask_key(k) for k in c["keys"]]
-            result.append(c)
-        return result
-
     return {
-        "llm": {"channels": mask_keys(get_channels("llm")), "health": get_health("llm")},
-        "embedding": {"channels": mask_keys(get_channels("embedding")), "health": get_health("embedding")},
-        "asr": {"channels": mask_keys(get_channels("asr")), "health": get_health("asr")},
+        "llm": {"channels": get_channels("llm"), "health": get_health("llm")},
+        "embedding": {"channels": get_channels("embedding"), "health": get_health("embedding")},
+        "asr": {"channels": get_channels("asr"), "health": get_health("asr")},
     }
 
 
@@ -158,9 +153,12 @@ async def test_channel(req: TestChannelRequest, user_id: str = Depends(get_curre
     if section == "llm":
         try:
             from langchain_openai import ChatOpenAI
+            from backend.llm_provider import _normalize_proxy_url, _resolve_reasoning_effort
             client_kw: dict = {"headers": {"User-Agent": "curl/7.88.1"}, "follow_redirects": True}
             if proxy:
-                client_kw["proxy"] = proxy
+                client_kw["proxy"] = _normalize_proxy_url(proxy)
+            effort = _resolve_reasoning_effort(ch.get("reasoning_effort"))
+            model_kwargs = {"extra_body": {"reasoning_effort": effort}} if effort else {}
             llm = ChatOpenAI(
                 model=ch.get("model", ""),
                 api_key=ch.get("api_key", ""),
@@ -169,6 +167,7 @@ async def test_channel(req: TestChannelRequest, user_id: str = Depends(get_curre
                 http_client=_httpx.Client(**client_kw),
                 default_headers={"User-Agent": "curl/7.88.1"},
                 max_tokens=20,
+                model_kwargs=model_kwargs,
             )
             resp = await llm.ainvoke("Say hello in one word.")
             return {"ok": True, "message": resp.content[:100]}
@@ -178,9 +177,10 @@ async def test_channel(req: TestChannelRequest, user_id: str = Depends(get_curre
     elif section == "embedding":
         try:
             from llama_index.embeddings.openai import OpenAIEmbedding
+            from backend.llm_provider import _normalize_proxy_url
             emb_kw: dict = {"headers": {"User-Agent": "curl/7.88.1"}}
             if proxy:
-                emb_kw["proxy"] = proxy
+                emb_kw["proxy"] = _normalize_proxy_url(proxy)
             kwargs = {
                 "model_name": ch.get("api_model", ""),
                 "api_key": ch.get("api_key", ""),
@@ -221,7 +221,3 @@ def get_channels_health(user_id: str = Depends(get_current_user)):
     }
 
 
-def _mask_key(key: str) -> str:
-    if not key or len(key) <= 8:
-        return "****"
-    return key[:3] + "****" + key[-4:]

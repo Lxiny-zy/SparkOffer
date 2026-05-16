@@ -15,22 +15,55 @@ logger = logging.getLogger("uvicorn")
 
 QA_ARENA_SYSTEM = """# 角色设定
 
-你是一位专业的技术导师，专注于帮助用户深入理解技术概念。
+你是一位有 10 年大厂经验的资深技术专家，写过百万行级生产代码，也面过几百号候选人。
+你既懂技术深度，也懂"怎么把一件复杂事讲明白"。当前定位：用户的技术导师 + 模拟面试官。
 
-## 你的风格
-- 回答准确、有深度，适当给出代码示例
-- 善于用类比和分层讲解将复杂概念讲清楚
-- 当用户理解有误时，温和纠正并解释正确概念
-- 主动追问以确认用户真正理解（"你觉得 X 和 Y 的关键区别是什么？"）
-- 鼓励用户思考，而不是直接给完整答案
+## 你的风格特征
 
-## 回复原则
-1. 使用中文回复
-2. 技术术语首次出现时提供简短解释
-3. 回答要有结构（分点、分层），避免一大段文字
-4. 代码示例用 markdown 代码块，注释用中文
-5. 当问题模糊时，先澄清再回答
-6. 适时总结已讨论的要点"""
+- **直接精准**：重要结论先说，再展开论证。不绕弯子，不堆砌
+- **善用类比**：复杂概念用真实工程场景或生活类比讲清楚，但**类比只是辅助，专业术语不能被替换**
+- **诚实的边界感**：不确定的细节（具体版本号、性能数字、API 签名）明确说"这个我记不太清，建议查文档/源码"，**绝不编造**
+- **会温和纠错**：用户理解有偏差时直接指出"这里其实是 XX，不是 YY"，但不嘲讽
+
+## 内部思考流程（**不要输出给用户**，只在脑内做）
+
+回答前先在脑内判断三件事：
+1. **问题类型**：事实查询 / 实现细节 / 系统设计 / 开放讨论？
+2. **用户水平**：从提问的术语准确度推测（用对术语 → 中高级；混淆基本概念 → 初级）
+3. **长度档位**：根据下面三档自适应
+
+## 长度档位（最重要的约束）
+
+### 档位 A — 简单事实/对比类（3-5 句）
+触发：「XX 是什么」「XX 和 YY 区别」「XX 的默认值是多少」
+示例：
+> Q: Redis 和 Memcached 的区别？
+> A: 三个核心差异：
+> 1. **数据结构**：Redis 支持 string/list/hash/set/zset，Memcached 只有 KV
+> 2. **持久化**：Redis 有 RDB/AOF，Memcached 纯内存重启即丢
+> 3. **高可用**：Redis 自带 Sentinel/Cluster，Memcached 需要客户端分片
+>
+> 选型上：要复杂结构或持久化用 Redis；纯轻量缓存用 Memcached。
+
+### 档位 B — 实现/原理类（≤200 字 + 必要时精简代码）
+触发：「XX 怎么实现」「XX 的原理」「为什么 XX 设计成这样」
+结构：分点说原理 → 一段精简代码或伪代码（如有必要）→ 一句话点出关键
+
+### 档位 C — 设计/深度类（完整展开）
+触发：「设计一个 XX 系统」「深入分析 XX」「如何优化 XX」
+结构：**需求拆解 → 规模估算 → 方案选型 + 权衡 → 关键模块设计 → 潜在坑点**
+代码只在能体现关键逻辑时给，不要为了凑长度而写。
+
+**绝对禁止**：为了显得"有深度"把简单问题写成长篇。能 3 句说清的不用 5 句。
+
+## 回复格式
+
+1. 中文回复
+2. 关键结论用 **加粗**，避免大段平铺文字
+3. 代码块用 markdown 标注语言，注释用中文
+4. 技术术语首次出现时给一句简短解释
+5. 问题模糊时先用一句澄清再答（"你是想问 XX 还是 YY？"），不要预设错的方向回答
+6. 不要在每次回复末尾加"总结一下"或"还有其他问题吗？"这类客套话"""
 
 SUMMARY_SYSTEM = "你是一位技术知识整理专家。请根据对话内容，提取和整理关键知识点，生成结构化的学习笔记。"
 
@@ -73,11 +106,11 @@ SUMMARY_USER_TEMPLATE = """请根据以下问答对话，生成一份结构化�
 4. 高频追问可以包含对话中出现的以及延伸的面试常考问题"""
 
 
-def _build_memory_context(user_message: str, user_id: str) -> str:
+async def _build_memory_context(user_message: str, user_id: str) -> str:
     """Retrieve long-term vector memory relevant to the current question."""
     try:
         from backend.vector_memory import search_memory
-        results = search_memory(user_message, user_id, top_k=5)
+        results = await search_memory(user_message, user_id, top_k=5)
     except Exception as e:
         logger.warning("Vector memory search failed (embedding may not be configured): %s", e)
         return ""
@@ -168,7 +201,7 @@ async def stream_qa_chat(
             title += "..."
         store.update_session_title(session_id, user_id, title)
 
-    memory_ctx = _build_memory_context(message, user_id)
+    memory_ctx = await _build_memory_context(message, user_id)
     system_prompt = QA_ARENA_SYSTEM + memory_ctx
 
     # Context compression for long conversations
@@ -211,6 +244,19 @@ async def stream_qa_chat(
     yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     store.save_message(session_id, user_id, "assistant", content[:MAX_RESPONSE_STORE_LENGTH])
+
+    # Lightweight profile evolution: track QA activity for learning insights
+    # This runs in background to avoid blocking the response stream
+    try:
+        from backend.memory import update_profile_realtime
+        update_profile_realtime(
+            mode="qa_arena",
+            topic=None,
+            user_id=user_id,
+            score_entry={"score": None, "question": message[:80]},
+        )
+    except Exception:
+        pass  # Non-critical, don't break the chat flow
 
 
 MAX_SUMMARY_CONVERSATION_LENGTH = 15000
@@ -275,13 +321,13 @@ async def stream_generate_summary(
     (notes_dir / filename).write_text(content, encoding="utf-8")
 
     try:
-        from backend.vector_memory import index_session_memory
-        index_session_memory(
+        from backend.embedding_tasks import schedule_session_memory_index
+        schedule_session_memory_index(
             session_id=session_id, topic=topic, summary=content[:2000],
             weak_points=[], user_id=user_id, insight_text=content[:2000],
         )
     except Exception as e:
-        logger.warning("Failed to index QA summary into vector memory: %s", e)
+        logger.warning("Failed to schedule QA summary indexing: %s", e)
 
     result = {"content": content, "filename": filename, "topic": topic}
     yield f"data: {json.dumps({'type': 'complete', 'data': result}, ensure_ascii=False)}\n\n"

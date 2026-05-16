@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus, Trash2, ChevronDown, ChevronRight, FlaskConical,
   ArrowUp, ArrowDown, Eye, EyeOff, Loader2, CheckCircle2,
   XCircle, Lock, AlertTriangle, KeyRound,
 } from "lucide-react";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { getChannels, saveChannels, testChannel } from "@/api/settings";
 import type { ChannelHealth } from "@/types/channels";
+import { REASONING_EFFORT_HINT } from "@/lib/badge-presets";
 
 type ChannelData = Record<string, any>;
 
@@ -21,12 +23,10 @@ interface ChannelManagerProps {
 }
 
 const SECTION_DEFAULTS: Record<string, () => ChannelData> = {
-  llm: () => ({ id: "", name: "", api_base: "", keys: [""], model: "", temperature: 0.7, priority: 1, enabled: true, proxy: "" }),
+  llm: () => ({ id: "", name: "", api_base: "", keys: [""], model: "", temperature: 0.7, reasoning_effort: "", priority: 1, enabled: true, proxy: "" }),
   embedding: () => ({ id: "", name: "", backend: "api", api_base: "", keys: [""], api_model: "", local_model: "", local_path: "", priority: 1, enabled: true, proxy: "" }),
   asr: () => ({ id: "", name: "", keys: [""], model: "qwen3-asr-flash-filetrans", priority: 1, enabled: true, proxy: "" }),
 };
-
-const MASKED_RE = /^\*{3,}/;
 
 function SecretInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
   const [visible, setVisible] = useState(false);
@@ -61,11 +61,14 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
   const [channels, setChannels] = useState<ChannelData[]>([]);
   const [healthMap, setHealthMap] = useState<Record<string, ChannelHealth>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [editedKeys, setEditedKeys] = useState<Set<string>>(new Set());
   const [testing, setTesting] = useState<Record<string, "loading" | "ok" | "error" | null>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [allData, setAllData] = useState<Record<string, any>>({});
+  const lastEditedKey = `channels:lastEdited:${section}`;
+  const lastEditedRef = useRef<string | null>(
+    typeof window !== "undefined" ? localStorage.getItem(lastEditedKey) : null
+  );
 
   const load = useCallback(async () => {
     try {
@@ -76,7 +79,6 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
       const hm: Record<string, ChannelHealth> = {};
       for (const h of sec.health || []) hm[h.id] = h;
       setHealthMap(hm);
-      setEditedKeys(new Set());
     } catch (e: any) {
       toast.error("Failed to load channels: " + e.message);
     } finally {
@@ -88,6 +90,11 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
 
   const updateChannel = (idx: number, patch: Partial<ChannelData>) => {
     setChannels((prev) => prev.map((ch, i) => i === idx ? { ...ch, ...patch } : ch));
+    const ch = channels[idx];
+    if (ch?.id) {
+      lastEditedRef.current = ch.id;
+      try { localStorage.setItem(lastEditedKey, ch.id); } catch { /* ignore */ }
+    }
     onDirty?.(true);
   };
 
@@ -121,7 +128,6 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
     const keys = [...(ch.keys || [])];
     keys[keyIdx] = value;
     updateChannel(chIdx, { keys });
-    setEditedKeys((prev) => new Set(prev).add(`${chIdx}-${keyIdx}`));
   };
 
   const addKey = (chIdx: number) => {
@@ -140,7 +146,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
     const chId = ch.id || `idx-${idx}`;
     setTesting((prev) => ({ ...prev, [chId]: "loading" }));
     try {
-      const testKeys = (ch.keys || []).filter((k: string) => k && !MASKED_RE.test(k));
+      const testKeys = (ch.keys || []).filter((k: string) => !!k);
       const testKey = testKeys[0] || "";
       const payload: any = { ...ch, api_key: testKey };
       const res = await testChannel(section, payload);
@@ -162,12 +168,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
     try {
       const cleanChannels = channels.map((ch) => {
         const cleaned = { ...ch };
-        cleaned.keys = (cleaned.keys || []).map((k: string, ki: number) => {
-          if (MASKED_RE.test(k) && !editedKeys.has(`${channels.indexOf(ch)}-${ki}`)) {
-            return null;
-          }
-          return k;
-        }).filter(Boolean);
+        cleaned.keys = (cleaned.keys || []).filter((k: string) => !!k);
         if (!cleaned.keys.length) cleaned.keys = undefined;
         return cleaned;
       });
@@ -207,12 +208,23 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
 
       {channels.map((ch, idx) => {
         const chId = ch.id || `idx-${idx}`;
-        const isOpen = expanded[chId] ?? (channels.length === 1);
         const health = healthMap[ch.id];
+        const isUnhealthy = !!(health && (!health.healthy || (health.error_count ?? 0) > 0));
+        const isLastEdited = lastEditedRef.current === ch.id;
+        // Smart default-expand: single channel / unhealthy / recently edited
+        const autoOpen = channels.length === 1 || isUnhealthy || isLastEdited;
+        const isOpen = expanded[chId] ?? autoOpen;
         const testState = testing[chId];
 
         return (
-          <Card key={chId} className={`transition-all ${!ch.enabled ? "opacity-50" : ""}`}>
+          <Card
+            key={chId}
+            className={cn(
+              "transition-all duration-300",
+              !ch.enabled && "opacity-50",
+              isUnhealthy && "border-orange/40 shadow-[0_0_0_1px_rgba(253,203,110,0.15)]"
+            )}
+          >
             <div
               className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none hover:bg-muted/30"
               onClick={() => setExpanded((prev) => ({ ...prev, [chId]: !isOpen }))}
@@ -264,7 +276,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
 
                 <div>
                   <Label className="text-xs">Proxy URL <span className="text-dim font-normal">(optional)</span></Label>
-                  <Input value={ch.proxy || ""} onChange={(e) => updateChannel(idx, { proxy: e.target.value })} placeholder="http://127.0.0.1:7890 or socks5://host:1080" className="h-8 text-sm" />
+                  <Input value={ch.proxy || ""} onChange={(e) => updateChannel(idx, { proxy: e.target.value })} placeholder="http://127.0.0.1:7890 or http://user:pass@host:port" className="h-8 text-sm" />
                 </div>
 
                 <div>
@@ -334,6 +346,32 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                     </div>
                   )}
                 </div>
+
+                {section === "llm" && (
+                  <div>
+                    <Label className="text-xs flex items-center gap-1.5">
+                      Reasoning Effort
+                      <span className="text-dim font-normal">(thinking 模型生效)</span>
+                      {ch.reasoning_effort && REASONING_EFFORT_HINT[ch.reasoning_effort] && (
+                        <Badge variant="outline" className={cn("ml-auto text-[10px] font-mono", REASONING_EFFORT_HINT[ch.reasoning_effort].tone)}>
+                          {REASONING_EFFORT_HINT[ch.reasoning_effort].latency}
+                        </Badge>
+                      )}
+                    </Label>
+                    <select
+                      value={ch.reasoning_effort || ""}
+                      onChange={(e) => updateChannel(idx, { reasoning_effort: e.target.value })}
+                      className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 transition-colors hover:border-primary/40"
+                    >
+                      <option value="">Off — 不发送 reasoning_effort 字段</option>
+                      <option value="minimal">Minimal — 极轻思考</option>
+                      <option value="low">Low — 浅度思考</option>
+                      <option value="medium">Medium — 中度思考</option>
+                      <option value="high">High — 深度思考</option>
+                    </select>
+                    <p className="text-[10px] text-dim mt-1">仅对支持 reasoning 的上游模型生效（如 gpt-5 / o-series / DeepSeek-R1）</p>
+                  </div>
+                )}
 
                 <div className="flex items-center justify-between pt-2 border-t border-border/50">
                   <Button

@@ -1,10 +1,8 @@
 """向量记忆系统 — 语义检索 + 时间衰减 + 薄弱点语义去重。
-
-设计：
-- SQLite BLOB 存 float32 embedding
-- numpy cosine similarity 搜索（百级向量，sub-ms）
-- profile.json 仍是真相源，向量索引是加速层
+设计：- SQLite BLOB 存 float32 embedding
+- numpy cosine similarity 搜索（百级向量，sub-ms）- profile.json 仍是真相源，向量索引是加速层
 """
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -16,6 +14,9 @@ from backend.storage.database import get_db
 
 logger = logging.getLogger("uvicorn")
 
+# Embedding 超时配置（秒）
+_EMBED_TIMEOUT_SECONDS = 30.0
+
 SIMILARITY_THRESHOLD = 0.75  # weak point dedup
 TIME_DECAY_HALF_LIFE = 14.0  # days
 TIME_DECAY_WEIGHT = 0.3      # max 30% score reduction from age
@@ -24,11 +25,192 @@ MAX_VECTORS_PER_USER = 500   # auto-cleanup threshold
 
 # ── Embedding helpers ──
 
-def _embed(text: str) -> np.ndarray:
-    """Embed text and return a float32 vector."""
+_MAX_EMBED_RETRIES = 2  # Retry count for transient failures
+_RETRY_BACKOFF_BASE = 1.5  # Exponential backoff base (seconds)
+
+
+async def _embed(text: str) -> np.ndarray:
+    """Async embed text with timeout, retry, and circuit breaker protection.
+
+    Uses asyncio.to_thread so the blocking llama_index sync call runs in a
+    thread pool where asyncio.wait_for can actually cancel it.
+    Returns zero vector on failure (graceful degradation).
+    """
+    from backend.embedding_tasks import get_circuit_breaker
+
+    cb = get_circuit_breaker()
+    if not cb.can_execute():
+        logger.debug("Embedding circuit breaker OPEN, returning zero vector")
+        return np.zeros(1536, dtype=np.float32)
+
+    for attempt in range(_MAX_EMBED_RETRIES + 1):
+        try:
+            vec = await asyncio.wait_for(
+                asyncio.to_thread(_embed_sync, text),
+                timeout=_EMBED_TIMEOUT_SECONDS,
+            )
+            cb.record_success()
+            return np.array(vec, dtype=np.float32)
+        except asyncio.TimeoutError:
+            cb.record_failure()
+            if attempt < _MAX_EMBED_RETRIES:
+                backoff = _RETRY_BACKOFF_BASE ** (attempt + 1)
+                logger.warning(
+                    f"Embedding timeout (attempt {attempt + 1}/{_MAX_EMBED_RETRIES + 1}), "
+                    f"retrying in {backoff:.1f}s: {text[:50]!r}..."
+                )
+                await asyncio.sleep(backoff)
+            else:
+                logger.warning(f"Embedding timeout after all retries: {text[:50]!r}...")
+        except Exception as e:
+            cb.record_failure()
+            if attempt < _MAX_EMBED_RETRIES:
+                backoff = _RETRY_BACKOFF_BASE ** (attempt + 1)
+                logger.warning(
+                    f"Embedding error (attempt {attempt + 1}/{_MAX_EMBED_RETRIES + 1}), "
+                    f"retrying in {backoff:.1f}s: {e}"
+                )
+                await asyncio.sleep(backoff)
+            else:
+                logger.error(f"Embedding permanently failed: {e}")
+
+    return np.zeros(1536, dtype=np.float32)
+
+
+def _embed_sync(text: str) -> list[float]:
+    """Synchronous single-text embedding (runs in thread pool)."""
     embed_model = get_embedding()
-    vec = embed_model.get_text_embedding(text)
-    return np.array(vec, dtype=np.float32)
+    return embed_model.get_text_embedding(text)
+
+
+async def _embed_batch(texts: list[str]) -> list[np.ndarray]:
+    """Async batch embed with timeout, retry, and circuit breaker.
+
+    For large batches, splits into smaller chunks to avoid single-point failures.
+    Returns list of float32 vectors (zero vectors on failure).
+    """
+    if not texts:
+        return []
+
+    from backend.embedding_tasks import get_circuit_breaker
+
+    cb = get_circuit_breaker()
+    if not cb.can_execute():
+        logger.debug(f"Embedding circuit breaker OPEN, returning {len(texts)} zero vectors")
+        return [np.zeros(1536, dtype=np.float32) for _ in texts]
+
+    # Split large batches into chunks of 10 to limit blast radius
+    CHUNK_SIZE = 10
+    if len(texts) > CHUNK_SIZE:
+        results = []
+        for i in range(0, len(texts), CHUNK_SIZE):
+            chunk = texts[i:i + CHUNK_SIZE]
+            chunk_results = await _embed_batch_chunk(chunk, cb)
+            results.extend(chunk_results)
+        return results
+
+    return await _embed_batch_chunk(texts, cb)
+
+
+async def _embed_batch_chunk(texts: list[str], cb) -> list[np.ndarray]:
+    """Embed a single chunk with retry logic."""
+    timeout = max(_EMBED_TIMEOUT_SECONDS, len(texts) * 3.0)
+
+    for attempt in range(_MAX_EMBED_RETRIES + 1):
+        try:
+            vecs = await asyncio.wait_for(
+                asyncio.to_thread(_embed_batch_sync, texts),
+                timeout=timeout,
+            )
+            cb.record_success()
+            return [np.array(v, dtype=np.float32) for v in vecs]
+        except asyncio.TimeoutError:
+            cb.record_failure()
+            if attempt < _MAX_EMBED_RETRIES:
+                backoff = _RETRY_BACKOFF_BASE ** (attempt + 1)
+                logger.warning(
+                    f"Batch embedding timeout ({len(texts)} texts, attempt {attempt + 1}), "
+                    f"retrying in {backoff:.1f}s"
+                )
+                await asyncio.sleep(backoff)
+            else:
+                logger.warning(f"Batch embedding timeout after all retries ({len(texts)} texts)")
+        except Exception as e:
+            cb.record_failure()
+            if attempt < _MAX_EMBED_RETRIES:
+                backoff = _RETRY_BACKOFF_BASE ** (attempt + 1)
+                logger.warning(
+                    f"Batch embedding error (attempt {attempt + 1}), retrying in {backoff:.1f}s: {e}"
+                )
+                await asyncio.sleep(backoff)
+            else:
+                logger.error(f"Batch embedding permanently failed ({len(texts)} texts): {e}")
+
+    return [np.zeros(1536, dtype=np.float32) for _ in texts]
+
+
+def _embed_batch_sync(texts: list[str]) -> list[list[float]]:
+    """Synchronous batch embedding (runs in thread pool)."""
+    embed_model = get_embedding()
+    return embed_model.get_text_embedding_batch(texts)
+
+
+# ── Sync-compatible wrappers (bridge async → sync for legacy callers) ──
+
+def _run_async(coro):
+    """Run an async coroutine in the existing event loop or a new one."""
+    running_loop = None
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop and running_loop.is_running():
+        # Already inside an event loop — use thread executor to avoid nesting
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result(timeout=_EMBED_TIMEOUT_SECONDS + 5.0)
+    else:
+        return asyncio.run(coro)
+
+
+def search_memory_sync(
+    query: str,
+    user_id: str,
+    chunk_types: list[str] | None = None,
+    topic: str | None = None,
+    top_k: int = 5,
+) -> list[dict]:
+    """Sync wrapper for search_memory."""
+    return _run_async(search_memory(query, user_id, chunk_types, topic, top_k))
+
+
+def find_similar_weak_point_sync(
+    new_point: str,
+    existing_points: list[dict],
+    user_id: str,
+    threshold: float = SIMILARITY_THRESHOLD,
+) -> int | None:
+    """Sync wrapper for find_similar_weak_point."""
+    return _run_async(find_similar_weak_point(new_point, existing_points, user_id, threshold))
+
+
+def index_session_memory_sync(
+    session_id: str | None,
+    topic: str | None,
+    summary: str,
+    weak_points: list[dict],
+    user_id: str,
+    strong_points: list[dict] | None = None,
+    insight_text: str = "",
+):
+    """Sync wrapper for index_session_memory."""
+    return _run_async(index_session_memory(
+        session_id=session_id, topic=topic, summary=summary,
+        weak_points=weak_points, user_id=user_id,
+        strong_points=strong_points, insight_text=insight_text,
+    ))
 
 
 def _serialize(vec: np.ndarray) -> bytes:
@@ -62,7 +244,7 @@ def _time_decay(created_at: str) -> float:
 
 # ── Write ──
 
-def index_session_memory(
+async def index_session_memory(
     session_id: str | None,
     topic: str | None,
     summary: str,
@@ -90,14 +272,13 @@ def index_session_memory(
     if not chunks:
         return
 
-    # Batch embed
-    embed_model = get_embedding()
+    # Async batch embed with timeout
     texts = [c[1] for c in chunks]
-    vectors = embed_model.get_text_embedding_batch(texts)
+    vectors = await _embed_batch(texts)
 
     now = datetime.now().isoformat()
     for (chunk_type, content, t, sid, meta), vec in zip(chunks, vectors):
-        blob = _serialize(np.array(vec, dtype=np.float32))
+        blob = _serialize(vec)
         conn.execute(
             "INSERT INTO memory_vectors (chunk_type, content, topic, session_id, metadata, embedding, user_id, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -107,7 +288,7 @@ def index_session_memory(
     conn.commit()
     logger.info(f"Indexed {len(chunks)} memory chunks for session {session_id or 'unknown'}.")
 
-    # Auto-cleanup: keep only the latest MAX_VECTORS_PER_USER vectors per user
+    # Auto-cleanup
     _cleanup_old_vectors(user_id)
 
 
@@ -132,7 +313,7 @@ def _cleanup_old_vectors(user_id: str, max_count: int = MAX_VECTORS_PER_USER):
 
 # ── Read ──
 
-def search_memory(
+async def search_memory(
     query: str,
     user_id: str,
     chunk_types: list[str] | None = None,
@@ -162,8 +343,8 @@ def search_memory(
     if not rows:
         return []
 
-    # Embed query
-    query_vec = _embed(query)
+    # Embed query (async with timeout)
+    query_vec = await _embed(query)
 
     # Build matrix and compute similarities
     embeddings = np.stack([_deserialize(r["embedding"]) for r in rows])
@@ -187,7 +368,7 @@ def search_memory(
     return results[:top_k]
 
 
-def find_similar_weak_point(
+async def find_similar_weak_point(
     new_point: str,
     existing_points: list[dict],
     user_id: str,
@@ -209,8 +390,8 @@ def find_similar_weak_point(
     for r in rows:
         cached[r["content"]] = _deserialize(r["embedding"])
 
-    # Embed the new point
-    new_vec = _embed(new_point)
+    # Embed the new point (async with timeout)
+    new_vec = await _embed(new_point)
 
     # Compare against each existing profile weak point
     best_idx = None
@@ -232,10 +413,9 @@ def find_similar_weak_point(
             points_to_embed.append(point_text)
             points_indices.append(i)
 
-    # Embed any uncached points
+    # Embed any uncached points (async with timeout)
     if points_to_embed:
-        embed_model = get_embedding()
-        vecs = embed_model.get_text_embedding_batch(points_to_embed)
+        vecs = await _embed_batch(points_to_embed)
         for text, vec, idx in zip(points_to_embed, vecs, points_indices):
             vec_np = np.array(vec, dtype=np.float32)
             sim = float(_cosine_similarity(new_vec, vec_np.reshape(1, -1))[0])

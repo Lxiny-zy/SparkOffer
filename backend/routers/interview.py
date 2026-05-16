@@ -1,4 +1,5 @@
 """Interview routes — start, chat, end for drill / resume / JD-prep modes."""
+import asyncio
 import json
 import uuid
 
@@ -35,11 +36,11 @@ async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get
     session_id = str(uuid.uuid4())[:8]
 
     if req.mode == InterviewMode.TOPIC_DRILL:
-        topics = load_topics(user_id)
+        topics = await asyncio.to_thread(load_topics, user_id)
         if not req.topic or req.topic not in topics:
             raise HTTPException(400, f"Invalid topic. Available: {list(topics.keys())}")
         try:
-            questions = generate_drill_questions(req.topic, user_id)
+            questions = await asyncio.to_thread(generate_drill_questions, req.topic, user_id)
         except RuntimeError as e:
             raise HTTPException(500, str(e))
         create_session(session_id, req.mode.value, req.topic, questions=questions, user_id=user_id)
@@ -59,33 +60,38 @@ async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get
         config = {"configurable": {"thread_id": session_id}}
 
         async def _gen():
-            async for kind, value in stream_blocking_sse(
-                graph.invoke, initial_state, config,
-                progress_msg="正在准备面试",
-            ):
-                if kind == "sse":
-                    yield value
-                else:
-                    result = value
+            try:
+                async for kind, value in stream_blocking_sse(
+                    graph.invoke, initial_state, config,
+                    progress_msg="正在准备面试",
+                ):
+                    if kind == "sse":
+                        yield value
+                    else:
+                        result = value
 
-            ai_message = ""
-            for msg in reversed(result["messages"]):
-                if isinstance(msg, AIMessage):
-                    ai_message = msg.content
-                    break
+                ai_message = ""
+                for msg in reversed(result["messages"]):
+                    if isinstance(msg, AIMessage):
+                        ai_message = msg.content
+                        break
 
-            create_session(session_id, req.mode.value, req.topic, user_id=user_id)
-            append_message(session_id, "assistant", ai_message, user_id=user_id)
-            graphs[session_id] = {
-                "graph": graph, "config": config,
-                "mode": req.mode, "topic": req.topic,
-                "user_id": user_id,
-            }
-            yield sse_event({"type": "complete", "data": {
-                "session_id": session_id, "mode": req.mode.value,
-                "topic": req.topic, "message": ai_message,
-            }})
-            yield sse_event({"type": "done"})
+                create_session(session_id, req.mode.value, req.topic, user_id=user_id)
+                append_message(session_id, "assistant", ai_message, user_id=user_id)
+                graphs[session_id] = {
+                    "graph": graph, "config": config,
+                    "mode": req.mode, "topic": req.topic,
+                    "user_id": user_id,
+                }
+                yield sse_event({"type": "complete", "data": {
+                    "session_id": session_id, "mode": req.mode.value,
+                    "topic": req.topic, "message": ai_message,
+                }})
+                yield sse_event({"type": "done"})
+            except Exception as e:
+                import logging as _log
+                _log.getLogger("uvicorn").error(f"Resume interview SSE error: {e}")
+                yield sse_event({"type": "error", "message": f"面试初始化失败: {str(e)[:200]}"})
 
         return streaming_response(_gen())
 
@@ -106,10 +112,13 @@ async def start_interview_stream(req: StartInterviewRequest, user_id: str = Depe
             _get_topic_display, _load_high_freq, _parse_json_response,
         )
         from backend.memory import get_topic_context_for_drill, get_profile_summary_for_drill
-        from backend.indexer import retrieve_topic_context
+        from backend.indexer import safe_retrieve_topic_context
         from backend.spaced_repetition import get_due_reviews, init_sr_for_existing_points
         from backend.llm_provider import get_langchain_llm
         from backend.prompts.interviewer import DRILL_QUESTION_GEN_PROMPT
+
+        # 立即发送进度事件，防止代理层因首包超时返回 524
+        yield f"data: {json.dumps({'type': 'progress', 'message': '正在准备知识库...'}, ensure_ascii=False)}\n\n"
 
         init_sr_for_existing_points(user_id)
         topic_display = _get_topic_display(user_id)
@@ -123,13 +132,19 @@ async def start_interview_stream(req: StartInterviewRequest, user_id: str = Depe
             if dp not in all_weak:
                 all_weak.insert(0, dp)
 
+        yield f"data: {json.dumps({'type': 'progress', 'message': '正在检索知识库...'}, ensure_ascii=False)}\n\n"
+
         queries = []
         if all_weak:
             queries.append(" ".join(all_weak[:5]))
         queries.append(f"{topic_name} 核心知识点 面试常见问题")
         all_chunks = []
         for q in queries:
-            all_chunks.extend(retrieve_topic_context(req.topic, q, user_id, top_k=5))
+            chunks = await safe_retrieve_topic_context(req.topic, q, user_id, top_k=5, timeout=60.0)
+            if chunks:
+                all_chunks.extend(chunks)
+            else:
+                yield f"data: {json.dumps({'type': 'progress', 'message': '知识库检索超时或失败，跳过部分知识...'}, ensure_ascii=False)}\n\n"
         seen = set()
         unique_chunks = []
         for c in all_chunks:
@@ -183,6 +198,8 @@ async def start_interview_stream(req: StartInterviewRequest, user_id: str = Depe
             diff_min=diff_min,
             diff_max=diff_max,
         )
+
+        yield f"data: {json.dumps({'type': 'progress', 'message': 'AI 正在生成题目...'}, ensure_ascii=False)}\n\n"
 
         llm = get_langchain_llm()
         from backend.utils.stream_parser import extract_complete_objects
@@ -335,6 +352,14 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             await _update_drill_profile(topic, overall, scores, len(questions), user_id)
             del_live(drill_sessions, session_id)
 
+            try:
+                from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+                await extract_and_writeback(topic, questions, answers, scores, user_id)
+                await collect_high_freq(topic, questions, scores, user_id)
+            except Exception as e:
+                import logging
+                logging.getLogger("uvicorn").warning(f"Knowledge evolution failed: {e}")
+
             result = {
                 "session_id": session_id,
                 "mode": "topic_drill",
@@ -387,6 +412,16 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
 
             await _update_job_prep_profile(overall, scores, len(questions), meta, user_id)
             del_live(job_prep_sessions, session_id)
+
+            try:
+                from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+                jd_topics = _match_jd_to_topics(meta, user_id)
+                for t in jd_topics:
+                    await extract_and_writeback(t, questions, answers, scores, user_id)
+                    await collect_high_freq(t, questions, scores, user_id)
+            except Exception as e:
+                import logging
+                logging.getLogger("uvicorn").warning(f"JD prep knowledge evolution failed: {e}")
 
             result = {
                 "session_id": session_id,
@@ -463,6 +498,20 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
 
         del_live(graphs, session_id)
 
+        try:
+            from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+            resume_topics = _match_resume_to_topics(messages, user_id)
+            if resume_topics and eval_history:
+                resume_qs = [{"question": e.get("question", "")} for e in eval_history if e.get("question")]
+                resume_scores = [{"score": e.get("score", 5), "assessment": e.get("assessment", "")} for e in eval_history]
+                resume_answers = [e.get("answer", "") for e in eval_history]
+                for t in resume_topics:
+                    await extract_and_writeback(t, resume_qs, resume_answers, resume_scores, user_id)
+                    await collect_high_freq(t, resume_qs, resume_scores, user_id)
+        except Exception as e:
+            import logging
+            logging.getLogger("uvicorn").warning(f"Resume knowledge evolution failed: {e}")
+
         result = {
             "session_id": session_id,
             "mode": "resume",
@@ -506,14 +555,14 @@ async def generate_reference_answer(body: dict, user_id: str = Depends(get_curre
         if cached:
             return {"reference_answer": cached, "cached": True, "mode": mode}
 
-    from backend.indexer import retrieve_topic_context
+    from backend.indexer import safe_retrieve_topic_context
     from backend.llm_provider import get_langchain_llm
     from backend.prompts.interviewer import REFERENCE_ANSWER_PROMPT, HINT_PROMPT
 
     topics = load_topics(user_id)
     topic_name = topics.get(topic, {}).get("name", topic)
 
-    refs = retrieve_topic_context(topic, question, user_id, top_k=3)
+    refs = await safe_retrieve_topic_context(topic, question, user_id, top_k=3, timeout=60.0)
     knowledge_context = "\n\n".join(refs) if refs else "（暂无参考材料）"
 
     if mode == "hint":
@@ -544,6 +593,39 @@ async def generate_reference_answer(body: dict, user_id: str = Depends(get_curre
         yield sse_event({"type": "done"})
 
     return streaming_response(_gen())
+
+
+# ── Topic matching helpers ──
+
+def _match_resume_to_topics(messages: list, user_id: str) -> list[str]:
+    """Infer relevant knowledge topics from resume interview messages."""
+    topics = load_topics(user_id)
+    if not topics:
+        return []
+    text = " ".join(
+        (m.content if hasattr(m, "content") else str(m))[:200]
+        for m in messages[-20:]
+    ).lower()
+    matched = []
+    for key, info in topics.items():
+        name = info.get("name", key).lower()
+        if name in text or key.lower() in text:
+            matched.append(key)
+    return matched[:3]
+
+
+def _match_jd_to_topics(meta: dict, user_id: str) -> list[str]:
+    """Match JD prep metadata to user's knowledge topics."""
+    topics = load_topics(user_id)
+    if not topics:
+        return []
+    jd_text = (meta.get("jd_text", "") + " " + meta.get("position", "")).lower()
+    matched = []
+    for key, info in topics.items():
+        name = info.get("name", key).lower()
+        if name in jd_text or key.lower() in jd_text:
+            matched.append(key)
+    return matched[:3]
 
 
 # ── Profile update helpers ──

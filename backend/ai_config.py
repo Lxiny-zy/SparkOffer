@@ -40,15 +40,6 @@ _SETTINGS_KEY_MAP = {
     ("qiniu", "domain"): "qiniu_domain",
 }
 
-# Fields that contain secrets — masked in GET responses
-SECRET_FIELDS = {
-    ("llm", "api_key"),
-    ("embedding", "api_key"),
-    ("asr", "dashscope_api_key"),
-    ("qiniu", "access_key"),
-    ("qiniu", "secret_key"),
-}
-
 
 def _load_from_disk() -> dict:
     """Read JSON file, return empty dict if missing or corrupt."""
@@ -246,13 +237,6 @@ def get_config_version() -> int:
     return _config_version
 
 
-def _mask_secret(value: str) -> str:
-    """Mask a secret value for display: show last 4 chars."""
-    if not value or len(value) <= 4:
-        return "****"
-    return "****" + value[-4:]
-
-
 def _detect_source(section: str, key: str) -> str:
     """Determine where the effective value comes from."""
     with _lock:
@@ -268,10 +252,7 @@ def _detect_source(section: str, key: str) -> str:
 
 
 def get_all_effective() -> dict:
-    """Return full config with effective values and source markers.
-
-    API keys are masked. Each field is {value, source}.
-    """
+    """Return full config with effective values and source markers."""
     result = {}
     for (section, key), _ in _SETTINGS_KEY_MAP.items():
         if section not in result:
@@ -279,15 +260,10 @@ def get_all_effective() -> dict:
         value = get_effective(section, key)
         source = _detect_source(section, key)
 
-        # Convert non-string types for JSON
         if isinstance(value, (int, float)):
             display = value
         else:
             display = str(value) if value else ""
-
-        # Mask secrets
-        if (section, key) in SECRET_FIELDS and display:
-            display = _mask_secret(str(display))
 
         result[section][key] = {"value": display, "source": source}
 

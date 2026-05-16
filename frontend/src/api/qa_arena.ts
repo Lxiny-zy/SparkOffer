@@ -76,11 +76,12 @@ export async function clearQAMessages(sessionId: string): Promise<void> {
 
 // ── Streaming Chat ──
 
-export async function* streamQAChat(sessionId: string, message: string): AsyncGenerator<any> {
+export async function* streamQAChat(sessionId: string, message: string, signal?: AbortSignal): AsyncGenerator<any> {
   const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/chat`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ message }),
+    signal,
   });
 
   if (res.status === 401) {

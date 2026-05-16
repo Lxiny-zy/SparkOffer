@@ -16,20 +16,39 @@ def _hash_question(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
-def _extract_questions(conn: sqlite3.Connection, topic: str, user_id: str) -> list[dict]:
-    """Extract all questions with scores from completed drill sessions for a topic."""
+def _extract_questions(conn: sqlite3.Connection, topic: str, user_id: str) -> tuple[list[dict], dict]:
+    """Extract all questions with scores from completed drill / jd_prep / recording sessions for a topic.
+
+    Returns (questions, debug_meta) — meta is used by the frontend to surface
+    diagnostic info when the graph is empty.
+    """
+    # Accept any mode that produces per-question scores. Drop the strict
+    # `review IS NOT NULL` filter — if the streamed review write was interrupted
+    # but scores landed, we should still render the node.
     rows = conn.execute(
-        "SELECT session_id, questions, scores, created_at FROM sessions "
-        "WHERE topic = ? AND user_id = ? AND mode = 'topic_drill' AND review IS NOT NULL "
+        "SELECT session_id, mode, questions, scores, review, created_at FROM sessions "
+        "WHERE topic = ? AND user_id = ? AND mode IN ('topic_drill', 'jd_prep', 'recording') "
         "ORDER BY created_at ASC",
         (topic, user_id),
     ).fetchall()
 
     # question_text → latest record (dedup by keeping last occurrence)
     seen: dict[str, dict] = {}
+    sessions_total = len(rows)
+    sessions_with_scores = 0
+    sessions_without_review = 0
+    last_session_at = ""
     for row in rows:
+        if row["created_at"] and row["created_at"] > last_session_at:
+            last_session_at = row["created_at"]
+        scores_raw = row["scores"] or "[]"
+        scores = json.loads(scores_raw)
+        if not scores:
+            continue
+        sessions_with_scores += 1
+        if not row["review"]:
+            sessions_without_review += 1
         questions = json.loads(row["questions"] or "[]")
-        scores = json.loads(row["scores"] or "[]")
         score_map = {s["question_id"]: s for s in scores if "question_id" in s}
 
         for q in questions:
@@ -52,7 +71,14 @@ def _extract_questions(conn: sqlite3.Connection, topic: str, user_id: str) -> li
                 "session_id": row["session_id"],
             }
 
-    return list(seen.values())
+    meta = {
+        "sessions_total": sessions_total,
+        "sessions_with_scores": sessions_with_scores,
+        "sessions_without_review": sessions_without_review,
+        "last_session_at": last_session_at,
+        "unique_questions": len(seen),
+    }
+    return list(seen.values()), meta
 
 
 def _get_or_compute_embeddings(
@@ -107,10 +133,10 @@ def _get_or_compute_embeddings(
 def build_graph(topic: str, user_id: str) -> dict:
     """Build question relationship graph for a topic.
 
-    Returns {"nodes": [...], "links": [...]}
+    Returns {"nodes": [...], "links": [...], "meta": {...}}
     """
     conn = get_db()
-    questions = _extract_questions(conn, topic, user_id)
+    questions, meta = _extract_questions(conn, topic, user_id)
 
     if len(questions) < 2:
         return {
@@ -118,6 +144,7 @@ def build_graph(topic: str, user_id: str) -> dict:
                 {"id": i, **q} for i, q in enumerate(questions)
             ],
             "links": [],
+            "meta": meta,
         }
 
     embeddings = _get_or_compute_embeddings(conn, questions, topic)
@@ -147,4 +174,4 @@ def build_graph(topic: str, user_id: str) -> dict:
                     "similarity": round(sim, 3),
                 })
 
-    return {"nodes": nodes, "links": links}
+    return {"nodes": nodes, "links": links, "meta": meta}

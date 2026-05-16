@@ -61,6 +61,7 @@ export interface ScoreHistoryEntry {
   avg_score: number;
   mode: string;
   topic?: string;
+  dimension_scores?: Record<string, number>;
 }
 
 export interface TopicMastery {
@@ -69,6 +70,7 @@ export interface TopicMastery {
   notes?: string;
   retrospective?: string;
   retrospective_at?: string;
+  last_assessed?: string;
 }
 
 export interface Profile {
@@ -85,6 +87,7 @@ export interface Profile {
     score_history?: ScoreHistoryEntry[];
   };
   topic_mastery?: Record<string, TopicMastery>;
+  previous_topic_mastery?: Record<string, TopicMastery>;
   weak_points?: WeakPoint[];
   strong_points?: StrongPoint[];
   thinking_patterns?: ThinkingPatterns;

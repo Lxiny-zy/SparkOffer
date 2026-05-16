@@ -19,6 +19,10 @@ RESUME_INTERVIEWER_SYSTEM = """你是一位在 AI 领域工作多年的技术专
 ## 候选人简历信息
 {resume_context}
 
+## 技术知识参考
+以下是候选人知识库中的参考材料，帮助你更精准地追问技术深度：
+{knowledge_context}
+
 ## 当前面试阶段: {phase}
 
 ## 面试阶段说明

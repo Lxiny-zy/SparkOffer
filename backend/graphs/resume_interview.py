@@ -10,11 +10,46 @@ from langgraph.checkpoint.memory import MemorySaver
 from backend.models import ResumeInterviewState, InterviewPhase
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
-from backend.indexer import query_resume
+from backend.indexer import query_resume, retrieve_topic_context, load_topics
 from backend.memory import get_profile_summary
 from backend.prompts.interviewer import RESUME_INTERVIEWER_SYSTEM
 
 logger = logging.getLogger("uvicorn")
+
+_KNOWLEDGE_LIMIT = 3000
+
+
+def _retrieve_all_topic_knowledge(user_id: str, query: str = "") -> str:
+    """Retrieve knowledge snippets across all user topics for resume interview.
+
+    Uses per-topic timeout protection (60s each) to prevent hanging on large indexes.
+    """
+    import concurrent.futures
+
+    try:
+        topics = load_topics(user_id)
+        if not topics:
+            return ""
+        chunks = []
+        q = query or "核心知识点 面试常见问题"
+        for topic_key in list(topics.keys())[:6]:
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(retrieve_topic_context, topic_key, q, user_id, 2)
+                    results = future.result(timeout=60.0)
+                chunks.extend(results)
+            except concurrent.futures.TimeoutError:
+                logger.warning(f"Knowledge retrieval timed out (60s) for topic {topic_key} in resume interview")
+                continue
+            except Exception:
+                continue
+        if not chunks:
+            return ""
+        return "\n\n---\n\n".join(c[:500] for c in chunks)[:_KNOWLEDGE_LIMIT]
+    except Exception as e:
+        logger.warning("Knowledge retrieval for resume interview failed: %s", e)
+        return ""
+
 
 PHASE_ORDER = [
     InterviewPhase.GREETING.value,
@@ -53,9 +88,11 @@ def _make_init_interview(user_id: str):
     def init_interview(state: ResumeInterviewState) -> dict:
         """Load resume context and prepare the opening."""
         resume_ctx = query_resume("列出候选人的所有项目经历、技能和教育背景", user_id)
+        knowledge_ctx = _retrieve_all_topic_knowledge(user_id)
 
         system_prompt = RESUME_INTERVIEWER_SYSTEM.format(
             resume_context=resume_ctx,
+            knowledge_context=knowledge_ctx or "（暂无知识库数据）",
             phase=InterviewPhase.GREETING.value,
             asked_questions="无",
             user_profile=get_profile_summary(user_id),
@@ -86,8 +123,10 @@ def _make_interviewer_ask(user_id: str):
         asked = state.get("questions_asked", [])
         asked_str = "\n".join(f"- {q}" for q in asked) if asked else "无"
 
+        knowledge_ctx = _retrieve_all_topic_knowledge(user_id)
         system_prompt = RESUME_INTERVIEWER_SYSTEM.format(
             resume_context=state.get("resume_context", ""),
+            knowledge_context=knowledge_ctx or "（暂无知识库数据）",
             phase=state.get("phase", "technical"),
             asked_questions=asked_str,
             user_profile=get_profile_summary(user_id),

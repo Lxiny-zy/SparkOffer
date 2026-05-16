@@ -43,14 +43,31 @@
   --surface-container-high: #E5DFE9;
   --radius: 1.5rem;
   --radius-pill: 9999px;
+  /* Gradient & glow tokens */
+  --gradient-primary: linear-gradient(135deg, #6750A4, #9C7CDB);
+  --gradient-accent: linear-gradient(135deg, #6750A4, #D0BCFF);
+  --gradient-warm: linear-gradient(135deg, #7D5260, #D0BCFF);
+  --gradient-success: linear-gradient(135deg, #386A20, #6DD6C8);
+  --glow-primary: rgba(103, 80, 164, 0.15);
+  --glow-accent: rgba(208, 188, 255, 0.2);
+  --card-highlight: rgba(103, 80, 164, 0.04);
+  /* Tech-style tokens */
+  --grid-line: rgba(103, 80, 164, 0.08);
+  --aurora-1: #6750A4;
+  --aurora-2: #D0BCFF;
+  --aurora-3: #6DD6C8;
+  --noise-opacity: 0.025;
+  --glass-bg: rgba(255, 255, 255, 0.65);
+  --glass-border: rgba(103, 80, 164, 0.18);
+  --tech-glow: rgba(103, 80, 164, 0.25);
 }
 
 .dark {
-  --background: #0E0D11;
+  --background: #0B0A0F;
   --foreground: #E6E0E9;
-  --card: #1D1B20;
+  --card: #1C1A22;
   --card-foreground: #E6E0E9;
-  --popover: #1D1B20;
+  --popover: #1C1A22;
   --popover-foreground: #E6E0E9;
   --primary: #D0BCFF;
   --primary-hover: #E8DEFF;
@@ -63,15 +80,15 @@
   --accent-foreground: #381E72;
   --destructive: #F2B8B5;
   --destructive-foreground: #601410;
-  --border: rgba(230, 224, 233, 0.10);
+  --border: rgba(208, 188, 255, 0.08);
   --input: rgba(230, 224, 233, 0.06);
-  --input-background: #2B2930;
+  --input-background: #252330;
   --ring: #D0BCFF;
-  --sidebar: #141318;
+  --sidebar: #100F15;
   --sidebar-foreground: #E6E0E9;
   --sidebar-primary: #D0BCFF;
   --sidebar-accent: #4A4458;
-  --sidebar-border: rgba(230, 224, 233, 0.06);
+  --sidebar-border: rgba(208, 188, 255, 0.06);
   --ai-glow: #D0BCFF;
   --success: #A8D88E;
   --warning: #FFB95A;
@@ -79,9 +96,25 @@
   --teal: #6DD6C8;
   --tertiary: #EFB8C8;
   --tertiary-foreground: #492532;
-  --surface-container: #1A181E;
-  --surface-container-low: #141318;
-  --surface-container-high: #242229;
+  --surface-container: #17151D;
+  --surface-container-low: #121019;
+  --surface-container-high: #211F28;
+  /* Dark gradient & glow — neon-tinted */
+  --gradient-primary: linear-gradient(135deg, #D0BCFF, #A78BFA);
+  --gradient-accent: linear-gradient(135deg, #A78BFA, #F0ABFC);
+  --gradient-warm: linear-gradient(135deg, #EFB8C8, #D0BCFF);
+  --gradient-success: linear-gradient(135deg, #A8D88E, #6DD6C8);
+  --glow-primary: rgba(208, 188, 255, 0.12);
+  --glow-accent: rgba(167, 139, 250, 0.15);
+  --card-highlight: rgba(208, 188, 255, 0.03);
+  --grid-line: rgba(208, 188, 255, 0.06);
+  --aurora-1: #A78BFA;
+  --aurora-2: #F0ABFC;
+  --aurora-3: #6DD6C8;
+  --noise-opacity: 0.05;
+  --glass-bg: rgba(28, 26, 34, 0.55);
+  --glass-border: rgba(208, 188, 255, 0.14);
+  --tech-glow: rgba(167, 139, 250, 0.35);
 }
 
 @theme inline {
@@ -151,6 +184,16 @@
   --animate-cat-head-tilt: cat-head-tilt 0.5s cubic-bezier(0.2, 0, 0, 1) forwards;
   --animate-cat-ear-twitch: cat-ear-twitch 1.5s cubic-bezier(0.2, 0, 0, 1) infinite;
   --animate-cat-happy-bounce: cat-happy-bounce 1s cubic-bezier(0.2, 0, 0, 1) infinite;
+  --animate-gradient-shift: gradient-shift 8s ease infinite;
+  --animate-spotlight: spotlight 3s ease-in-out infinite;
+  --animate-scale-in: scale-in 0.3s cubic-bezier(0.2, 0, 0, 1) both;
+  --animate-glow-breathe: glow-breathe 4s ease-in-out infinite;
+  --animate-aurora-drift: aurora-drift 20s ease-in-out infinite;
+  --animate-grid-pan: grid-pan 40s linear infinite;
+  --animate-particle-float: particle-float 15s ease-in-out infinite;
+  --animate-text-shimmer: text-shimmer 3s ease-in-out infinite;
+  --animate-typing-cursor: typing-cursor 1.2s ease-in-out infinite;
+  --animate-status-breathe: status-breathe 2s ease-in-out infinite;
 }
 
 @layer base {
@@ -186,16 +229,31 @@
     flex-direction: column;
   }
 
+  /* Safe area for mobile devices with notch/home indicator */
+  .safe-area-bottom {
+    padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.5rem);
+  }
+
   button {
     cursor: pointer;
     border: none;
     font-family: inherit;
     font-size: inherit;
+    /* Prevent tap highlight on mobile */
+    -webkit-tap-highlight-color: transparent;
   }
 
   input, textarea {
     font-family: inherit;
     font-size: inherit;
+    /* Prevent zoom on focus on iOS (min 16px) */
+    font-size: max(16px, 1em);
+  }
+
+  @media (min-width: 768px) {
+    input, textarea {
+      font-size: inherit;
+    }
   }
 
   a {
@@ -267,6 +325,69 @@
   0% { transform: scale(0) rotate(-45deg); }
   50% { transform: scale(1.2) rotate(0); }
   100% { transform: scale(1) rotate(0); }
+}
+
+@keyframes gradient-shift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+@keyframes spotlight {
+  0%, 100% { opacity: 0; transform: translateX(-100%) rotate(15deg); }
+  50% { opacity: 0.06; transform: translateX(100%) rotate(15deg); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes glow-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 var(--glow-primary); }
+  50% { box-shadow: 0 0 24px 4px var(--glow-primary); }
+}
+
+@keyframes count-up {
+  from { opacity: 0; transform: translateY(8px) scale(0.9); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes border-glow {
+  0%, 100% { border-color: rgba(103, 80, 164, 0.1); }
+  50% { border-color: rgba(103, 80, 164, 0.25); }
+}
+
+@keyframes aurora-drift {
+  0%, 100% { transform: translate(0%, 0%) rotate(0deg); opacity: 0.7; }
+  33% { transform: translate(3%, -2%) rotate(2deg); opacity: 0.85; }
+  66% { transform: translate(-2%, 3%) rotate(-2deg); opacity: 0.6; }
+}
+
+@keyframes grid-pan {
+  0% { background-position: 0 0; }
+  100% { background-position: 40px 40px; }
+}
+
+@keyframes particle-float {
+  0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.4; }
+  25% { transform: translate(20px, -30px) scale(1.1); opacity: 0.7; }
+  50% { transform: translate(-15px, -50px) scale(0.95); opacity: 0.5; }
+  75% { transform: translate(10px, -25px) scale(1.05); opacity: 0.65; }
+}
+
+@keyframes text-shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+@keyframes typing-cursor {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+@keyframes status-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(168, 216, 142, 0.6); }
+  50% { box-shadow: 0 0 0 6px rgba(168, 216, 142, 0); }
 }
 
 /* ── Cat Avatar Animations ───────────────────────── */
@@ -365,6 +486,31 @@
   animation: none !important;
 }
 
+/* Cat peek animation — slides in from right edge */
+@keyframes cat-peek-in {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.animate-cat-peek {
+  animation: cat-peek-in 0.35s cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+/* Gentle peek sway — used on the avatar inside the side-pill so the cat
+   visibly "peeks out" then retreats, instead of sitting frozen. */
+@keyframes cat-peek-sway {
+  0%, 100%  { transform: translateX(0) rotate(0deg); }
+  20%       { transform: translateX(-5px) rotate(-2deg); }
+  35%       { transform: translateX(-3px) rotate(-1deg); }
+  55%       { transform: translateX(-6px) rotate(-3deg); }
+  70%       { transform: translateX(-2px) rotate(0deg); }
+  85%       { transform: translateX(0) rotate(1deg); }
+}
+.animate-cat-peek-sway {
+  animation: cat-peek-sway 4s ease-in-out infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+
 .stagger-children > * {
   animation: fade-in-up 0.4s cubic-bezier(0.2, 0, 0, 1) backwards;
 }
@@ -380,42 +526,345 @@
 ::-webkit-scrollbar-thumb { background: var(--muted-foreground); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--primary); }
 
-.md-content p { margin: 0 0 8px; }
+/* ═══════════════════════════════════════════════════════════
+   Markdown 内容渲染 — 多彩配色，亮/暗双主题完整适配
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── 多彩 token 颜色变量（亮色主题） ── */
+:root {
+  --md-inline-code-bg:     rgba(103, 80, 164, 0.10);
+  --md-inline-code-color:  #6750A4;
+  --md-inline-code-border: rgba(103, 80, 164, 0.20);
+
+  --md-pre-bg:             #1A1730;
+  --md-pre-border:         rgba(103, 80, 164, 0.20);
+  --md-pre-accent:         #6750A4;
+  --md-pre-code-color:     #D0C8E8;
+
+  --md-lang-bg:            rgba(103, 80, 164, 0.14);
+  --md-lang-color:         #8B6EC7;
+
+  /* 标题：单色阶梯，让颜色给到语义 token（绿/金/橙=分数+警告+提示） */
+  --md-h1-color:           #1C1B1F;             /* 主前景 */
+  --md-h2-color:           #6750A4;             /* 品牌紫 */
+  --md-h2-border:          rgba(103, 80, 164, 0.18);
+  --md-h3-color:           #49454F;             /* 中性深灰 */
+  --md-h4-color:           #6B6770;             /* 中性中灰 */
+
+  --md-strong-color:       #1C1B1F;
+  --md-em-color:           #6750A4;             /* 改用品牌紫，避免和 teal 链接冲突 */
+
+  --md-blockquote-border:  #6750A4;             /* 品牌紫，提示性引用 */
+  --md-blockquote-bg:      rgba(103, 80, 164, 0.05);
+  --md-blockquote-color:   #49454F;
+
+  --md-bullet-color:       #6750A4;             /* 列表符跟主色 */
+
+  --md-table-head-bg:      rgba(103, 80, 164, 0.08);
+  --md-table-row-alt-bg:   rgba(29, 27, 32, 0.03);
+  --md-table-border:       rgba(29, 27, 32, 0.10);
+
+  --md-hr-color:           rgba(103, 80, 164, 0.20);
+}
+
+/* ── 多彩 token 颜色变量（暗色主题） ── */
+.dark {
+  --md-inline-code-bg:     rgba(208, 188, 255, 0.10);
+  --md-inline-code-color:  #C9B8FF;
+  --md-inline-code-border: rgba(208, 188, 255, 0.20);
+
+  --md-pre-bg:             #0D0B14;
+  --md-pre-border:         rgba(208, 188, 255, 0.10);
+  --md-pre-accent:         #A78BFA;
+  --md-pre-code-color:     #CEC6DC;
+
+  --md-lang-bg:            rgba(167, 139, 250, 0.12);
+  --md-lang-color:         #A78BFA;
+
+  /* 标题：单色阶梯（暗色主题对应反相） */
+  --md-h1-color:           #E6E0E9;             /* 主前景 */
+  --md-h2-color:           #D0BCFF;             /* 品牌紫（暗色） */
+  --md-h2-border:          rgba(208, 188, 255, 0.18);
+  --md-h3-color:           #CAC4D0;             /* 中性浅灰 */
+  --md-h4-color:           #A199AC;             /* 中性中灰 */
+
+  --md-strong-color:       #E6E0E9;
+  --md-em-color:           #D0BCFF;             /* 品牌紫，与亮色保持语义一致 */
+
+  --md-blockquote-border:  #D0BCFF;             /* 品牌紫 */
+  --md-blockquote-bg:      rgba(208, 188, 255, 0.06);
+  --md-blockquote-color:   #CAC4D0;
+
+  --md-bullet-color:       #D0BCFF;
+
+  --md-table-head-bg:      rgba(208, 188, 255, 0.08);
+  --md-table-row-alt-bg:   rgba(208, 188, 255, 0.03);
+  --md-table-border:       rgba(208, 188, 255, 0.10);
+
+  --md-hr-color:           rgba(208, 188, 255, 0.18);
+}
+
+/* ── 基础段落 ── */
+.md-content p { margin: 0 0 10px; }
 .md-content p:last-child { margin-bottom: 0; }
-.md-content strong { color: var(--foreground); font-weight: 600; }
-.md-content em { color: var(--teal); }
+/* 限制 markdown 容器的重排范围，降低流式渲染时的整页抖动 */
+.md-content { contain: content; word-break: break-word; }
+
+/* 题目场景：让 markdown 段落保持加粗（用于题目标题位置） */
+.question-md p { font-weight: 600; color: var(--text); }
+.question-md p:first-child { margin-top: 0; }
+
+/* ── 强调：粗体用前景色，斜体用 teal ── */
+.md-content strong { color: var(--md-strong-color); font-weight: 700; }
+.md-content em     { color: var(--md-em-color); font-style: italic; }
+
+/* ── 行内代码：紫色调，与正文明显区分 ── */
 .md-content code {
-  background: var(--secondary);
-  padding: 2px 6px;
-  border-radius: 8px;
-  font-size: 13px;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
+  background:   var(--md-inline-code-bg);
+  color:        var(--md-inline-code-color);
+  padding:      2px 7px;
+  border-radius: 6px;
+  font-size:    13px;
+  font-family:  "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  border:       1px solid var(--md-inline-code-border);
+  font-weight:  500;
 }
+
+/* ── 代码块：深背景 + 左侧彩色竖线 ── */
 .md-content pre {
-  background: var(--secondary);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 12px 16px;
-  margin: 8px 0;
-  overflow-x: auto;
+  background:    var(--md-pre-bg);
+  border:        1px solid var(--md-pre-border);
+  border-left:   3px solid var(--md-pre-accent);
+  border-radius: 12px;
+  padding:       14px 18px;
+  margin:        12px 0;
+  overflow-x:    auto;
+  position:      relative;
 }
-.md-content pre code { background: none; padding: 0; }
-.md-content ul, .md-content ol { margin: 6px 0; padding-left: 20px; }
-.md-content li { margin: 2px 0; }
-.md-content h1, .md-content h2, .md-content h3 { margin: 12px 0 6px; font-weight: 600; }
-.md-content h1 { font-size: 18px; }
-.md-content h2 { font-size: 16px; }
-.md-content h3 { font-size: 15px; }
+
+/* pre 内 code 去掉行内代码的装饰 */
+.md-content pre code {
+  background:  none;
+  border:      none;
+  padding:     0;
+  color:       var(--md-pre-code-color);
+  font-size:   13px;
+  line-height: 1.75;
+}
+
+/* ── 代码块语言标签（SyntaxHighlighter 渲染） ── */
+.md-code-wrapper {
+  position: relative;
+  margin:   12px 0;
+}
+.md-code-lang {
+  position:       absolute;
+  top:            0;
+  right:          14px;
+  font-size:      10.5px;
+  font-family:    "JetBrains Mono", monospace;
+  color:          var(--md-lang-color);
+  padding:        2px 10px;
+  border-radius:  0 0 7px 7px;
+  background:     var(--md-lang-bg);
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+  user-select:    none;
+  font-weight:    600;
+  z-index:        10;
+}
+/* SyntaxHighlighter 容器内 padding-top 给语言标签留空间 */
+.md-code-wrapper > div pre {
+  padding-top: 26px !important;
+}
+
+/* ── 列表：绿色列表符 ── */
+.md-content ul, .md-content ol { margin: 8px 0; padding-left: 22px; }
+.md-content li { margin: 3px 0; line-height: 1.7; }
+.md-content ul > li::marker { color: var(--md-bullet-color); }
+.md-content ol > li::marker { color: var(--md-bullet-color); font-weight: 600; }
+
+/* ── 标题：单色 + 字号/字重阶梯传达层级 ── */
+.md-content h1, .md-content h2,
+.md-content h3, .md-content h4 { margin: 18px 0 8px; font-weight: 700; }
+
+.md-content h1 {
+  font-size:  21px;
+  color:      var(--md-h1-color);
+  border-bottom: 2px solid var(--md-hr-color);
+  padding-bottom: 6px;
+  letter-spacing: -0.01em;
+}
+.md-content h2 {
+  font-size:  17px;
+  color:      var(--md-h2-color);
+  border-bottom: 1px solid var(--md-h2-border);
+  padding-bottom: 4px;
+}
+.md-content h3 {
+  font-size:  15px;
+  color:      var(--md-h3-color);
+  font-weight: 600;
+}
+.md-content h4 {
+  font-size:  13px;
+  color:      var(--md-h4-color);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* ── 引用块：金色左边框 ── */
 .md-content blockquote {
-  border-left: 3px solid var(--accent);
-  padding-left: 12px;
-  margin: 8px 0;
-  color: var(--muted-foreground);
+  border-left:   3px solid var(--md-blockquote-border);
+  padding:       8px 16px;
+  margin:        12px 0;
+  color:         var(--md-blockquote-color);
+  background:    var(--md-blockquote-bg);
+  border-radius: 0 10px 10px 0;
+  font-style:    italic;
 }
+
+/* ── 分割线 ── */
 .md-content hr {
+  border:     none;
+  border-top: 1px solid var(--md-hr-color);
+  margin:     16px 0;
+}
+
+/* ── 表格 ── */
+.md-content table {
+  width:           100%;
+  border-collapse: collapse;
+  margin:          14px 0;
+  font-size:       13px;
+  border-radius:   8px;
+  overflow:        hidden;
+}
+.md-content th {
+  background:  var(--md-table-head-bg);
+  padding:     8px 14px;
+  text-align:  left;
+  font-weight: 700;
+  border:      1px solid var(--md-table-border);
+  color:       var(--md-h2-color);
+}
+.md-content td {
+  padding: 6px 14px;
+  border:  1px solid var(--md-table-border);
+}
+.md-content tr:nth-child(even) td {
+  background: var(--md-table-row-alt-bg);
+}
+
+/* ── Premium utility classes ───────────────────────── */
+
+/* Gradient text — usage: className="gradient-text" */
+.gradient-text {
+  background: var(--gradient-primary);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Gradient border — applies a gradient border via pseudo-element */
+.gradient-border {
+  position: relative;
+  border: none !important;
+}
+.gradient-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: var(--gradient-accent);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  -webkit-mask-composite: xor;
+  pointer-events: none;
+  opacity: 0.5;
+  transition: opacity 0.3s ease;
+}
+.gradient-border:hover::before {
+  opacity: 1;
+}
+
+/* Card with spotlight sweep on hover */
+.card-spotlight {
+  position: relative;
+  overflow: hidden;
+}
+.card-spotlight::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 40%, var(--glow-accent) 50%, transparent 60%);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  pointer-events: none;
+}
+.card-spotlight:hover::after {
+  opacity: 1;
+  animation: spotlight 3s ease-in-out infinite;
+}
+
+/* Hoverable card with lift + glow */
+.card-hover-lift {
+  transition: transform 0.3s cubic-bezier(0.2, 0, 0, 1), box-shadow 0.3s ease;
+}
+.card-hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 4px 16px var(--glow-primary),
+    0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* Stat card with animated gradient background */
+.stat-card-gradient {
+  background: linear-gradient(135deg, var(--card) 0%, var(--card) 80%, var(--card-highlight) 100%);
+  position: relative;
+  overflow: hidden;
+}
+.stat-card-gradient::before {
+  content: "";
+  position: absolute;
+  top: -50%;
+  right: -50%;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle, var(--glow-accent) 0%, transparent 70%);
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* Score number with emphasis animation */
+.score-emphasis {
+  animation: count-up 0.6s cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+/* Section divider with gradient */
+.section-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border), var(--primary), var(--border), transparent);
   border: none;
-  border-top: 1px solid var(--border);
-  margin: 12px 0;
+  margin: 1.5rem 0;
+  opacity: 0.5;
+}
+
+/* Badge with subtle gradient background */
+.badge-gradient {
+  background: var(--gradient-primary);
+  color: white;
+  font-weight: 500;
+}
+
+/* Glow ring on focus / active */
+.glow-ring {
+  transition: box-shadow 0.3s ease;
+}
+.glow-ring:focus-visible,
+.glow-ring.active {
+  box-shadow: 0 0 0 3px var(--glow-primary), 0 0 16px var(--glow-accent);
 }
 
 /* MD3 Organic blur shapes */
@@ -434,6 +883,174 @@
   border: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
 }
 
+/* ── Tech-style utility classes (科技感 SaaS) ───────── */
+
+/* Grid background — SVG-based, animated */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 40px 40px;
+  animation: grid-pan 40s linear infinite;
+}
+
+/* Aurora background — three radial gradients */
+.bg-aurora {
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 0%, color-mix(in srgb, var(--aurora-1) 25%, transparent), transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 30%, color-mix(in srgb, var(--aurora-2) 20%, transparent), transparent 60%),
+    radial-gradient(ellipse 70% 50% at 50% 100%, color-mix(in srgb, var(--aurora-3) 18%, transparent), transparent 60%);
+  animation: aurora-drift 20s ease-in-out infinite;
+}
+
+/* Noise texture (SVG inline) for premium grain */
+.bg-noise {
+  position: relative;
+}
+.bg-noise::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: var(--noise-opacity);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  mix-blend-mode: overlay;
+}
+
+/* Strong glass — for hero/auth cards */
+.glass-strong {
+  background: var(--glass-bg);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* Subtle glass — for inline cards */
+.glass-subtle {
+  background: color-mix(in srgb, var(--card) 70%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+}
+
+/* Tech border — gradient outline + inner glow */
+.tech-border {
+  position: relative;
+  border: 1px solid transparent;
+  background-clip: padding-box;
+}
+.tech-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, var(--aurora-1), var(--aurora-2), var(--aurora-3));
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  -webkit-mask-composite: xor;
+  pointer-events: none;
+  opacity: 0.4;
+  transition: opacity 0.3s ease;
+}
+.tech-border:hover::before {
+  opacity: 0.9;
+}
+
+/* CTA gradient button — large, glowing */
+.cta-gradient {
+  background: linear-gradient(135deg, var(--aurora-1), var(--aurora-2));
+  background-size: 200% 200%;
+  color: white;
+  border: none;
+  position: relative;
+  box-shadow:
+    0 4px 20px var(--tech-glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transition: all 0.3s cubic-bezier(0.2, 0, 0, 1);
+}
+.dark .cta-gradient {
+  color: #1C1A22;
+}
+.cta-gradient:hover {
+  background-position: 100% 100%;
+  box-shadow:
+    0 6px 30px var(--tech-glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transform: translateY(-1px);
+}
+
+/* Aurora text — multi-color animated gradient text */
+.aurora-text {
+  background: linear-gradient(90deg, var(--aurora-1), var(--aurora-2), var(--aurora-3), var(--aurora-1));
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: text-shimmer 6s ease-in-out infinite;
+}
+
+/* Scan line decoration */
+.scan-line {
+  position: relative;
+  overflow: hidden;
+}
+.scan-line::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--aurora-2), transparent);
+  animation: spotlight 4s ease-in-out infinite;
+}
+
+/* Floating particle */
+.particle {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--aurora-2);
+  box-shadow: 0 0 12px var(--aurora-2);
+  animation: particle-float 15s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* Typing cursor inline */
+.typing-cursor::after {
+  content: "▌";
+  margin-left: 2px;
+  color: var(--aurora-2);
+  animation: typing-cursor 1.2s ease-in-out infinite;
+}
+
+/* Online status dot with breathing pulse */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: status-breathe 2s ease-in-out infinite;
+}
+
+/* Sidebar nav item active indicator (left bar) */
+.nav-active-indicator {
+  position: absolute;
+  left: -3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 60%;
+  border-radius: 0 4px 4px 0;
+  background: linear-gradient(180deg, var(--aurora-1), var(--aurora-2));
+  box-shadow: 0 0 8px var(--tech-glow);
+}
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -441,4 +1058,278 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ── Mobile-specific enhancements ───────────────────── */
+
+/* Smooth momentum scrolling on iOS */
+@supports (-webkit-overflow-scrolling: touch) {
+  .overflow-y-auto,
+  .overflow-x-auto {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Better touch targets on mobile */
+@media (max-width: 640px) {
+  /* Ensure minimum 44px touch targets */
+  button:not([class*="w-"]):not([class*="h-"]) {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Larger scrollbar for touch */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+
+  /* Prevent text selection on interactive elements */
+  button, [role="button"] {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+}
+
+/* Pull-to-refresh prevention on mobile */
+@media (max-width: 768px) {
+  body {
+    overscroll-behavior-y: contain;
+  }
+}
+
+/* ── Enhanced Dynamic Effects ───────────────────────── */
+
+/* Animated gradient border that rotates */
+@keyframes border-rotate {
+  0% { --angle: 0deg; }
+  100% { --angle: 360deg; }
+}
+
+.animated-border {
+  position: relative;
+  border: none !important;
+}
+.animated-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: conic-gradient(from var(--angle, 0deg), var(--aurora-1), var(--aurora-2), var(--aurora-3), var(--aurora-1));
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  -webkit-mask-composite: xor;
+  pointer-events: none;
+  animation: border-rotate 4s linear infinite;
+}
+
+@property --angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+/* Ripple effect on click */
+@keyframes ripple-expand {
+  0% { transform: scale(0); opacity: 0.5; }
+  100% { transform: scale(4); opacity: 0; }
+}
+
+.ripple-effect {
+  position: relative;
+  overflow: hidden;
+}
+.ripple-effect::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--primary);
+  transform: translate(-50%, -50%) scale(0);
+  opacity: 0;
+  pointer-events: none;
+}
+.ripple-effect:active::after {
+  animation: ripple-expand 0.6s ease-out;
+}
+
+/* Score celebration burst */
+@keyframes celebrate-burst {
+  0% { transform: scale(0) rotate(0deg); opacity: 1; }
+  50% { transform: scale(1.3) rotate(180deg); opacity: 0.8; }
+  100% { transform: scale(1) rotate(360deg); opacity: 1; }
+}
+
+.celebrate-burst {
+  animation: celebrate-burst 0.8s cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Shimmer loading skeleton with multi-color */
+@keyframes multi-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer-multi {
+  background: linear-gradient(
+    90deg,
+    var(--card) 25%,
+    color-mix(in srgb, var(--aurora-1) 15%, var(--card)) 37%,
+    color-mix(in srgb, var(--aurora-2) 12%, var(--card)) 50%,
+    color-mix(in srgb, var(--aurora-3) 10%, var(--card)) 63%,
+    var(--card) 75%
+  );
+  background-size: 200% 100%;
+  animation: multi-shimmer 2s ease-in-out infinite;
+}
+
+/* Progress bar with animated gradient fill */
+.progress-animated {
+  position: relative;
+  overflow: hidden;
+}
+.progress-animated::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.4),
+    transparent
+  );
+  background-size: 200% 100%;
+  animation: text-shimmer 1.5s linear infinite;
+}
+
+/* Floating badge with pulse ring */
+@keyframes badge-pulse-ring {
+  0% { box-shadow: 0 0 0 0 var(--glow-primary); }
+  70% { box-shadow: 0 0 0 8px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+.badge-pulse {
+  animation: badge-pulse-ring 2s ease-in-out infinite;
+}
+
+/* Colorful underline animation for headings */
+@keyframes underline-draw {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+.heading-underline {
+  position: relative;
+  display: inline-block;
+}
+.heading-underline::after {
+  content: "";
+  position: absolute;
+  bottom: -4px;
+  left: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--aurora-1), var(--aurora-2), var(--aurora-3));
+  animation: underline-draw 0.6s cubic-bezier(0.2, 0, 0, 1) forwards;
+}
+
+/* Interactive card with tilt on hover (3D perspective) */
+.card-tilt {
+  transition: transform 0.3s ease;
+  transform-style: preserve-3d;
+  perspective: 1000px;
+}
+.card-tilt:hover {
+  transform: perspective(1000px) rotateX(-2deg) rotateY(2deg) translateZ(4px);
+}
+
+/* Gradient text with multiple color stops */
+.gradient-text-vivid {
+  background: linear-gradient(135deg, var(--aurora-1) 0%, var(--aurora-2) 40%, var(--aurora-3) 70%, var(--aurora-1) 100%);
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: text-shimmer 4s ease-in-out infinite;
+}
+
+/* Neon glow text effect */
+.neon-text {
+  text-shadow:
+    0 0 7px var(--aurora-2),
+    0 0 10px var(--aurora-2),
+    0 0 21px var(--aurora-1);
+}
+.dark .neon-text {
+  text-shadow:
+    0 0 7px var(--aurora-2),
+    0 0 10px var(--aurora-2),
+    0 0 21px var(--aurora-1),
+    0 0 42px var(--aurora-1);
+}
+
+/* Morphing blob background */
+@keyframes morph-blob {
+  0%, 100% { border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%; }
+  25% { border-radius: 30% 60% 70% 40% / 50% 60% 30% 60%; }
+  50% { border-radius: 50% 60% 30% 60% / 30% 60% 70% 40%; }
+  75% { border-radius: 60% 40% 60% 30% / 70% 30% 50% 60%; }
+}
+
+.morph-blob {
+  animation: morph-blob 8s ease-in-out infinite;
+}
+
+/* Staggered fade-in with scale for lists */
+.stagger-scale > * {
+  animation: scale-in 0.4s cubic-bezier(0.2, 0, 0, 1) backwards;
+}
+.stagger-scale > *:nth-child(1) { animation-delay: 0.05s; }
+.stagger-scale > *:nth-child(2) { animation-delay: 0.1s; }
+.stagger-scale > *:nth-child(3) { animation-delay: 0.15s; }
+.stagger-scale > *:nth-child(4) { animation-delay: 0.2s; }
+.stagger-scale > *:nth-child(5) { animation-delay: 0.25s; }
+.stagger-scale > *:nth-child(6) { animation-delay: 0.3s; }
+.stagger-scale > *:nth-child(7) { animation-delay: 0.35s; }
+.stagger-scale > *:nth-child(8) { animation-delay: 0.4s; }
+
+/* Colorful focus ring */
+.focus-ring-colorful:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--card),
+    0 0 0 4px var(--aurora-1),
+    0 0 12px var(--tech-glow);
+}
+
+/* Animated counter (for score displays) */
+@keyframes score-pop {
+  0% { transform: scale(0.5); opacity: 0; filter: blur(4px); }
+  60% { transform: scale(1.15); opacity: 1; filter: blur(0); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.score-pop {
+  animation: score-pop 0.5s cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+/* Hover glow for interactive elements */
+.hover-glow {
+  transition: box-shadow 0.3s ease, transform 0.3s ease;
+}
+.hover-glow:hover {
+  box-shadow: 0 4px 20px var(--tech-glow), 0 0 40px color-mix(in srgb, var(--aurora-2) 20%, transparent);
+  transform: translateY(-1px);
+}
+
+/* Gradient divider with animation */
+.divider-gradient {
+  height: 2px;
+  border: none;
+  background: linear-gradient(90deg, transparent, var(--aurora-1), var(--aurora-2), var(--aurora-3), transparent);
+  background-size: 200% 100%;
+  animation: text-shimmer 4s ease-in-out infinite;
+  opacity: 0.6;
 }

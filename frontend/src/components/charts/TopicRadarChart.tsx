@@ -11,11 +11,21 @@ interface CustomTooltipProps {
 
 function CustomTooltip({ active, payload }: CustomTooltipProps) {
   if (!active || !payload?.length) return null;
-  const d = payload[0].payload;
+  const d = payload[0]?.payload;
+  if (!d) return null;
+  const current = d.score;
+  const prev = d.prev;
+  const diff = prev != null ? current - prev : null;
   return (
     <div className="bg-card border border-border rounded-lg px-3 py-2 shadow-lg text-sm">
       <div className="font-medium">{d.topic}</div>
-      <div className="font-bold text-primary mt-0.5">{d.score}/100</div>
+      <div className="font-bold text-primary mt-0.5">
+        {prev != null ? (
+          <>{prev} → {current} <span className={diff! > 0 ? "text-green" : diff! < 0 ? "text-red" : "text-dim"}>({diff! > 0 ? "+" : ""}{diff})</span></>
+        ) : (
+          <>{current}/100</>
+        )}
+      </div>
       {d.notes && <div className="text-xs text-dim mt-0.5">{d.notes}</div>}
     </div>
   );
@@ -23,14 +33,16 @@ function CustomTooltip({ active, payload }: CustomTooltipProps) {
 
 interface TopicRadarChartProps {
   mastery: Record<string, TopicMastery> | undefined;
+  previousMastery?: Record<string, TopicMastery>;
 }
 
-export default function TopicRadarChart({ mastery }: TopicRadarChartProps) {
+export default function TopicRadarChart({ mastery, previousMastery }: TopicRadarChartProps) {
   if (!mastery || Object.keys(mastery).length === 0) return null;
 
   const data = Object.entries(mastery).map(([topic, info]) => ({
     topic,
     score: info.score ?? (info.level ? info.level * 20 : 0),
+    prev: previousMastery?.[topic]?.score ?? null,
     notes: info.notes || "",
   }));
 
@@ -51,9 +63,17 @@ export default function TopicRadarChart({ mastery }: TopicRadarChartProps) {
     );
   }
 
+  const hasPrev = previousMastery && data.some((d) => d.prev != null);
+
   return (
-    <ResponsiveContainer width="100%" height={260}>
+    <ResponsiveContainer width="100%" height={280}>
       <RadarChart data={data} cx="50%" cy="50%" outerRadius="72%">
+        <defs>
+          <linearGradient id="radarGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--primary)" stopOpacity={0.4} />
+            <stop offset="100%" stopColor="var(--primary)" stopOpacity={0.05} />
+          </linearGradient>
+        </defs>
         <PolarGrid stroke="var(--border)" />
         <PolarAngleAxis
           dataKey="topic"
@@ -65,12 +85,25 @@ export default function TopicRadarChart({ mastery }: TopicRadarChartProps) {
           tickCount={5}
         />
         <Tooltip content={<CustomTooltip />} />
+        {hasPrev && (
+          <Radar
+            dataKey="prev"
+            stroke="var(--muted-foreground)"
+            fill="none"
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+            isAnimationActive={true}
+            animationDuration={600}
+          />
+        )}
         <Radar
           dataKey="score"
           stroke="var(--primary)"
-          fill="var(--primary)"
-          fillOpacity={0.2}
-          strokeWidth={2}
+          fill="url(#radarGradient)"
+          strokeWidth={2.5}
+          isAnimationActive={true}
+          animationDuration={800}
+          dot={{ r: 3, fill: "var(--primary)", stroke: "var(--card)", strokeWidth: 2 }}
         />
       </RadarChart>
     </ResponsiveContainer>

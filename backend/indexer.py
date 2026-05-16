@@ -1,5 +1,8 @@
 """LlamaIndex indexing for resume and interview knowledge base."""
+import asyncio
 import json
+import logging
+import time
 from pathlib import Path
 
 from llama_index.core import (
@@ -8,13 +11,50 @@ from llama_index.core import (
     StorageContext,
     load_index_from_storage,
     Settings as LlamaSettings,
+    Document,
 )
 
 from backend.config import settings
 from backend.llm_provider import get_llama_llm, get_embedding
 
+logger = logging.getLogger("uvicorn")
+
 # In-memory index cache keyed by (user_id, topic_or_resume)
-_index_cache: dict[tuple[str, str], "VectorStoreIndex"] = {}
+# Entries expire after 1 hour to prevent unbounded memory growth.
+_INDEX_CACHE_TTL = 3600.0  # 1 hour
+_INDEX_CACHE_MAX_SIZE = 50
+
+_index_cache: dict[tuple[str, str], tuple[float, "VectorStoreIndex"]] = {}  # key -> (expire_time, index)
+
+# Background rebuild lock — prevent concurrent rebuilds for the same (user, topic)
+_rebuild_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def _cache_get(key: tuple[str, str]) -> "VectorStoreIndex | None":
+    """Get index from cache, returning None if expired or missing."""
+    entry = _index_cache.get(key)
+    if entry is None:
+        return None
+    expire_time, index = entry
+    if time.time() > expire_time:
+        _index_cache.pop(key, None)
+        return None
+    return index
+
+
+def _cache_set(key: tuple[str, str], index: "VectorStoreIndex"):
+    """Set index in cache with TTL. Evicts oldest if over max size."""
+    _index_cache[key] = (time.time() + _INDEX_CACHE_TTL, index)
+    if len(_index_cache) > _INDEX_CACHE_MAX_SIZE:
+        # Evict expired first
+        now = time.time()
+        expired = [k for k, (exp, _) in _index_cache.items() if now > exp]
+        for k in expired:
+            del _index_cache[k]
+        # If still over, evict oldest
+        if len(_index_cache) > _INDEX_CACHE_MAX_SIZE:
+            oldest = min(_index_cache, key=lambda k: _index_cache[k][0])
+            del _index_cache[oldest]
 
 
 def load_topics(user_id: str) -> dict:
@@ -48,8 +88,9 @@ def _init_llama_settings():
 def build_resume_index(user_id: str, force_rebuild: bool = False) -> VectorStoreIndex:
     """Build or load the resume index."""
     cache_key = (user_id, "resume")
-    if cache_key in _index_cache and not force_rebuild:
-        return _index_cache[cache_key]
+    cached = _cache_get(cache_key)
+    if cached is not None and not force_rebuild:
+        return cached
 
     _init_llama_settings()
     resume_path = settings.user_resume_path(user_id)
@@ -67,15 +108,16 @@ def build_resume_index(user_id: str, force_rebuild: bool = False) -> VectorStore
         cache_dir.mkdir(parents=True, exist_ok=True)
         index.storage_context.persist(persist_dir=str(cache_dir))
 
-    _index_cache[cache_key] = index
+    _cache_set(cache_key, index)
     return index
 
 
 def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False) -> VectorStoreIndex:
     """Build or load index for a specific knowledge topic."""
     cache_key = (user_id, topic)
-    if cache_key in _index_cache and not force_rebuild:
-        return _index_cache[cache_key]
+    cached = _cache_get(cache_key)
+    if cached is not None and not force_rebuild:
+        return cached
 
     _init_llama_settings()
 
@@ -107,7 +149,7 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False) -> 
         cache_dir.mkdir(parents=True, exist_ok=True)
         index.storage_context.persist(persist_dir=str(cache_dir))
 
-    _index_cache[cache_key] = index
+    _cache_set(cache_key, index)
     return index
 
 
@@ -127,9 +169,113 @@ def query_topic(topic: str, question: str, user_id: str, top_k: int = 5) -> str:
     return str(response)
 
 
+def invalidate_topic_index(topic: str, user_id: str):
+    """Remove cached index for a topic so it gets rebuilt on next access.
+
+    NOTE: Prefer incremental_insert_to_index() for knowledge evolution scenarios
+    to avoid costly full rebuilds. This function should only be used when the
+    knowledge base has been fundamentally restructured (files deleted, renamed, etc.).
+    """
+    cache_key = (user_id, topic)
+    _index_cache.pop(cache_key, None)
+    cache_dir = settings.user_index_cache_path(user_id) / topic
+    if cache_dir.exists():
+        import shutil
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def incremental_insert_to_index(topic: str, user_id: str, new_text: str):
+    """Insert new content into an existing topic index WITHOUT full rebuild.
+
+    This leverages the existing cached index (memory or disk) and only embeds
+    the new content, avoiding the expensive full-directory re-indexing.
+    Falls back to invalidation if the index doesn't exist yet.
+    """
+    cache_key = (user_id, topic)
+    try:
+        index = build_topic_index(topic, user_id)
+        # Create a Document from the new text and insert into existing index
+        doc = Document(text=new_text, metadata={"source": "auto_evolution", "topic": topic})
+        index.insert(doc)
+        # Persist the updated index to disk cache
+        cache_dir = settings.user_index_cache_path(user_id) / topic
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        index.storage_context.persist(persist_dir=str(cache_dir))
+        # Update in-memory cache
+        _cache_set(cache_key, index)
+        logger.info(f"Incremental insert to index: topic={topic}, user={user_id}, text_len={len(new_text)}")
+    except Exception as e:
+        # If incremental insert fails (e.g. no index exists yet), fall back to invalidation
+        # The index will be fully rebuilt on next access
+        logger.warning(f"Incremental insert failed for {topic}, falling back to invalidation: {e}")
+        invalidate_topic_index(topic, user_id)
+
+
+async def async_rebuild_topic_index(topic: str, user_id: str):
+    """Rebuild topic index in the background (non-blocking).
+
+    Uses a per-(user, topic) lock to prevent concurrent rebuilds.
+    No total timeout — a large topic may take hours across many embedding requests.
+    Protection against hangs is handled at the individual embedding call level:
+      - Each _embed() / _embed_batch() call has its own timeout (see vector_memory.py)
+      - Circuit breaker stops calling embedding API if it's consistently failing
+      - When circuit breaker is OPEN, embed calls return zero vectors instantly,
+        so the rebuild finishes quickly (with degraded quality, but no deadlock)
+    """
+    cache_key = (user_id, topic)
+    if cache_key not in _rebuild_locks:
+        _rebuild_locks[cache_key] = asyncio.Lock()
+
+    lock = _rebuild_locks[cache_key]
+    if lock.locked():
+        logger.info(f"Index rebuild already in progress for {topic}/{user_id}, skipping.")
+        return
+
+    async with lock:
+        try:
+            await asyncio.to_thread(build_topic_index, topic, user_id, True)
+            logger.info(f"Background index rebuild completed: topic={topic}, user={user_id}")
+        except Exception as e:
+            logger.warning(f"Background index rebuild failed for {topic}/{user_id}: {e}")
+            try:
+                from backend.embedding_tasks import get_circuit_breaker
+                get_circuit_breaker().record_failure()
+            except Exception:
+                pass
+
+
+# ── Safe retrieval timeout (seconds) ──
+_RETRIEVAL_TIMEOUT = 60.0
+
+
 def retrieve_topic_context(topic: str, question: str, user_id: str, top_k: int = 5) -> list[str]:
     """Retrieve raw text chunks from topic index (for answer evaluation)."""
     index = build_topic_index(topic, user_id)
     retriever = index.as_retriever(similarity_top_k=top_k)
     nodes = retriever.retrieve(question)
     return [node.get_content() for node in nodes]
+
+
+async def safe_retrieve_topic_context(
+    topic: str, question: str, user_id: str,
+    top_k: int = 5, timeout: float = _RETRIEVAL_TIMEOUT,
+) -> list[str]:
+    """Async-safe wrapper around retrieve_topic_context with timeout protection.
+
+    Returns empty list on timeout or error instead of crashing.
+    """
+    try:
+        chunks = await asyncio.wait_for(
+            asyncio.to_thread(retrieve_topic_context, topic, question, user_id, top_k),
+            timeout=timeout,
+        )
+        return chunks
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"Knowledge retrieval timed out ({timeout}s) for topic={topic}, "
+            f"question={question[:50]!r}..."
+        )
+        return []
+    except Exception as e:
+        logger.warning(f"Knowledge retrieval failed for topic={topic}: {e}")
+        return []

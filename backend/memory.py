@@ -7,7 +7,10 @@
 """
 import json
 import logging
+import os
 import re
+import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +20,18 @@ from backend.config import settings
 from backend.llm_provider import get_langchain_llm
 
 logger = logging.getLogger("uvicorn")
+
+# Per-user file locks to prevent concurrent read-modify-write races on profile.json
+_profile_locks: dict[str, threading.Lock] = {}
+_profile_locks_lock = threading.Lock()
+
+
+def _get_profile_lock(user_id: str) -> threading.Lock:
+    """Get or create a per-user lock for profile file operations."""
+    with _profile_locks_lock:
+        if user_id not in _profile_locks:
+            _profile_locks[user_id] = threading.Lock()
+        return _profile_locks[user_id]
 
 # ── Profile Schema ──
 
@@ -142,20 +157,43 @@ def _insights_dir(user_id: str) -> Path:
 
 
 def _load_profile(user_id: str) -> dict:
-    path = _profile_path(user_id)
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return DEFAULT_PROFILE.copy()
+    """Load user profile with file lock protection."""
+    lock = _get_profile_lock(user_id)
+    with lock:
+        path = _profile_path(user_id)
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        return DEFAULT_PROFILE.copy()
 
 
 def _save_profile(profile: dict, user_id: str):
-    path = _profile_path(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    profile["updated_at"] = datetime.now().isoformat()
-    path.write_text(
-        json.dumps(profile, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    """Save user profile atomically with file lock protection.
+
+    Uses write-to-temp-then-rename pattern to prevent corruption
+    if the process crashes mid-write.
+    """
+    lock = _get_profile_lock(user_id)
+    with lock:
+        path = _profile_path(user_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        profile["updated_at"] = datetime.now().isoformat()
+        data = json.dumps(profile, ensure_ascii=False, indent=2)
+
+        # Atomic write: write to temp file in same directory, then rename
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(path.parent), suffix=".tmp", prefix=".profile_"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
+            os.replace(tmp_path, str(path))
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def _save_insight(mode: str, topic: str, summary: str, raw_extraction: dict, user_id: str):
@@ -213,8 +251,8 @@ def get_topic_context_for_drill(topic: str, user_id: str) -> dict:
     # Semantic retrieval of past insights for this topic
     past_insights = []
     try:
-        from backend.vector_memory import search_memory
-        results = search_memory(
+        from backend.vector_memory import search_memory_sync
+        results = search_memory_sync(
             query=f"{topic} 面试薄弱点 常见错误",
             chunk_types=["session_summary", "insight"],
             topic=topic,
@@ -266,8 +304,8 @@ def update_profile_realtime(
 
     # Record weak point (semantic matching)
     if weak_point:
-        from backend.vector_memory import find_similar_weak_point
-        match_idx = find_similar_weak_point(weak_point, profile.get("weak_points", []), user_id=user_id)
+        from backend.vector_memory import find_similar_weak_point_sync
+        match_idx = find_similar_weak_point_sync(weak_point, profile.get("weak_points", []), user_id=user_id)
         if match_idx is not None:
             profile["weak_points"][match_idx]["times_seen"] = profile["weak_points"][match_idx].get("times_seen", 1) + 1
             profile["weak_points"][match_idx]["last_seen"] = now
@@ -428,11 +466,11 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str):
 def _deterministic_update(profile: dict, new_weak: list, new_strong: list,
                           topic: str | None, now: str, user_id: str):
     """Fallback: vector cosine dedup when LLM parse fails."""
-    from backend.vector_memory import find_similar_weak_point
+    from backend.vector_memory import find_similar_weak_point_sync
 
     for wp in new_weak:
         point = wp.get("point", wp) if isinstance(wp, dict) else str(wp)
-        match_idx = find_similar_weak_point(point, profile.get("weak_points", []), user_id=user_id)
+        match_idx = find_similar_weak_point_sync(point, profile.get("weak_points", []), user_id=user_id)
         if match_idx is not None:
             profile["weak_points"][match_idx]["times_seen"] = profile["weak_points"][match_idx].get("times_seen", 1) + 1
             profile["weak_points"][match_idx]["last_seen"] = now
@@ -617,7 +655,7 @@ async def llm_update_profile(
         )
 
         llm = get_langchain_llm()
-        response = llm.invoke([
+        response = await llm.ainvoke([
             SystemMessage(content="你是画像更新引擎。只返回 JSON。"),
             HumanMessage(content=prompt),
         ])
@@ -632,6 +670,12 @@ async def llm_update_profile(
             logger.warning(f"Profile update LLM parse failed ({e}), falling back to deterministic")
             _deterministic_update(profile, new_weak_points, new_strong_points, topic, now, user_id)
 
+    # ── Snapshot current mastery for frontend comparison overlay ──
+    import copy
+    current_mastery = profile.get("topic_mastery", {})
+    if current_mastery:
+        profile["previous_topic_mastery"] = copy.deepcopy(current_mastery)
+
     # ── Deterministic updates for mastery / communication / thinking / stats ──
     _update_mastery(profile, topic, topic_mastery, now, session_weight)
     _update_communication(profile, communication)
@@ -644,9 +688,9 @@ async def llm_update_profile(
         "strong_points": new_strong_points,
     }, user_id=user_id)
 
-    # Index into vector memory for future semantic retrieval
-    from backend.vector_memory import index_session_memory
-    index_session_memory(
+    # Index into vector memory for future semantic retrieval (background, non-blocking)
+    from backend.embedding_tasks import schedule_session_memory_index
+    schedule_session_memory_index(
         session_id=None, topic=topic,
         summary=session_summary,
         weak_points=new_weak_points,
@@ -691,7 +735,7 @@ async def update_profile_after_interview(
         scores=score_text or "无",
     )
 
-    response = llm.invoke([
+    response = await llm.ainvoke([
         SystemMessage(content="你是面试分析引擎。只返回 JSON。"),
         HumanMessage(content=extract_msg),
     ])

@@ -2,17 +2,90 @@
 
 Centralises the four in-memory dicts and the save/get/del helpers
 so that every router can import them without circular deps.
+
+Includes TTL-based eviction to prevent unbounded memory growth.
 """
+import time
+import threading
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from backend.storage.live_sessions import (
     save_live_session, load_live_session, delete_live_session,
 )
 
-graphs: dict[str, dict] = {}
-drill_sessions: dict[str, dict] = {}
-job_prep_sessions: dict[str, dict] = {}
-algorithm_sessions: dict[str, dict] = {}
+
+class TTLDict:
+    """Dictionary with per-entry TTL eviction.
+
+    Entries are evicted lazily on access and periodically via cleanup().
+    Default TTL: 2 hours.
+    """
+
+    def __init__(self, default_ttl: float = 7200.0, max_size: int = 200):
+        self._data: dict[str, tuple[float, dict]] = {}  # key -> (expire_time, value)
+        self._default_ttl = default_ttl
+        self._max_size = max_size
+        self._lock = threading.Lock()
+
+    def __setitem__(self, key: str, value: dict):
+        with self._lock:
+            self._data[key] = (time.time() + self._default_ttl, value)
+            # Evict oldest if over max size
+            if len(self._data) > self._max_size:
+                self._evict_expired()
+                if len(self._data) > self._max_size:
+                    # Remove oldest entry
+                    oldest_key = min(self._data, key=lambda k: self._data[k][0])
+                    del self._data[oldest_key]
+
+    def __getitem__(self, key: str) -> dict:
+        with self._lock:
+            if key not in self._data:
+                raise KeyError(key)
+            expire, value = self._data[key]
+            if time.time() > expire:
+                del self._data[key]
+                raise KeyError(key)
+            # Refresh TTL on access
+            self._data[key] = (time.time() + self._default_ttl, value)
+            return value
+
+    def __contains__(self, key: str) -> bool:
+        with self._lock:
+            if key not in self._data:
+                return False
+            expire, _ = self._data[key]
+            if time.time() > expire:
+                del self._data[key]
+                return False
+            return True
+
+    def pop(self, key: str, default=None):
+        with self._lock:
+            entry = self._data.pop(key, None)
+            if entry is None:
+                return default
+            _, value = entry
+            return value
+
+    def _evict_expired(self):
+        """Remove all expired entries (must be called with lock held)."""
+        now = time.time()
+        expired = [k for k, (exp, _) in self._data.items() if now > exp]
+        for k in expired:
+            del self._data[k]
+
+    def cleanup(self):
+        """Public cleanup method for periodic eviction."""
+        with self._lock:
+            self._evict_expired()
+
+
+# Session stores with TTL (2 hours for active sessions)
+graphs: TTLDict = TTLDict(default_ttl=7200.0, max_size=100)
+drill_sessions: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
+job_prep_sessions: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
+algorithm_sessions: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
 
 _MSG_TYPE_MAP = {"human": HumanMessage, "ai": AIMessage, "system": SystemMessage}
 

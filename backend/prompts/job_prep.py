@@ -15,6 +15,9 @@ JOB_PREP_PREVIEW_PROMPT = """你是一位资深技术面试官，现在要基于
 ## 候选人简历上下文
 {resume_context}
 
+## 相关知识参考
+{knowledge_context}
+
 ## 任务
 请分析这个岗位真正重视什么，并预测高概率面试方向。
 
@@ -89,6 +92,9 @@ JOB_PREP_QUESTION_GEN_PROMPT = """你是一位真实技术面试官，要基于�
 ## 候选人简历上下文
 {resume_context}
 
+## 相关知识参考
+{knowledge_context}
+
 ## 任务
 生成 8 道真实面试问题，模拟这份岗位最可能出现的提问链路。
 
@@ -128,6 +134,9 @@ JOB_PREP_EVAL_PROMPT = """你是一位负责 AI 后端/LLM 应用方向招聘的
 
 ## 候选人回答
 {qa_pairs}
+
+## 相关知识参考
+{knowledge_context}
 
 ## 任务
 逐题评估候选人的回答质量，并判断其与岗位的匹配度。

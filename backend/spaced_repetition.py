@@ -77,7 +77,11 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
     """Update spaced repetition state for a specific weak point after evaluation.
 
     Matches by topic + point text substring.
+    Auto-marks weak points as "improved" when they reach mastery threshold
+    (3+ consecutive passes with high scores).
     """
+    from datetime import datetime
+
     profile = _load_profile(user_id)
 
     for wp in profile.get("weak_points", []):
@@ -89,6 +93,21 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
         if point_text.lower() in wp["point"].lower() or wp["point"].lower() in point_text.lower():
             sr = wp.get("sr", {})
             wp["sr"] = sm2_update(sr, score)
+
+            # Auto-improvement detection: if repetitions >= 3 and last scores are high,
+            # mark as improved (mastered through spaced repetition)
+            if wp["sr"]["repetitions"] >= 3 and score >= 7:
+                wp["improved"] = True
+                wp["improved_at"] = datetime.now().isoformat()
+                wp["improved_reason"] = "spaced_repetition_mastery"
+
+                # Move to strong points
+                profile.setdefault("strong_points", []).append({
+                    "point": f"已掌握: {wp['point']}",
+                    "topic": wp.get("topic", ""),
+                    "first_seen": datetime.now().isoformat(),
+                })
+
             _save_profile(profile, user_id)
             return True
 

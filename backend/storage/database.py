@@ -1,10 +1,11 @@
-"""统一数据库连接管理 — 单例连接 + 集中式表初始化。
+"""统一数据库连接管理 — 线程本地连接 + 集中式表初始化。
 
-所有模块通过 get_db() 获取共享连接，不再各自创建。
+每个线程持有独立的 SQLite 连接，避免多线程/并发请求共用同一连接导致锁定和状态污染。
 init_all_tables() 在启动时调用一次，创建所有表、索引和迁移。
 """
 import logging
 import sqlite3
+import threading
 
 from backend.config import settings
 
@@ -12,19 +13,34 @@ logger = logging.getLogger("uvicorn")
 
 DB_PATH = settings.db_path
 
-_conn: sqlite3.Connection | None = None
+_local = threading.local()
+
+
+def _make_connection() -> sqlite3.Connection:
+    """创建一条新的 SQLite 连接并完成基础配置。"""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")  # 等待锁最多 5s，而非直接报错
+    return conn
 
 
 def get_db() -> sqlite3.Connection:
-    """返回全局复用的 SQLite 连接。"""
-    global _conn
-    if _conn is None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.execute("PRAGMA synchronous=NORMAL")
-    return _conn
+    """返回当前线程独立的 SQLite 连接。若连接已关闭则重建。"""
+    conn: sqlite3.Connection | None = getattr(_local, "conn", None)
+    if conn is None:
+        conn = _make_connection()
+        _local.conn = conn
+        return conn
+    # 检测连接是否已被关闭/损坏，如有则重建
+    try:
+        conn.execute("SELECT 1")
+    except Exception:
+        conn = _make_connection()
+        _local.conn = conn
+    return conn
 
 
 def init_all_tables():

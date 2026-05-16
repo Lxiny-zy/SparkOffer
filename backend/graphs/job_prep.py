@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.config import settings
 from backend.graphs.topic_drill import _parse_json_response
-from backend.indexer import query_resume
+from backend.indexer import query_resume, retrieve_topic_context, load_topics
 from backend.llm_provider import get_langchain_llm
 from backend.memory import get_profile_summary
 from backend.prompts.job_prep import (
@@ -17,6 +17,45 @@ from backend.prompts.job_prep import (
 )
 
 logger = logging.getLogger("uvicorn")
+
+
+def _get_knowledge_for_jd(jd_text: str, user_id: str) -> str:
+    """Retrieve knowledge base context matching JD keywords.
+
+    Uses per-topic timeout protection (60s each) to prevent hanging on large indexes.
+    """
+    import concurrent.futures
+
+    try:
+        topics = load_topics(user_id)
+        if not topics:
+            return ""
+        jd_lower = jd_text.lower()
+        matched = []
+        for key, info in topics.items():
+            name = info.get("name", key).lower()
+            if name in jd_lower or key.lower() in jd_lower:
+                matched.append(key)
+        if not matched:
+            matched = list(topics.keys())[:3]
+        chunks = []
+        for topic_key in matched[:5]:
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(retrieve_topic_context, topic_key, "核心知识点 面试常见问题", user_id, 2)
+                    results = future.result(timeout=60.0)
+                chunks.extend(results)
+            except concurrent.futures.TimeoutError:
+                logger.warning(f"Knowledge retrieval timed out (60s) for topic {topic_key} in JD prep")
+                continue
+            except Exception:
+                continue
+        if not chunks:
+            return ""
+        return "\n\n---\n\n".join(c[:500] for c in chunks)[:3000]
+    except Exception as e:
+        logger.warning("Knowledge retrieval for JD prep failed: %s", e)
+        return ""
 
 
 def _has_resume(user_id: str) -> bool:
@@ -82,12 +121,14 @@ def generate_job_prep_preview(
 ) -> dict:
     """Analyze JD and candidate fit before starting the session."""
     resume_context, resume_used = _get_resume_context(user_id, use_resume)
+    knowledge_ctx = _get_knowledge_for_jd(jd_text, user_id)
     prompt = JOB_PREP_PREVIEW_PROMPT.format(
         company=(company or "未提供").strip(),
         position=(position or "未提供").strip(),
         jd_text=jd_text.strip()[:6000],
         user_profile=get_profile_summary(user_id),
         resume_context=resume_context,
+        knowledge_context=knowledge_ctx or "（暂无知识库数据）",
     )
 
     llm = get_langchain_llm()
@@ -123,6 +164,7 @@ def generate_job_prep_questions(
 ) -> list[dict]:
     """Generate a structured JD-oriented mock interview."""
     resume_context, _ = _get_resume_context(user_id, use_resume)
+    knowledge_ctx = _get_knowledge_for_jd(jd_text, user_id)
     prompt = JOB_PREP_QUESTION_GEN_PROMPT.format(
         preview_json=json.dumps(preview, ensure_ascii=False, indent=2)[:5000],
         company=preview.get("company") or "未提供",
@@ -130,6 +172,7 @@ def generate_job_prep_questions(
         jd_text=jd_text.strip()[:5000],
         user_profile=get_profile_summary(user_id),
         resume_context=resume_context,
+        knowledge_context=knowledge_ctx or "（暂无知识库数据）",
     )
 
     llm = get_langchain_llm()
@@ -184,11 +227,14 @@ def evaluate_job_prep_answers(
             f"**回答**: {answer_map[qid]}"
         )
 
+    jd_text = preview.get("jd_excerpt", "")
+    knowledge_ctx = _get_knowledge_for_jd(jd_text, user_id) if jd_text else ""
     prompt = JOB_PREP_EVAL_PROMPT.format(
         company=preview.get("company") or "未提供",
         position=preview.get("position") or "未提供",
         preview_json=json.dumps(preview, ensure_ascii=False, indent=2)[:5000],
         qa_pairs="\n\n".join(qa_lines) or "候选人未作答",
+        knowledge_context=knowledge_ctx or "（暂无知识库数据）",
     )
 
     llm = get_langchain_llm()
@@ -245,12 +291,14 @@ async def stream_generate_job_prep_preview(
     from backend.utils.sse_helpers import stream_llm_sse, sse_event
 
     resume_context, resume_used = _get_resume_context(user_id, use_resume)
+    knowledge_ctx = _get_knowledge_for_jd(jd_text, user_id)
     prompt = JOB_PREP_PREVIEW_PROMPT.format(
         company=(company or "未提供").strip(),
         position=(position or "未提供").strip(),
         jd_text=jd_text.strip()[:6000],
         user_profile=get_profile_summary(user_id),
         resume_context=resume_context,
+        knowledge_context=knowledge_ctx or "（暂无知识库数据）",
     )
 
     lc_messages = [
@@ -291,6 +339,7 @@ async def stream_generate_job_prep_questions(
     from backend.utils.sse_helpers import stream_llm_sse, sse_event
 
     resume_context, _ = _get_resume_context(user_id, use_resume)
+    knowledge_ctx = _get_knowledge_for_jd(jd_text, user_id)
     prompt = JOB_PREP_QUESTION_GEN_PROMPT.format(
         preview_json=json.dumps(preview, ensure_ascii=False, indent=2)[:5000],
         company=preview.get("company") or "未提供",
@@ -298,6 +347,7 @@ async def stream_generate_job_prep_questions(
         jd_text=jd_text.strip()[:5000],
         user_profile=get_profile_summary(user_id),
         resume_context=resume_context,
+        knowledge_context=knowledge_ctx or "（暂无知识库数据）",
     )
 
     lc_messages = [
@@ -358,11 +408,14 @@ async def stream_evaluate_job_prep_answers(
             f"**回答**: {answer_map[qid]}"
         )
 
+    jd_text = preview.get("jd_excerpt", "")
+    knowledge_ctx = _get_knowledge_for_jd(jd_text, user_id) if jd_text else ""
     prompt = JOB_PREP_EVAL_PROMPT.format(
         company=preview.get("company") or "未提供",
         position=preview.get("position") or "未提供",
         preview_json=json.dumps(preview, ensure_ascii=False, indent=2)[:5000],
         qa_pairs="\n\n".join(qa_lines) or "候选人未作答",
+        knowledge_context=knowledge_ctx or "（暂无知识库数据）",
     )
 
     llm = get_langchain_llm()
