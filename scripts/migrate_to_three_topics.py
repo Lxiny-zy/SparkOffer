@@ -188,6 +188,25 @@ def remove_old_dirs(knowledge_root: Path, *, dry: bool):
                 shutil.rmtree(src_dir)
 
 
+def sync_extras_from_global(user_kb: Path, *, dry: bool):
+    """Mirror data/knowledge/<topic>/extra-*.md into each user copy so users
+    actually get the curated supplemental content. Without this, users only see
+    the migrated legacy files because the global knowledge tree is separate."""
+    global_kb = DATA_DIR / "knowledge"
+    if not global_kb.is_dir() or user_kb == global_kb:
+        return
+    for key in NEW_TOPICS:
+        src = global_kb / key
+        dst = user_kb / key
+        if not src.is_dir() or not dst.is_dir():
+            continue
+        for f in sorted(src.glob("extra-*.md")):
+            tgt = dst / f.name
+            log(f"  sync extra: {f.name} → {dst}", dry=dry)
+            if not dry:
+                shutil.copy2(f, tgt)
+
+
 def update_topics_file(path: Path, *, dry: bool):
     log(f"rewrite {path}", dry=dry)
     if not dry:
@@ -287,6 +306,9 @@ def main():
         copy_files_to_new_layout(root, dry=args.dry_run)
         if not args.keep_old_dirs:
             remove_old_dirs(root, dry=args.dry_run)
+        # Mirror global extra-*.md into each user copy
+        if label.startswith("user:"):
+            sync_extras_from_global(root, dry=args.dry_run)
 
     # 2. Rewrite topics.json
     log("\n=== topics.json ===")
