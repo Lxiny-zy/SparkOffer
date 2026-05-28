@@ -53,6 +53,10 @@ export default function Interview() {
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const restoredRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+
+  const draftKey = sessionId ? `drill:draft:${sessionId}` : null;
 
   const drillVoice = useVoiceInput({
     onResult: useCallback((text: string) => setDrillInput((prev) => prev + text), []),
@@ -112,6 +116,32 @@ export default function Interview() {
         if (sess.mode === "resume" && Array.isArray(sess.transcript)) {
           setMessages(sess.transcript.map((m: any) => ({ role: m.role, content: m.content })));
         }
+
+        // Tier-2 (backend) restore done. If backend had no progress yet,
+        // try tier-1 (localStorage) — recovers drafts written during a
+        // backend outage so the user doesn't see a blank canvas.
+        const backendHasProgress = progress && (
+          progress.partial_answers || progress.current_index != null
+        );
+        if (!backendHasProgress && draftKey) {
+          try {
+            const raw = localStorage.getItem(draftKey);
+            if (raw) {
+              const local = JSON.parse(raw);
+              if (local.partial_answers && Object.keys(local.partial_answers).length) {
+                const parsed: Record<number, string> = {};
+                for (const [k, v] of Object.entries(local.partial_answers)) {
+                  parsed[Number(k)] = v as string;
+                }
+                setAnswers(parsed);
+                if (typeof local.current_index === "number") setCurrentIndex(local.current_index);
+                toast.info("已从本地缓存恢复未同步的草稿");
+              }
+            }
+          } catch (e) {
+            console.warn("localStorage fallback restore failed:", e);
+          }
+        }
       })
       .catch((err: any) => {
         console.error("恢复面试失败:", err);
@@ -121,31 +151,56 @@ export default function Interview() {
   }, [sessionId, initData.mode]);
 
   // Debounced persist of in-progress state.
-  // Network failure is logged but not surfaced to the user every keystroke —
-  // saveErrorShownRef ensures at most one toast until a save succeeds again.
+  // Two-tier strategy:
+  //   1. localStorage (sync, immediate) — survives backend outage
+  //   2. backend SQLite (async) — authoritative, cross-device
+  // On backend success we clear the localStorage entry to avoid bloat.
   const saveErrorShownRef = useRef(false);
   useEffect(() => {
     if (!isBatchMode || !sessionId || restoring || finished) return;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => {
-      saveDrillProgress(sessionId, {
+      const payload = {
         current_index: currentIndex,
         partial_answers: answers,
         hints,
-      })
-        .then(() => { saveErrorShownRef.current = false; })
+      };
+      // Tier 1: localStorage — synchronous, never fails on network issues
+      if (draftKey) {
+        try {
+          localStorage.setItem(
+            draftKey,
+            JSON.stringify({ ...payload, savedAt: Date.now() }),
+          );
+        } catch {
+          // Storage quota / private mode — silently degrade to backend-only
+        }
+      }
+      // Tier 2: backend
+      setSaveStatus("saving");
+      saveDrillProgress(sessionId, payload)
+        .then(() => {
+          setSaveStatus("saved");
+          setLastSavedAt(Date.now());
+          saveErrorShownRef.current = false;
+          // Successful upload — drop the local fallback to avoid stale data
+          if (draftKey) {
+            try { localStorage.removeItem(draftKey); } catch { /* noop */ }
+          }
+        })
         .catch((err: any) => {
           console.warn("保存进度失败:", err);
+          setSaveStatus("error");
           if (!saveErrorShownRef.current) {
             saveErrorShownRef.current = true;
-            toast.error("进度保存失败，刷新可能丢失最近输入");
+            toast.error("云端保存失败，已在本地缓存，恢复后会自动同步");
           }
         });
     }, 400);
     return () => {
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     };
-  }, [currentIndex, answers, hints, sessionId, isBatchMode, restoring, finished]);
+  }, [currentIndex, answers, hints, sessionId, isBatchMode, restoring, finished, draftKey]);
 
   // Sync drillInput → answers so the draft survives refresh
   useEffect(() => {
@@ -379,6 +434,7 @@ export default function Interview() {
               )
               : effectiveInit.topic && <span className="text-sm text-dim truncate">{effectiveInit.topic}</span>}
             <span className="text-[13px] text-dim whitespace-nowrap">{answeredCount}/{totalQ} 已答</span>
+            <SaveIndicator status={saveStatus} lastSavedAt={lastSavedAt} />
           </div>
           <Button variant="destructive" size="sm" onClick={() => finished ? handleEndBatch() : setShowEndConfirm(true)} disabled={submitting} className="shrink-0">
             {submitting ? "评估中..." : finished ? "查看评估" : isJobPrep ? "结束备面" : "结束训练"}
@@ -645,5 +701,37 @@ export default function Interview() {
       </div>
     )}
     </div>
+  );
+}
+
+interface SaveIndicatorProps {
+  status: "idle" | "saving" | "saved" | "error";
+  lastSavedAt: number | null;
+}
+
+function SaveIndicator({ status, lastSavedAt }: SaveIndicatorProps) {
+  if (status === "idle") return null;
+  if (status === "saving") {
+    return (
+      <span className="text-[11px] text-dim flex items-center gap-1 whitespace-nowrap">
+        <Loader2 size={11} className="animate-spin" />
+        保存中
+      </span>
+    );
+  }
+  if (status === "saved") {
+    const title = lastSavedAt ? `保存于 ${new Date(lastSavedAt).toLocaleTimeString()}` : "";
+    return (
+      <span className="text-[11px] text-green flex items-center gap-1 whitespace-nowrap" title={title}>
+        <Check size={11} />
+        已保存
+      </span>
+    );
+  }
+  // error
+  return (
+    <span className="text-[11px] text-orange flex items-center gap-1 whitespace-nowrap" title="本地已缓存，云端连接恢复后会自动同步">
+      ⚠ 云端失败
+    </span>
   );
 }

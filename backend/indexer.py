@@ -13,6 +13,7 @@ from llama_index.core import (
     Settings as LlamaSettings,
     Document,
 )
+from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
 
 from backend.config import settings
 from backend.llm_provider import get_llama_llm, get_embedding
@@ -85,6 +86,30 @@ def _init_llama_settings():
     LlamaSettings.embed_model = get_embedding()
 
 
+def _build_nodes(docs: list) -> list:
+    """Route documents to the right node parser by extension.
+
+    .md  → MarkdownNodeParser (preserves Header_1..N metadata so retrieved
+           chunks carry their heading path — better signal for embeddings
+           and downstream LLM prompts).
+    other → SentenceSplitter (LlamaIndex default 1024-token chunking).
+    """
+    md_docs, other_docs = [], []
+    for d in docs:
+        fname = (d.metadata.get("file_name") or "").lower()
+        if fname.endswith(".md"):
+            md_docs.append(d)
+        else:
+            other_docs.append(d)
+
+    nodes = []
+    if md_docs:
+        nodes.extend(MarkdownNodeParser().get_nodes_from_documents(md_docs))
+    if other_docs:
+        nodes.extend(SentenceSplitter().get_nodes_from_documents(other_docs))
+    return nodes
+
+
 def build_resume_index(user_id: str, force_rebuild: bool = False) -> VectorStoreIndex:
     """Build or load the resume index."""
     cache_key = (user_id, "resume")
@@ -104,7 +129,7 @@ def build_resume_index(user_id: str, force_rebuild: bool = False) -> VectorStore
             input_dir=str(resume_path),
             recursive=True,
         ).load_data()
-        index = VectorStoreIndex.from_documents(docs)
+        index = VectorStoreIndex(_build_nodes(docs))
         cache_dir.mkdir(parents=True, exist_ok=True)
         index.storage_context.persist(persist_dir=str(cache_dir))
 
@@ -145,7 +170,7 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False) -> 
         if not docs:
             raise ValueError(f"No documents found in {topic_dir}")
 
-        index = VectorStoreIndex.from_documents(docs)
+        index = VectorStoreIndex(_build_nodes(docs))
         cache_dir.mkdir(parents=True, exist_ok=True)
         index.storage_context.persist(persist_dir=str(cache_dir))
 

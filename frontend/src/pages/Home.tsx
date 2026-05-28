@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { FileText, ChevronRight, Sparkles, Target, Mic, TrendingUp, Zap, BriefcaseBusiness, AlertCircle } from "lucide-react";
+import { FileText, ChevronRight, Sparkles, Target, Mic, TrendingUp, Zap, BriefcaseBusiness, AlertCircle, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import TopicCard from "../components/TopicCard";
 import { getTopics, startInterview, startInterviewStream, getResumeStatus, uploadResume, getProfile, getDueReviews } from "../api/interview";
@@ -86,8 +86,22 @@ export default function Home() {
   const [streamingQuestions, setStreamingQuestions] = useState<Question[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [pipelineStages, setPipelineStages] = useState<PipelineStages>({});
+  const [readyToStart, setReadyToStart] = useState<{
+    session_id: string;
+    mode: string;
+    topic: string;
+    questions: Question[];
+  } | null>(null);
   const streamedQuestionsRef = useRef<Question[]>([]);
   const pipelineStagesRef = useRef<PipelineStages>({});
+
+  const resetStreaming = () => {
+    setReadyToStart(null);
+    setPipelineStages({});
+    setStreamingQuestions([]);
+    pipelineStagesRef.current = {};
+    streamedQuestionsRef.current = [];
+  };
 
   useEffect(() => {
     Promise.all([
@@ -171,18 +185,17 @@ export default function Home() {
             } catch {
               // sessionStorage may be unavailable in private mode — ignore.
             }
-            navigate(`/interview/${event.session_id}`, {
-              state: {
-                session_id: event.session_id,
-                mode: event.mode,
-                topic: event.topic,
-                questions: streamedQuestionsRef.current,
-              },
+            setReadyToStart({
+              session_id: event.session_id,
+              mode: event.mode,
+              topic: event.topic,
+              questions: streamedQuestionsRef.current,
             });
           },
           onError: (msg: string) => {
             setIsStreaming(false);
             setLoading(false);
+            setReadyToStart(null);
             toast.error("出题失败: " + msg);
           },
         });
@@ -320,7 +333,12 @@ export default function Home() {
                   ? "glass-strong animated-border shadow-[0_8px_32px_var(--tech-glow)]"
                   : "bg-card border border-border/60 hover:border-primary/30 hover:shadow-[0_4px_16px_var(--glow-primary)]"
               )}
-              onClick={() => { setMode(card.mode); if (card.mode !== "topic_drill") setSelectedTopic(null); }}
+              onClick={() => {
+                const switching = mode !== card.mode;
+                setMode(card.mode);
+                if (card.mode !== "topic_drill") setSelectedTopic(null);
+                if (switching) resetStreaming();
+              }}
             >
               {/* L1 — Eyebrow 眼眉色条 */}
               <div className="relative px-6 pt-6 pb-0">
@@ -469,7 +487,10 @@ export default function Home() {
                 name={info.name || key}
                 icon={info.icon}
                 selected={selectedTopic === key}
-                onClick={() => setSelectedTopic(key)}
+                onClick={() => {
+                  if (selectedTopic !== key) resetStreaming();
+                  setSelectedTopic(key);
+                }}
               />
             ))}
           </div>
@@ -521,8 +542,67 @@ export default function Home() {
         </Card>
       )}
 
+      {/* Ready to start — 出题完成后等用户确认 */}
+      {readyToStart && (
+        <Card className="w-full max-w-[700px] mb-6 animate-fade-in gradient-border">
+          <CardContent className="p-4 md:p-5 space-y-3">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 size={18} className="text-green-500" />
+              <span className="text-sm font-medium">
+                出题完成 · {readyToStart.questions.length} 道题已准备就绪
+              </span>
+            </div>
+
+            <PipelineTimeline stages={pipelineStages} />
+
+            <div className="flex items-center gap-2 text-[12px] text-dim flex-wrap">
+              <span className="mr-1">难度分布：</span>
+              {(() => {
+                const dist = readyToStart.questions.reduce(
+                  (acc, q) => {
+                    const d = q.difficulty ?? 3;
+                    if (d <= 2) acc.easy++;
+                    else if (d === 3) acc.medium++;
+                    else acc.hard++;
+                    return acc;
+                  },
+                  { easy: 0, medium: 0, hard: 0 },
+                );
+                return (
+                  <>
+                    <Badge variant="outline" className="font-mono">简单 {dist.easy}</Badge>
+                    <Badge variant="outline" className="font-mono">中等 {dist.medium}</Badge>
+                    <Badge variant="outline" className="font-mono">困难 {dist.hard}</Badge>
+                  </>
+                );
+              })()}
+            </div>
+
+            <Button
+              variant="cta"
+              size="lg"
+              className="w-full"
+              onClick={() => {
+                const payload = readyToStart;
+                setReadyToStart(null);
+                navigate(`/interview/${payload.session_id}`, {
+                  state: {
+                    session_id: payload.session_id,
+                    mode: payload.mode,
+                    topic: payload.topic,
+                    questions: payload.questions,
+                  },
+                });
+              }}
+            >
+              开始答题 →
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Start button */}
-      {mode && (
+      {mode && !readyToStart && (
         <div className="w-full max-w-[700px] animate-fade-in-up">
           <Button
             variant="cta"

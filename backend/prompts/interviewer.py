@@ -110,6 +110,7 @@ DRILL_QUESTION_GEN_PROMPT = """## 知识库使用约束（必读）
 你是「{topic_name}」领域的资深工程师，正在为一位面试候选人设计一轮 10 道题的专项训练。候选人目标岗位为**通用 Agent 工程师（Python 或 Java 后端方向）**，考察跨三大板块的能力。
 
 ## 参考知识库
+{rag_quality_hint}
 
 <knowledge>
 {knowledge_context}
@@ -280,6 +281,7 @@ COLD_START_DRILL_PROMPT = """你是「{topic_name}」资深面试官，正在为
 - 题型多样：概念题 / 场景应用题 / 设计权衡题 各占约三分之一。
 
 ## 知识库参考（仅供事实校对）
+{rag_quality_hint}
 
 <knowledge_context>
 {knowledge_context}

@@ -287,6 +287,31 @@ class DrillPipeline:
             pass
         return f"{topic_name} 核心知识点 面试常见问题"
 
+    def _rag_quality_hint(self) -> str:
+        """Tell the LLM how much to lean on knowledge_context this round.
+
+        Hints align the model's behavior with the actual retrieval outcome:
+        - 0 chunks  → don't pretend a reference exists
+        - <3 chunks → use sparingly, don't quote
+        - ≥3 chunks → ok to anchor depth but never copy verbatim
+        """
+        chunks = self.ctx.get("knowledge_chunks", 0)
+        if not self.ctx.get("knowledge_ctx") or chunks == 0:
+            return (
+                "⚠️ 本次知识库未召回任何相关内容。"
+                "请凭你的领域常识自主出题，**不要**在题目里引用知识库、"
+                "也不要使用「参考资料中提到」这类措辞。"
+            )
+        if chunks < 3:
+            return (
+                f"ℹ️ 知识库召回稀疏（仅 {chunks} 段），仅供辅助判断深度。"
+                "可适当超出召回内容出题，但不要把这几段当作题面来源。"
+            )
+        return (
+            f"✓ 知识库召回 {chunks} 段相关内容，可用于把握技术深度边界。"
+            "出题角度仍需独立设计，禁止照搬原文。"
+        )
+
     # ── Stage 3: generate ──
 
     async def _stage_generate(self) -> AsyncGenerator[str, None]:
@@ -360,6 +385,7 @@ class DrillPipeline:
         prompt = DRILL_QUESTION_GEN_PROMPT.format(
             topic_name=topic_name,
             knowledge_context=self.ctx.get("knowledge_ctx", ""),
+            rag_quality_hint=self._rag_quality_hint(),
             user_profile=get_profile_summary_for_drill(self.user_id),
             mastery_info=drill_ctx["mastery_info"],
             weak_points="\n".join(weak_lines) or "暂无",
@@ -440,6 +466,7 @@ class DrillPipeline:
         prompt = COLD_START_DRILL_PROMPT.format(
             topic_name=topic_name,
             knowledge_context=self.ctx.get("knowledge_ctx", "")[:2500],  # 比正常更短
+            rag_quality_hint=self._rag_quality_hint(),
         )
 
         from langchain_core.messages import HumanMessage as _Hum, SystemMessage as _Sys

@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "description": "RAG 召回率离线评估集。每条 query 用关键词匹配判断 chunk 命中，无需标注具体 chunk_id。扩充方式：补 expected_keywords 即可。",
+  "scoring": {
+    "method": "keyword_match",
+    "rule": "chunk 文本中包含 must_include_any 中任一关键词（不区分大小写）即视为命中"
+  },
+  "queries": [
+    {
+      "id": "agent-01",
+      "topic": "agent",
+      "query": "Transformer 中 multi-head attention 的并行机制",
+      "must_include_any": ["multi-head", "多头", "并行", "attention"],
+      "expected_keywords": ["multi-head", "并行", "线性投影", "head"],
+      "notes": "测试 ai-01_Transformer 章节的 attention 段是否能召回"
+    },
+    {
+      "id": "agent-02",
+      "topic": "agent",
+      "query": "RAG 召回率与精确率的权衡",
+      "must_include_any": ["召回", "RAG", "精确率"],
+      "expected_keywords": ["召回", "精确率", "top_k", "重排"],
+      "notes": "测试 ai-05 或 extra-03 RAG 进阶章节召回"
+    },
+    {
+      "id": "agent-03",
+      "topic": "agent",
+      "query": "Agent 的记忆体系如何分层设计",
+      "must_include_any": ["记忆", "memory", "短期", "长期"],
+      "expected_keywords": ["短期记忆", "长期记忆", "工作记忆", "向量"],
+      "notes": "测试 agent-04_Agent 记忆体系章节召回"
+    },
+    {
+      "id": "agent-04",
+      "topic": "agent",
+      "query": "MCP 协议解决了什么问题",
+      "must_include_any": ["MCP", "协议"],
+      "expected_keywords": ["MCP", "协议", "工具", "Anthropic"],
+      "notes": "测试 agent-01_MCP 协议详解召回"
+    },
+    {
+      "id": "python-01",
+      "topic": "python",
+      "query": "Python GIL 对多线程性能的影响",
+      "must_include_any": ["GIL"],
+      "expected_keywords": ["GIL", "多线程", "CPU 密集", "解释器锁"],
+      "notes": "测试 py-05 / extra-02 GIL 章节召回"
+    },
+    {
+      "id": "python-02",
+      "topic": "python",
+      "query": "asyncio 事件循环阻塞的常见原因",
+      "must_include_any": ["asyncio", "事件循环"],
+      "expected_keywords": ["事件循环", "阻塞", "同步", "to_thread"],
+      "notes": "测试 extra-01_asyncio 深入 / py-05 并发章节召回"
+    },
+    {
+      "id": "python-03",
+      "topic": "python",
+      "query": "Python 装饰器的实现原理",
+      "must_include_any": ["装饰器", "decorator"],
+      "expected_keywords": ["装饰器", "闭包", "高阶函数", "@"],
+      "notes": "测试 py-02 函数与作用域 / py-03 章节召回"
+    },
+    {
+      "id": "java-01",
+      "topic": "java",
+      "query": "JVM Full GC 频繁的排查思路",
+      "must_include_any": ["GC", "Full GC"],
+      "expected_keywords": ["Full GC", "堆", "老年代", "GC 日志"],
+      "notes": "测试 java-05_JVM / extra-01 JVM 调优章节召回"
+    },
+    {
+      "id": "java-02",
+      "topic": "java",
+      "query": "Spring AOP 的实现原理",
+      "must_include_any": ["AOP", "代理"],
+      "expected_keywords": ["AOP", "动态代理", "切面", "JDK", "CGLib"],
+      "notes": "测试 spring-01_Spring 核心章节召回"
+    },
+    {
+      "id": "java-03",
+      "topic": "java",
+      "query": "MySQL 索引失效的常见场景",
+      "must_include_any": ["索引", "失效"],
+      "expected_keywords": ["索引", "失效", "B+ 树", "最左前缀", "回表"],
+      "notes": "测试 db-01_MySQL 基础与索引召回"
+    }
+  ]
+}
