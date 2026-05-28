@@ -53,7 +53,7 @@ async def retrieve_for_drill(
     *,
     per_query_top_k: int = PER_QUERY_TOP_K,
     final_top_n: int = FINAL_TOP_N,
-    timeout: float = 60.0,
+    timeout: float = 90.0,
 ) -> tuple[list[str], RetrievalStats]:
     """Run the Phase 3 retrieval pipeline.
 
@@ -80,10 +80,22 @@ async def retrieve_for_drill(
     # already wraps it in asyncio.to_thread + timeout.
     # Use return_exceptions so a single timeout/error doesn't void the whole
     # batch — we still want partial RAG context.
-    raw_results = await asyncio.gather(*[
-        safe_retrieve_topic_context(topic, q, user_id, top_k=per_query_top_k, timeout=timeout)
-        for q in queries
-    ], return_exceptions=True)
+    # Semaphore caps concurrent embedding requests: 5 simultaneous queries
+    # tripped DashScope's per-key concurrency, making every query hit the
+    # full retrieval timeout. 2 concurrent stays under the throttle while
+    # still ~2.5× faster than serial.
+    sem = asyncio.Semaphore(2)
+
+    async def _bounded(query: str):
+        async with sem:
+            return await safe_retrieve_topic_context(
+                topic, query, user_id, top_k=per_query_top_k, timeout=timeout
+            )
+
+    raw_results = await asyncio.gather(
+        *[_bounded(q) for q in queries],
+        return_exceptions=True,
+    )
 
     per_query_results: list[list[str]] = []
     for q, r in zip(queries, raw_results):

@@ -17,7 +17,7 @@ _embedding_config_version = -1
 
 _CUSTOM_HEADERS = {"User-Agent": "curl/7.88.1"}
 _LLM_TIMEOUT = httpx.Timeout(connect=15.0, read=240.0, write=30.0, pool=30.0)
-_EMBED_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=30.0)  # Embedding 超时配置
+_EMBED_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)  # 与 vector_memory._EMBED_TIMEOUT_SECONDS 对齐
 
 _REASONING_EFFORTS = {"minimal", "low", "medium", "high"}
 

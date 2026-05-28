@@ -5,7 +5,10 @@ export interface SSECallbacks {
 }
 
 // SSE 请求超时时间（毫秒）
-const SSE_TIMEOUT_MS = 120000; // 2分钟
+// 6 分钟硬上限。出题流水线最坏情况：retrieve(90s) + generate(70s) +
+// validate+repair(60s) + 余量。早先用 120s 在复杂出题/网络抖动时会误杀
+// 正常请求，让用户看到 "network error"。后端有 30s SSE heartbeat 兜底真正的卡死。
+const SSE_TIMEOUT_MS = 360000;
 
 /**
  * Fetch an endpoint that may return SSE or plain JSON.
