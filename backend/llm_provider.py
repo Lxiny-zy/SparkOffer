@@ -249,7 +249,7 @@ def _create_embedding():
                     "model_name": ch.get("api_model", ""),
                     "api_key": ch.get("api_key", ""),
                     "http_client": sync_c,
-                    "embed_batch_size": 1,
+                    "embed_batch_size": 10,
                 }
                 if ch.get("api_base"):
                     kwargs["api_base"] = ch["api_base"]
@@ -269,7 +269,7 @@ def _create_embedding():
             "model_name": model_name,
             "api_key": api_key,
             "http_client": sync_c,
-            "embed_batch_size": 1,
+            "embed_batch_size": 10,
         }
         if api_base:
             kwargs["api_base"] = api_base
