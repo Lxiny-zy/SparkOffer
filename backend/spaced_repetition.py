@@ -73,10 +73,19 @@ def get_due_reviews(user_id: str, topic: str = None) -> list[dict]:
     return due
 
 
-def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str):
-    """Update spaced repetition state for a specific weak point after evaluation.
+def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str,
+                          difficulty: int = 3):
+    """Update spaced repetition state + per-WP mastery for matching weak points.
 
-    Matches by topic + point text substring.
+    Per-WP mastery uses EWMA so it tracks recent performance rather than
+    averaging over the entire history. The formula intentionally rewards
+    high-difficulty wins more than low-difficulty wins.
+
+    A question's `weak_point` hint can legitimately match multiple stored WPs
+    (e.g. evaluator reports "GIL" but the user has both "对 GIL 理解不深" and
+    "Python 并发模型理解薄弱"). We update **all** substring-matching WPs, not
+    just the first one — otherwise the second WP's mastery silently drifts
+    out of sync with the user's actual performance.
     Auto-marks weak points as "improved" when they reach mastery threshold
     (3+ consecutive passes with high scores).
     """
@@ -84,40 +93,63 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
 
     profile = _load_profile(user_id)
 
+    # contribution ∈ [0, 100] — caps difficulty at 5 and score at 10.
+    diff_clamped = max(1, min(5, int(difficulty)))
+    score_clamped = max(0.0, min(10.0, float(score)))
+    contribution = (diff_clamped / 5.0) * (score_clamped / 10.0) * 100.0
+
+    needle = (point_text or "").lower().strip()
+    if not needle:
+        return False
+
+    matched = 0
     for wp in profile.get("weak_points", []):
         if wp.get("improved"):
             continue
         if topic and wp.get("topic") != topic:
             continue
-        # Fuzzy match: point_text is contained in the weak point or vice versa
-        if point_text.lower() in wp["point"].lower() or wp["point"].lower() in point_text.lower():
-            sr = wp.get("sr", {})
-            wp["sr"] = sm2_update(sr, score)
+        wp_text = (wp.get("point") or "").lower()
+        if not wp_text:
+            continue
+        if not (needle in wp_text or wp_text in needle):
+            continue
 
-            # Auto-improvement detection: if repetitions >= 3 and last scores are high,
-            # mark as improved (mastered through spaced repetition)
-            if wp["sr"]["repetitions"] >= 3 and score >= 7:
-                wp["improved"] = True
-                wp["improved_at"] = datetime.now().isoformat()
-                wp["improved_reason"] = "spaced_repetition_mastery"
+        sr = wp.get("sr", {})
+        wp["sr"] = sm2_update(sr, score)
 
-                # Move to strong points
-                profile.setdefault("strong_points", []).append({
-                    "point": f"已掌握: {wp['point']}",
-                    "topic": wp.get("topic", ""),
-                    "first_seen": datetime.now().isoformat(),
-                })
+        prev_mastery = wp.get("mastery")
+        if prev_mastery is None:
+            wp["mastery"] = round(contribution)
+        else:
+            wp["mastery"] = round(0.7 * float(prev_mastery) + 0.3 * contribution)
+        wp["attempts"] = int(wp.get("attempts", 0)) + 1
 
-            _save_profile(profile, user_id)
-            return True
+        if wp["sr"]["repetitions"] >= 3 and score >= 7:
+            wp["improved"] = True
+            wp["improved_at"] = datetime.now().isoformat()
+            wp["improved_reason"] = "spaced_repetition_mastery"
+            profile.setdefault("strong_points", []).append({
+                "point": f"已掌握: {wp['point']}",
+                "topic": wp.get("topic", ""),
+                "first_seen": datetime.now().isoformat(),
+            })
+        matched += 1
+
+    if matched:
+        _save_profile(profile, user_id)
+        return True
 
     return False
 
 
 def init_sr_for_existing_points(user_id: str):
-    """Initialize SR state for existing weak points that don't have it yet."""
+    """Initialize SR state + mastery/attempts defaults for legacy weak points."""
     profile = _load_profile(user_id)
     changed = False
+
+    # Topic-level mastery is used as the initial per-WP mastery for legacy
+    # entries that pre-date the per-WP field.
+    topic_mastery = profile.get("topic_mastery", {})
 
     for wp in profile.get("weak_points", []):
         if wp.get("improved"):
@@ -130,6 +162,13 @@ def init_sr_for_existing_points(user_id: str):
                 "next_review": date.today().isoformat(),
                 "last_score": None,
             }
+            changed = True
+        if "mastery" not in wp:
+            tm = topic_mastery.get(wp.get("topic", ""), {})
+            wp["mastery"] = int(tm.get("score", 20))  # 20 = "未证明" 默认值
+            changed = True
+        if "attempts" not in wp:
+            wp["attempts"] = int(wp.get("times_seen", 1))
             changed = True
 
     if changed:

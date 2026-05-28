@@ -1,4 +1,5 @@
 export type ReasoningEffort = "" | "minimal" | "low" | "medium" | "high";
+export type ChannelTier = "small" | "large";
 
 export interface LLMChannel {
   id: string;
@@ -8,6 +9,7 @@ export interface LLMChannel {
   model: string;
   temperature: number;
   reasoning_effort?: ReasoningEffort;
+  tier?: ChannelTier;
   priority: number;
   enabled: boolean;
   proxy?: string;

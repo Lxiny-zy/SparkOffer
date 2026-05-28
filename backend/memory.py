@@ -317,6 +317,8 @@ def update_profile_realtime(
                 "last_seen": now,
                 "times_seen": 1,
                 "improved": False,
+                "mastery": 20,    # 默认 20 = "未证明"
+                "attempts": 0,
             })
 
     # Track that we have activity (for profile page display)
@@ -437,6 +439,7 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str):
                 "topic": op.get("topic", topic or ""),
                 "first_seen": now, "last_seen": now,
                 "times_seen": 1, "improved": False,
+                "mastery": 20, "attempts": 0,
             })
         elif action == "UPDATE":
             idx = op.get("index")
@@ -480,6 +483,7 @@ def _deterministic_update(profile: dict, new_weak: list, new_strong: list,
                 "topic": wp.get("topic", topic) if isinstance(wp, dict) else (topic or ""),
                 "first_seen": now, "last_seen": now,
                 "times_seen": 1, "improved": False,
+                "mastery": 20, "attempts": 0,
             })
 
     for sp in new_strong:

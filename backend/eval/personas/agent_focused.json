@@ -1,0 +1,88 @@
+{
+  "persona_id": "agent_focused",
+  "name": "Agent / RAG Engineer",
+  "target_role": "AI Agent 工程师（LangGraph / LlamaIndex 方向）",
+  "updated_at": "2026-05-20T10:00:00",
+  "topic_mastery": {
+    "agent": {
+      "score": 60,
+      "notes": "LangGraph 状态机能讲清楚，RAG 检索链路能搭；但对 multi-agent 编排、tool 设计的鲁棒性细节缺乏沉淀",
+      "last_assessed": "2026-05-20T09:55:00"
+    }
+  },
+  "weak_points": [
+    {
+      "point": "LangGraph 中 interrupt_before 与 checkpointer 协作时，状态恢复的幂等性如何保证",
+      "topic": "agent",
+      "first_seen": "2026-05-10T10:00:00",
+      "last_seen": "2026-05-19T10:00:00",
+      "times_seen": 3,
+      "improved": false,
+      "sr": {"interval_days": 2, "ease_factor": 2.5, "repetitions": 1, "next_review": "2026-05-21", "last_score": 5.5}
+    },
+    {
+      "point": "RAG 检索的 chunk_size / overlap / re-rank 三者协同调参，如何用 RAGAS 量化",
+      "topic": "agent",
+      "first_seen": "2026-05-11T10:00:00",
+      "last_seen": "2026-05-18T10:00:00",
+      "times_seen": 3,
+      "improved": false,
+      "sr": {"interval_days": 3, "ease_factor": 2.5, "repetitions": 1, "next_review": "2026-05-22", "last_score": 6.0}
+    },
+    {
+      "point": "Tool 设计的入参 schema 与 LLM function calling 的鲁棒性失败模式（幻觉参数、漏调）",
+      "topic": "agent",
+      "first_seen": "2026-05-12T10:00:00",
+      "last_seen": "2026-05-17T10:00:00",
+      "times_seen": 2,
+      "improved": false,
+      "sr": {"interval_days": 2, "ease_factor": 2.5, "repetitions": 1, "next_review": "2026-05-21", "last_score": 5.0}
+    },
+    {
+      "point": "Multi-Agent 编排中的角色循环引用、消息爆炸如何控制",
+      "topic": "agent",
+      "first_seen": "2026-05-13T10:00:00",
+      "last_seen": "2026-05-16T10:00:00",
+      "times_seen": 2,
+      "improved": false,
+      "sr": {"interval_days": 1, "ease_factor": 2.5, "repetitions": 0, "next_review": "2026-05-20", "last_score": 4.5}
+    },
+    {
+      "point": "Agent 长记忆（vector / graph / structured profile）的更新策略与 Mem0 两阶段 Extract→Update 的取舍",
+      "topic": "agent",
+      "first_seen": "2026-05-14T10:00:00",
+      "last_seen": "2026-05-15T10:00:00",
+      "times_seen": 1,
+      "improved": false,
+      "sr": {"interval_days": 1, "ease_factor": 2.5, "repetitions": 0, "next_review": "2026-05-20", "last_score": 5.0}
+    }
+  ],
+  "strong_points": [
+    {"point": "能讲清楚 LangGraph 与裸 while 循环的差异", "topic": "agent", "first_seen": "2026-05-10T10:00:00"}
+  ],
+  "communication": {
+    "style": "能讲框架，但落到细节实现时偶尔过于依赖术语",
+    "habits": ["喜欢类比解释"],
+    "suggestions": ["术语后面要跟具体场景"]
+  },
+  "thinking_patterns": {
+    "strengths": ["对 SDK 抽象有 sense"],
+    "gaps": ["对生产部署的失败模式经验不足"]
+  },
+  "preferences": {
+    "response_style": "详细",
+    "preferred_difficulty": "中等",
+    "focus_topics": ["agent"],
+    "interview_pace": "",
+    "feedback_style": "鼓励型",
+    "custom_notes": []
+  },
+  "stats": {
+    "total_sessions": 10,
+    "drill_sessions": 8,
+    "resume_sessions": 2,
+    "job_prep_sessions": 0,
+    "avg_score": 7.0,
+    "score_history": []
+  }
+}

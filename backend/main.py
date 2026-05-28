@@ -46,6 +46,10 @@ async def lifespan(app: FastAPI):
     cleanup_expired_sessions()
     ensure_default_user()
 
+    from backend.redis_cache import init_cache
+    cache = init_cache(settings.redis_url)
+    logger.info("Cache backend: %s", cache.health()["backend"])
+
     from backend.channel_manager import has_channels, get_all_channels
     for sec in ("llm", "embedding", "asr"):
         chs = get_all_channels(sec)

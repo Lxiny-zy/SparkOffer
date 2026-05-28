@@ -58,6 +58,9 @@ class ChannelManager:
         self._channels: dict[str, list[dict]] = {}
         self._states: dict[str, dict[str, ChannelState]] = {}
         self._lock = threading.Lock()
+        # Dedup the "tier filter empty, falling back" warning per (section, tier).
+        # Without this every drill request logs once, drowning real signals.
+        self._tier_fallback_warned: set[tuple[str, str]] = set()
 
     def load_channels(self, section: str, channels: list[dict]):
         with self._lock:
@@ -76,34 +79,60 @@ class ChannelManager:
                 else:
                     new_states[cid] = ChannelState(cid)
             self._states[section] = new_states
+            # Reload invalidates any prior tier-fallback warning state — the
+            # operator may have just added the missing tier.
+            self._tier_fallback_warned = {
+                k for k in self._tier_fallback_warned if k[0] != section
+            }
 
-    def get_channel(self, section: str) -> dict | None:
+    def get_channel(self, section: str, tier: str | None = None) -> dict | None:
         with self._lock:
-            return self._select(section, exclude=set())
+            return self._select(section, exclude=set(), tier=tier)
 
-    def get_next_channel(self, section: str, exclude: set[str]) -> dict | None:
+    def get_next_channel(self, section: str, exclude: set[str], tier: str | None = None) -> dict | None:
         with self._lock:
-            return self._select(section, exclude)
+            return self._select(section, exclude, tier=tier)
 
-    def _select(self, section: str, exclude: set[str]) -> dict | None:
+    def _select(self, section: str, exclude: set[str], tier: str | None = None) -> dict | None:
         channels = self._channels.get(section, [])
         states = self._states.get(section, {})
-        for ch in channels:
-            cid = ch["id"]
-            if cid in exclude:
-                continue
-            if not ch.get("enabled", True):
-                continue
-            state = states.get(cid)
-            if state and not state.is_available():
-                continue
-            resolved = dict(ch)
-            if state:
-                resolved["api_key"] = state.next_key(ch.get("keys", []))
-            else:
-                keys = ch.get("keys", [])
-                resolved["api_key"] = keys[0] if keys else ""
-            return resolved
+
+        # First pass: respect tier filter if requested
+        # Second pass: if tier filter empties the pool, fall back to any healthy channel
+        for pass_idx in (0, 1):
+            for ch in channels:
+                cid = ch["id"]
+                if cid in exclude:
+                    continue
+                if not ch.get("enabled", True):
+                    continue
+                if pass_idx == 0 and tier is not None:
+                    # tier defaults to "large" for back-compat with channels that lack the field
+                    ch_tier = (ch.get("tier") or "large").lower()
+                    if ch_tier != tier.lower():
+                        continue
+                state = states.get(cid)
+                if state and not state.is_available():
+                    continue
+                resolved = dict(ch)
+                if state:
+                    resolved["api_key"] = state.next_key(ch.get("keys", []))
+                else:
+                    keys = ch.get("keys", [])
+                    resolved["api_key"] = keys[0] if keys else ""
+                return resolved
+            # No tier filter → no need for a second pass
+            if tier is None:
+                break
+            # Tier-filtered pass produced nothing → log once per (section, tier).
+            if pass_idx == 0:
+                key = (section, (tier or "").lower())
+                if key not in self._tier_fallback_warned:
+                    self._tier_fallback_warned.add(key)
+                    logger.warning(
+                        "Channel manager: no channel matched tier=%s in section=%s, falling back to any tier",
+                        tier, section,
+                    )
         return None
 
     def report_error(self, section: str, channel_id: str):
@@ -152,11 +181,11 @@ _manager = ChannelManager()
 def load_channels(section: str, channels: list[dict]):
     _manager.load_channels(section, channels)
 
-def get_channel(section: str) -> dict | None:
-    return _manager.get_channel(section)
+def get_channel(section: str, tier: str | None = None) -> dict | None:
+    return _manager.get_channel(section, tier=tier)
 
-def get_next_channel(section: str, exclude: set[str]) -> dict | None:
-    return _manager.get_next_channel(section, exclude)
+def get_next_channel(section: str, exclude: set[str], tier: str | None = None) -> dict | None:
+    return _manager.get_next_channel(section, exclude, tier=tier)
 
 def report_error(section: str, channel_id: str):
     _manager.report_error(section, channel_id)

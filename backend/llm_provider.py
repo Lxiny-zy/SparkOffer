@@ -63,13 +63,14 @@ def _build_http_clients(proxy: str = "", *, timeout: httpx.Timeout | None = _LLM
 class ResilientChatModel:
     """Drop-in replacement for ChatOpenAI with multi-channel auto-failover."""
 
-    def __init__(self):
+    def __init__(self, tier: str | None = None):
         self._bind_args: tuple = ()
         self._bind_kwargs: dict = {}
+        self._tier = tier
 
     def bind_tools(self, tools, **kwargs):
         """Return a new ResilientChatModel that binds tools on each underlying LLM."""
-        bound = ResilientChatModel()
+        bound = ResilientChatModel(tier=self._tier)
         bound._bind_args = (tools,)
         bound._bind_kwargs = kwargs
         return bound
@@ -100,7 +101,7 @@ class ResilientChatModel:
     def invoke(self, messages, **kwargs):
         from backend.channel_manager import get_channel, get_next_channel, report_error, report_success
         tried: set[str] = set()
-        channel = get_channel("llm")
+        channel = get_channel("llm", tier=self._tier)
         while channel:
             try:
                 result = self._make_and_bind(channel).invoke(messages, **kwargs)
@@ -110,13 +111,13 @@ class ResilientChatModel:
                 logger.warning("LLM channel '%s' invoke failed: %s", channel["name"], e)
                 report_error("llm", channel["id"])
                 tried.add(channel["id"])
-                channel = get_next_channel("llm", tried)
+                channel = get_next_channel("llm", tried, tier=self._tier)
         raise RuntimeError("All LLM channels exhausted")
 
     async def ainvoke(self, messages, **kwargs):
         from backend.channel_manager import get_channel, get_next_channel, report_error, report_success
         tried: set[str] = set()
-        channel = get_channel("llm")
+        channel = get_channel("llm", tier=self._tier)
         while channel:
             try:
                 result = await self._make_and_bind(channel).ainvoke(messages, **kwargs)
@@ -126,13 +127,13 @@ class ResilientChatModel:
                 logger.warning("LLM channel '%s' ainvoke failed: %s", channel["name"], e)
                 report_error("llm", channel["id"])
                 tried.add(channel["id"])
-                channel = get_next_channel("llm", tried)
+                channel = get_next_channel("llm", tried, tier=self._tier)
         raise RuntimeError("All LLM channels exhausted")
 
     async def astream(self, messages, **kwargs):
         from backend.channel_manager import get_channel, get_next_channel, report_error, report_success
         tried: set[str] = set()
-        channel = get_channel("llm")
+        channel = get_channel("llm", tier=self._tier)
         while channel:
             try:
                 llm = self._make_and_bind(channel)
@@ -147,20 +148,31 @@ class ResilientChatModel:
                 logger.warning("LLM channel '%s' astream failed: %s", channel["name"], e)
                 report_error("llm", channel["id"])
                 tried.add(channel["id"])
-                channel = get_next_channel("llm", tried)
+                channel = get_next_channel("llm", tried, tier=self._tier)
         raise RuntimeError("All LLM channels exhausted")
 
 
 # ── Public API (unchanged signatures) ──
 
-def get_langchain_llm():
-    """LangChain ChatModel for LangGraph nodes. Uses multi-channel if configured."""
+def get_langchain_llm(tier: str | None = None):
+    """LangChain ChatModel for LangGraph nodes. Uses multi-channel if configured.
+
+    Args:
+        tier: "small" | "large" | None. When set, only channels tagged with the matching
+              tier are used. Falls back to any-tier with a warning if the requested tier
+              has no available channels (handled inside channel_manager).
+    """
     from backend.channel_manager import has_channels
     if has_channels("llm"):
-        return ResilientChatModel()
+        return ResilientChatModel(tier=tier)
     sync_c, async_c = _build_http_clients()
     effort = _resolve_reasoning_effort(get_effective("llm", "reasoning_effort"))
     model_kwargs = {"extra_body": {"reasoning_effort": effort}} if effort else {}
+    if tier is not None:
+        logger.warning(
+            "get_langchain_llm(tier=%s) requested but no channel pool configured; "
+            "using single-channel legacy config.", tier,
+        )
     return ChatOpenAI(
         model=get_effective("llm", "model"),
         api_key=get_effective("llm", "api_key"),

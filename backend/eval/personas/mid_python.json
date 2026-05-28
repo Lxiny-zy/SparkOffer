@@ -1,0 +1,79 @@
+{
+  "persona_id": "mid_python",
+  "name": "Mid Python Engineer",
+  "target_role": "Python 后端开发（3-5 年经验）",
+  "updated_at": "2026-05-20T10:00:00",
+  "topic_mastery": {
+    "python": {
+      "score": 50,
+      "notes": "对装饰器、生成器、上下文管理器、asyncio 整体掌握，能写出可用代码；但对元类、描述符、GIL 的边界 case 表述不够准确",
+      "last_assessed": "2026-05-20T09:55:00"
+    }
+  },
+  "weak_points": [
+    {
+      "point": "元类 metaclass 与类装饰器的差异，以及 __new__/__init__/__call__ 的调用链",
+      "topic": "python",
+      "first_seen": "2026-05-10T10:00:00",
+      "last_seen": "2026-05-19T10:00:00",
+      "times_seen": 4,
+      "improved": false,
+      "sr": {"interval_days": 3, "ease_factor": 2.4, "repetitions": 1, "next_review": "2026-05-22", "last_score": 5.0}
+    },
+    {
+      "point": "asyncio 中 CPU 密集任务为何要 run_in_executor，以及 GIL 与 event loop 的协作边界",
+      "topic": "python",
+      "first_seen": "2026-05-11T10:00:00",
+      "last_seen": "2026-05-18T10:00:00",
+      "times_seen": 3,
+      "improved": false,
+      "sr": {"interval_days": 2, "ease_factor": 2.5, "repetitions": 1, "next_review": "2026-05-21", "last_score": 6.0}
+    },
+    {
+      "point": "描述符协议（__get__/__set__/__delete__）与 property 的实现关系",
+      "topic": "python",
+      "first_seen": "2026-05-12T10:00:00",
+      "last_seen": "2026-05-17T10:00:00",
+      "times_seen": 2,
+      "improved": false,
+      "sr": {"interval_days": 4, "ease_factor": 2.5, "repetitions": 1, "next_review": "2026-05-23", "last_score": 5.5}
+    },
+    {
+      "point": "weakref / __slots__ 在大批量对象场景的内存优化权衡",
+      "topic": "python",
+      "first_seen": "2026-05-13T10:00:00",
+      "last_seen": "2026-05-16T10:00:00",
+      "times_seen": 1,
+      "improved": false,
+      "sr": {"interval_days": 1, "ease_factor": 2.5, "repetitions": 0, "next_review": "2026-05-20", "last_score": 4.5}
+    }
+  ],
+  "strong_points": [
+    {"point": "对 asyncio 任务编排有实战经验", "topic": "python", "first_seen": "2026-05-10T10:00:00"}
+  ],
+  "communication": {
+    "style": "结构化清晰，能从场景切入；但被追问 why 时偶尔停留在 API 表面",
+    "habits": ["先讲应用再讲原理"],
+    "suggestions": ["原理追问时要回到 CPython 实现层面"]
+  },
+  "thinking_patterns": {
+    "strengths": ["项目类问题能给量化数据", "能讲清楚权衡"],
+    "gaps": ["底层 CPython 实现追问时知识断层"]
+  },
+  "preferences": {
+    "response_style": "详细",
+    "preferred_difficulty": "中等",
+    "focus_topics": ["python"],
+    "interview_pace": "",
+    "feedback_style": "直接",
+    "custom_notes": []
+  },
+  "stats": {
+    "total_sessions": 8,
+    "drill_sessions": 6,
+    "resume_sessions": 2,
+    "job_prep_sessions": 0,
+    "avg_score": 6.8,
+    "score_history": []
+  }
+}

@@ -264,7 +264,123 @@ DRILL_BATCH_EVAL_PROMPT = """你是「{topic_name}」领域的资深工程师，
 """
 
 
+# ── Phase 7b: cold-start diagnostic prompt ──
+
+COLD_START_DRILL_PROMPT = """你是「{topic_name}」资深面试官，正在为一位**初次训练**的候选人出 10 道**诊断题**。
+
+候选人画像：
+- 暂无历史训练数据、暂无已知薄弱点。
+- 目标：通过这 10 题快速摸清候选人在该 topic 下的能力分布。
+
+## 诊断模式约束
+
+- 10 题难度梯度均匀分布：1/5 难度 × 2 题，2/5 × 2 题，3/5 × 2 题，4/5 × 2 题，5/5 × 2 题。
+- 题目要覆盖该 topic 的**至少 5 个核心子领域**（每个子领域 1-2 题）。
+- 不要重复考察同一个细分知识点。
+- 题型多样：概念题 / 场景应用题 / 设计权衡题 各占约三分之一。
+
+## 知识库参考（仅供事实校对）
+
+<knowledge_context>
+{knowledge_context}
+</knowledge_context>
+
+## 输出 JSON 数组（10 题）
+
+字段：id / question / difficulty (1-5) / focus_area / category / pillar
+
+只返回 JSON，禁止其他文字。"""
+
+
 # ── 参考答案 & 提示 ──
+
+# ── Phase 5A: decoupled evaluation ──
+
+DRILL_PER_QUESTION_SCORE_PROMPT = """你是「{topic_name}」资深面试官，正在为**一道**训练题打分。
+
+## 题目（难度 {difficulty}/5）
+
+{question}
+
+## 候选人回答
+
+{answer}
+
+## 参考知识（如有）
+
+{reference}
+
+## 评分要求
+
+{scoring_rubric}
+
+只输出 JSON 对象（**不要数组**），字段如下：
+{{
+  "question_id": {question_id},
+  "score": 0-10 整数,
+  "assessment": "30-80 字总结：候选人理解到什么程度，缺什么",
+  "improvement": "30-80 字给出具体改进方向，对照参考知识或工程实践",
+  "weak_point": "若回答暴露了一个 weak_point，写一个不超过 20 字的短语；否则空字符串",
+  "understanding": "深入透彻 / 理解正确且有思考 / 大方向对但浅 / 印象式答错 / 完全跑偏（5 选 1）"
+}}
+"""
+
+
+DRILL_OVERALL_SUMMARY_PROMPT = """你是「{topic_name}」资深面试官，正在汇总候选人一次训练的整体观察。**只看分数统计，不看完整答卷**。
+
+## 本轮分数统计
+
+{score_stats}
+
+## 候选人画像
+
+{user_profile}
+
+## 输出要求
+
+只返回 JSON 对象（不要数组）：
+{{
+  "avg_score": 平均分（float, 保留 1 位小数）,
+  "summary": "100-150 字整体观察：候选人本轮表现是稳健 / 偏科 / 退步，对照画像看是否符合预期",
+  "new_weak_points": ["未掌握的薄弱点短语1", "短语2"],
+  "new_strong_points": ["展示出的强项短语1"],
+  "communication_observations": "30-60 字：表达风格观察（清晰 / 跳跃 / 罗列 / ...）",
+  "thinking_patterns": "30-60 字：思维模式观察（自顶向下 / 直觉跳跃 / 工程视角 / 概念漂移 / ...）",
+  "topic_mastery": {{
+    "score": 0-100 整数（本轮该 topic 的估算掌握度，相对画像里的 mastery_info）,
+    "notes": "30 字内备注"
+  }}
+}}
+
+判别 new_weak_points：从 per_question 的 weak_point 里出现 >= 2 次的，或单次出现但 score <= 4 的。"""
+
+
+DRILL_REPAIR_PROMPT = """你是「{topic_name}」领域的资深面试官。前一轮 AI 出题在结构校验中失败了，现在需要**只重出指定题号**，其它题保留不动。
+
+## 原 10 题（参考用，**不要重复出这些题**）
+
+{original_questions}
+
+## 需要重出的题及原因
+
+{bad_questions}
+
+## 用户上下文（与原 prompt 一致）
+
+- 用户画像：{user_profile}
+- 该领域掌握度信息：{mastery_info}
+- 用户的活跃薄弱点：
+{weak_points}
+
+## 要求
+
+- 仅返回一个 JSON 数组，元素数量**严格等于**需要重出的题数。
+- 每个对象保留字段：`id`（与原题号一致）、`question`、`difficulty`（1-5 整数）、`focus_area`、`category`、`pillar`。
+- 必须严格按照「需要重出的题及原因」里的反馈调整：例如反馈说"难度集中"，新题必须用不同难度；反馈说"未覆盖 weak_point X"，新题必须显式触及 X 的核心机制。
+- 不要重复"原 10 题"列表里任何题的核心考察点。
+
+直接返回 JSON 数组，禁止包裹 ```json``` 或解释。
+"""
 
 REFERENCE_ANSWER_PROMPT = """你是「{topic_name}」领域的资深技术面试官，为以下面试题撰写一份高质量参考答案。
 

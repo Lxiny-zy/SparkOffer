@@ -137,17 +137,66 @@ def migrate_files():
     print("File migration done.")
 
 
+def migrate_weak_point_mastery():
+    """Backfill per-weak-point ``mastery`` and ``attempts`` for legacy profiles.
+
+    Idempotent — re-running is a no-op if all entries already carry the fields.
+    Reuses the topic-level mastery as the initial per-WP value to avoid pretending
+    we have data we don't.
+    """
+    import json
+
+    users_dir = DATA_DIR / "users"
+    if not users_dir.exists():
+        print("  No users directory, skipping weak_point mastery backfill.")
+        return
+
+    touched = 0
+    for user_dir in users_dir.iterdir():
+        if not user_dir.is_dir():
+            continue
+        profile_path = user_dir / "profile" / "profile.json"
+        if not profile_path.exists():
+            continue
+        try:
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"  Failed to read {profile_path}: {exc}")
+            continue
+        topic_mastery = profile.get("topic_mastery", {})
+        changed = False
+        for wp in profile.get("weak_points", []):
+            if wp.get("improved"):
+                continue
+            if "mastery" not in wp:
+                tm = topic_mastery.get(wp.get("topic", ""), {})
+                wp["mastery"] = int(tm.get("score", 20))
+                changed = True
+            if "attempts" not in wp:
+                wp["attempts"] = int(wp.get("times_seen", 1))
+                changed = True
+        if changed:
+            profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+            touched += 1
+            print(f"  backfilled {user_dir.name}")
+
+    print(f"Weak-point mastery backfill done ({touched} profile(s) updated).")
+
+
 def main():
     print("=== SparkOffer Migration: Single-user -> Multi-user ===\n")
 
-    print("[1/3] Creating default user...")
+    print("[1/4] Creating default user...")
     create_default_user()
 
-    print("\n[2/3] Migrating database...")
+    print("\n[2/4] Migrating database...")
     migrate_database()
 
-    print("\n[3/3] Migrating files...")
+    print("\n[3/4] Migrating files...")
     migrate_files()
+
+    print("\n[4/4] Backfilling weak-point mastery...")
+    migrate_weak_point_mastery()
 
     print("\n=== Migration complete! ===")
     print(f"Default login: {DEFAULT_EMAIL} / {DEFAULT_PASSWORD}")

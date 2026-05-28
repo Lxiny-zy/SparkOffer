@@ -1,0 +1,86 @@
+{
+  "persona_id": "junior_python",
+  "name": "Junior Python Backend",
+  "target_role": "Python 后端开发（1-2 年经验）",
+  "updated_at": "2026-05-20T10:00:00",
+  "topic_mastery": {
+    "python": {
+      "score": 25,
+      "notes": "基础语法熟练，对装饰器、上下文管理器只懂表面用法；GIL、内存模型几乎为零",
+      "last_assessed": "2026-05-20T09:55:00"
+    }
+  },
+  "weak_points": [
+    {
+      "point": "GIL 释放时机以及 I/O 密集场景下多线程为何仍可加速",
+      "topic": "python",
+      "first_seen": "2026-05-10T10:00:00",
+      "last_seen": "2026-05-19T10:00:00",
+      "times_seen": 3,
+      "improved": false,
+      "sr": {"interval_days": 1, "ease_factor": 2.5, "repetitions": 0, "next_review": "2026-05-20", "last_score": 3.0}
+    },
+    {
+      "point": "装饰器嵌套时的执行顺序与 functools.wraps 的作用",
+      "topic": "python",
+      "first_seen": "2026-05-11T10:00:00",
+      "last_seen": "2026-05-18T10:00:00",
+      "times_seen": 2,
+      "improved": false,
+      "sr": {"interval_days": 2, "ease_factor": 2.5, "repetitions": 0, "next_review": "2026-05-21", "last_score": 4.0}
+    },
+    {
+      "point": "Python 列表与元组在内存布局、CPU 缓存友好度上的差异",
+      "topic": "python",
+      "first_seen": "2026-05-12T10:00:00",
+      "last_seen": "2026-05-17T10:00:00",
+      "times_seen": 2,
+      "improved": false,
+      "sr": {"interval_days": 1, "ease_factor": 2.5, "repetitions": 0, "next_review": "2026-05-20", "last_score": 3.5}
+    },
+    {
+      "point": "asyncio 中 await 与 yield from 的关系，以及事件循环调度模型",
+      "topic": "python",
+      "first_seen": "2026-05-13T10:00:00",
+      "last_seen": "2026-05-16T10:00:00",
+      "times_seen": 2,
+      "improved": false,
+      "sr": {"interval_days": 1, "ease_factor": 2.5, "repetitions": 0, "next_review": "2026-05-20", "last_score": 2.5}
+    },
+    {
+      "point": "Python 引用计数与循环引用，gc 模块何时介入",
+      "topic": "python",
+      "first_seen": "2026-05-14T10:00:00",
+      "last_seen": "2026-05-15T10:00:00",
+      "times_seen": 1,
+      "improved": false,
+      "sr": {"interval_days": 1, "ease_factor": 2.5, "repetitions": 0, "next_review": "2026-05-20", "last_score": 3.0}
+    }
+  ],
+  "strong_points": [],
+  "communication": {
+    "style": "回答偏短，喜欢举具体代码例子但缺少底层原理推导",
+    "habits": ["紧张时语速加快", "遇到不会的题会直接说不知道"],
+    "suggestions": ["在解释概念时多用 why 而不仅是 how"]
+  },
+  "thinking_patterns": {
+    "strengths": ["能用代码举例", "肯承认知识盲区"],
+    "gaps": ["对比类问题没有结构化框架", "底层原理追问会卡住"]
+  },
+  "preferences": {
+    "response_style": "简洁",
+    "preferred_difficulty": "中等",
+    "focus_topics": ["python"],
+    "interview_pace": "",
+    "feedback_style": "直接",
+    "custom_notes": []
+  },
+  "stats": {
+    "total_sessions": 3,
+    "drill_sessions": 3,
+    "resume_sessions": 0,
+    "job_prep_sessions": 0,
+    "avg_score": 5.2,
+    "score_history": []
+  }
+}

@@ -23,7 +23,7 @@ interface ChannelManagerProps {
 }
 
 const SECTION_DEFAULTS: Record<string, () => ChannelData> = {
-  llm: () => ({ id: "", name: "", api_base: "", keys: [""], model: "", temperature: 0.7, reasoning_effort: "", priority: 1, enabled: true, proxy: "" }),
+  llm: () => ({ id: "", name: "", api_base: "", keys: [""], model: "", temperature: 0.7, reasoning_effort: "", tier: "large", priority: 1, enabled: true, proxy: "" }),
   embedding: () => ({ id: "", name: "", backend: "api", api_base: "", keys: [""], api_model: "", local_model: "", local_path: "", priority: 1, enabled: true, proxy: "" }),
   asr: () => ({ id: "", name: "", keys: [""], model: "qwen3-asr-flash-filetrans", priority: 1, enabled: true, proxy: "" }),
 };
@@ -370,6 +370,24 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                       <option value="high">High — 深度思考</option>
                     </select>
                     <p className="text-[10px] text-dim mt-1">仅对支持 reasoning 的上游模型生效（如 gpt-5 / o-series / DeepSeek-R1）</p>
+                  </div>
+                )}
+
+                {section === "llm" && (
+                  <div>
+                    <Label className="text-xs flex items-center gap-1.5">
+                      Tier
+                      <span className="text-dim font-normal">(出题/评估分层路由)</span>
+                    </Label>
+                    <select
+                      value={ch.tier || "large"}
+                      onChange={(e) => updateChannel(idx, { tier: e.target.value })}
+                      className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 transition-colors hover:border-primary/40"
+                    >
+                      <option value="large">Large — 主模型 (出题 / 整体评估)</option>
+                      <option value="small">Small — 便宜小模型 (per-question 并发评分)</option>
+                    </select>
+                    <p className="text-[10px] text-dim mt-1">标记为 small 的渠道仅用于并发 per-question 评估；未配置 small 时评估自动 fallback 到 large。</p>
                   </div>
                 )}
 

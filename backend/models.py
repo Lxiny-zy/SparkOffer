@@ -194,6 +194,7 @@ class LLMChannelConfig(BaseModel):
     model: str
     temperature: float = 0.7
     reasoning_effort: str = ""
+    tier: str = "large"  # "small" for cheap-fast eval, "large" for primary; default large for back-compat
     priority: int = 1
     enabled: bool = True
     proxy: str = ""

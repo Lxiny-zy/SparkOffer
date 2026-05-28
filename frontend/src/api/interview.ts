@@ -73,11 +73,22 @@ export async function startInterview(mode: string, topic: string | null = null, 
 
 interface StreamCallbacks {
   onQuestion?: (data: Question) => void;
+  onQuestionUpdate?: (data: Question) => void;
   onDone?: (event: any) => void;
   onError?: (message: string) => void;
+  onStage?: (event: PipelineStageEvent) => void;
 }
 
-export async function startInterviewStream(mode: string, topic: string | null, { onQuestion, onDone, onError }: StreamCallbacks): Promise<void> {
+export interface PipelineStageEvent {
+  stage: string;
+  label?: string;
+  status: "start" | "ok" | "error";
+  ts: number;
+  duration_ms?: number;
+  detail?: string;
+}
+
+export async function startInterviewStream(mode: string, topic: string | null, { onQuestion, onQuestionUpdate, onDone, onError, onStage }: StreamCallbacks): Promise<void> {
   const res = await authFetch(`${API_BASE}/interview/start-stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -102,8 +113,10 @@ export async function startInterviewStream(mode: string, topic: string | null, {
       try {
         const event = JSON.parse(line.slice(6));
         if (event.type === "question" && onQuestion) onQuestion(event.data);
+        else if (event.type === "question_update" && onQuestionUpdate) onQuestionUpdate(event.data);
         else if (event.type === "done" && onDone) onDone(event);
         else if (event.type === "error" && onError) onError(event.message);
+        else if (event.type === "pipeline_stage" && onStage) onStage(event as PipelineStageEvent);
       } catch (e) {
         // ignore parse errors in SSE stream
       }

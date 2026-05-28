@@ -1,0 +1,80 @@
+{
+  "persona_id": "senior_distributed",
+  "name": "Senior Distributed Systems Engineer",
+  "target_role": "Java 后端 / 分布式系统资深工程师",
+  "updated_at": "2026-05-20T10:00:00",
+  "topic_mastery": {
+    "java": {
+      "score": 75,
+      "notes": "JVM 内存模型、GC 算法、并发原语熟练；分布式一致性协议能讲细节；但对最新的 ZGC、Loom 虚拟线程的最佳实践掌握尚浅",
+      "last_assessed": "2026-05-20T09:55:00"
+    }
+  },
+  "weak_points": [
+    {
+      "point": "Raft 与 Paxos 在日志压缩、成员变更（joint consensus）上的差异及工程实现取舍",
+      "topic": "java",
+      "first_seen": "2026-05-10T10:00:00",
+      "last_seen": "2026-05-19T10:00:00",
+      "times_seen": 2,
+      "improved": false,
+      "sr": {"interval_days": 4, "ease_factor": 2.6, "repetitions": 2, "next_review": "2026-05-23", "last_score": 7.5}
+    },
+    {
+      "point": "JVM ZGC 的着色指针与读屏障实现，相比 G1 的延迟改进来源",
+      "topic": "java",
+      "first_seen": "2026-05-11T10:00:00",
+      "last_seen": "2026-05-18T10:00:00",
+      "times_seen": 2,
+      "improved": false,
+      "sr": {"interval_days": 5, "ease_factor": 2.5, "repetitions": 2, "next_review": "2026-05-24", "last_score": 7.0}
+    },
+    {
+      "point": "分布式事务 TCC / Saga / 二阶段提交在高 QPS 场景下的失败补偿设计",
+      "topic": "java",
+      "first_seen": "2026-05-12T10:00:00",
+      "last_seen": "2026-05-17T10:00:00",
+      "times_seen": 1,
+      "improved": false,
+      "sr": {"interval_days": 7, "ease_factor": 2.7, "repetitions": 1, "next_review": "2026-05-26", "last_score": 8.0}
+    },
+    {
+      "point": "Loom 虚拟线程对传统 Reactor 模型（Netty/Vert.x）的冲击与适用边界",
+      "topic": "java",
+      "first_seen": "2026-05-13T10:00:00",
+      "last_seen": "2026-05-16T10:00:00",
+      "times_seen": 1,
+      "improved": false,
+      "sr": {"interval_days": 3, "ease_factor": 2.5, "repetitions": 1, "next_review": "2026-05-22", "last_score": 7.0}
+    }
+  ],
+  "strong_points": [
+    {"point": "Kafka 高吞吐架构设计能讲清 ISR、ack、零拷贝细节", "topic": "java", "first_seen": "2026-05-10T10:00:00"},
+    {"point": "JVM GC 调优有压测数据支撑", "topic": "java", "first_seen": "2026-05-11T10:00:00"}
+  ],
+  "communication": {
+    "style": "回答结构化、有数据；偶尔过于偏理论，缺少落地案例",
+    "habits": ["先给整体框架再展开"],
+    "suggestions": ["项目细节可以多一些"]
+  },
+  "thinking_patterns": {
+    "strengths": ["能从原理推导到工程权衡", "对边界 case 敏感"],
+    "gaps": ["对新出来不到 2 年的特性细节掌握偏慢"]
+  },
+  "preferences": {
+    "response_style": "详细",
+    "preferred_difficulty": "困难",
+    "focus_topics": ["java"],
+    "interview_pace": "",
+    "feedback_style": "直接",
+    "custom_notes": []
+  },
+  "stats": {
+    "total_sessions": 25,
+    "drill_sessions": 20,
+    "resume_sessions": 5,
+    "job_prep_sessions": 0,
+    "avg_score": 8.1,
+    "score_history": []
+  }
+}

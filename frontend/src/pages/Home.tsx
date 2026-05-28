@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { PipelineTimeline, applyStageEvent, type PipelineStages } from "@/components/PipelineTimeline";
 import type { Question, Profile, DueReview, TopicInfo } from "../types/api";
 
 interface ModeCard {
@@ -84,7 +85,9 @@ export default function Home() {
   const [pageLoading, setPageLoading] = useState(true);
   const [streamingQuestions, setStreamingQuestions] = useState<Question[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [pipelineStages, setPipelineStages] = useState<PipelineStages>({});
   const streamedQuestionsRef = useRef<Question[]>([]);
+  const pipelineStagesRef = useRef<PipelineStages>({});
 
   useEffect(() => {
     Promise.all([
@@ -127,15 +130,47 @@ export default function Home() {
       setIsStreaming(true);
       streamedQuestionsRef.current = [];
       setStreamingQuestions([]);
+      setPipelineStages({});
+      pipelineStagesRef.current = {};
       try {
         await startInterviewStream(mode, selectedTopic, {
           onQuestion: (q: Question) => {
             streamedQuestionsRef.current = [...streamedQuestionsRef.current, q];
             setStreamingQuestions((prev) => [...prev, q]);
           },
+          onQuestionUpdate: (q: Question) => {
+            // Validator repair / difficulty calibration replaces by id rather
+            // than appends. Without this branch the user would see duplicate
+            // cards (one repaired, one original).
+            const updateById = (list: Question[]) =>
+              list.map((existing) => (existing.id === q.id ? { ...existing, ...q } : existing));
+            streamedQuestionsRef.current = updateById(streamedQuestionsRef.current);
+            setStreamingQuestions((prev) => updateById(prev));
+          },
+          onStage: (evt) => {
+            setPipelineStages((prev) => {
+              const next = applyStageEvent(prev, evt);
+              pipelineStagesRef.current = next;
+              return next;
+            });
+          },
           onDone: (event: any) => {
             setIsStreaming(false);
             setLoading(false);
+            // Stash the timing breakdown so the Interview page (or future
+            // analytics) can read the last run without re-fetching.
+            try {
+              sessionStorage.setItem(
+                `drill:lastPipeline:${event.session_id}`,
+                JSON.stringify({
+                  topic: event.topic,
+                  stages: pipelineStagesRef.current,
+                  finishedAt: Date.now(),
+                }),
+              );
+            } catch {
+              // sessionStorage may be unavailable in private mode — ignore.
+            }
             navigate(`/interview/${event.session_id}`, {
               state: {
                 session_id: event.session_id,
@@ -442,37 +477,46 @@ export default function Home() {
       )}
 
       {/* Streaming progress */}
-      {isStreaming && streamingQuestions.length > 0 && (
+      {isStreaming && (
         <Card className="w-full max-w-[700px] mb-6 animate-fade-in gradient-border">
-          <CardContent className="p-4 md:p-5">
-            <div className="flex items-center gap-2 mb-3">
+          <CardContent className="p-4 md:p-5 space-y-3">
+            <div className="flex items-center gap-2">
               <div className="flex gap-1.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
                 <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse [animation-delay:0.2s]" />
                 <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse [animation-delay:0.4s]" />
               </div>
-              <span className="text-sm font-medium">AI 正在出题... ({streamingQuestions.length}/10)</span>
+              <span className="text-sm font-medium">
+                AI 正在出题... ({streamingQuestions.length}/10)
+              </span>
             </div>
-            <div className="h-2 rounded-full bg-border overflow-hidden mb-3 relative">
-              <div
-                className="h-full rounded-full transition-all duration-300 ease-out relative overflow-hidden"
-                style={{
-                  width: `${(streamingQuestions.length / 10) * 100}%`,
-                  background: "linear-gradient(90deg, var(--aurora-1), var(--aurora-2))",
-                  boxShadow: "0 0 12px var(--tech-glow)",
-                }}
-              >
-                <div className="absolute inset-0 opacity-60" style={{ background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent)", backgroundSize: "200% 100%", animation: "text-shimmer 1.5s linear infinite" }} />
-              </div>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              {streamingQuestions.map((q) => (
-                <div key={q.id} className="flex items-center gap-2 text-[13px] text-dim animate-fade-in">
-                  <Badge variant="outline" className="text-xs shrink-0">Q{q.id}</Badge>
-                  <span className="truncate">{q.question}</span>
+
+            <PipelineTimeline stages={pipelineStages} />
+
+            {streamingQuestions.length > 0 && (
+              <>
+                <div className="h-2 rounded-full bg-border overflow-hidden relative">
+                  <div
+                    className="h-full rounded-full transition-all duration-300 ease-out relative overflow-hidden"
+                    style={{
+                      width: `${(streamingQuestions.length / 10) * 100}%`,
+                      background: "linear-gradient(90deg, var(--aurora-1), var(--aurora-2))",
+                      boxShadow: "0 0 12px var(--tech-glow)",
+                    }}
+                  >
+                    <div className="absolute inset-0 opacity-60" style={{ background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent)", backgroundSize: "200% 100%", animation: "text-shimmer 1.5s linear infinite" }} />
+                  </div>
                 </div>
-              ))}
-            </div>
+                <div className="flex flex-col gap-1.5">
+                  {streamingQuestions.map((q) => (
+                    <div key={q.id} className="flex items-center gap-2 text-[13px] text-dim animate-fade-in">
+                      <Badge variant="outline" className="text-xs shrink-0">Q{q.id}</Badge>
+                      <span className="truncate">{q.question}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
       )}

@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     max_questions_per_phase: int = 5
     max_drill_questions: int = 15
 
+    # Redis (optional — empty string disables; falls back to in-memory LRU)
+    redis_url: str = ""
+
     def user_data_dir(self, user_id: str) -> Path:
         return self.base_dir / "data" / "users" / user_id
 

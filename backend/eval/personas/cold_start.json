@@ -1,0 +1,34 @@
+{
+  "persona_id": "cold_start",
+  "name": "Cold Start User",
+  "target_role": "AI 应用开发实习生",
+  "updated_at": "2026-05-20T10:00:00",
+  "topic_mastery": {},
+  "weak_points": [],
+  "strong_points": [],
+  "communication": {
+    "style": "",
+    "habits": [],
+    "suggestions": []
+  },
+  "thinking_patterns": {
+    "strengths": [],
+    "gaps": []
+  },
+  "preferences": {
+    "response_style": "",
+    "preferred_difficulty": "",
+    "focus_topics": [],
+    "interview_pace": "",
+    "feedback_style": "",
+    "custom_notes": []
+  },
+  "stats": {
+    "total_sessions": 0,
+    "drill_sessions": 0,
+    "resume_sessions": 0,
+    "job_prep_sessions": 0,
+    "avg_score": 0,
+    "score_history": []
+  }
+}

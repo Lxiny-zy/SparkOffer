@@ -107,150 +107,11 @@ async def start_interview_stream(req: StartInterviewRequest, user_id: str = Depe
     if not req.topic or req.topic not in topics:
         raise HTTPException(400, f"Invalid topic. Available: {list(topics.keys())}")
 
-    async def stream_questions():
-        from backend.graphs.topic_drill import (
-            _get_topic_display, _load_high_freq, _parse_json_response,
-        )
-        from backend.memory import get_topic_context_for_drill, get_profile_summary_for_drill
-        from backend.indexer import safe_retrieve_topic_context
-        from backend.spaced_repetition import get_due_reviews, init_sr_for_existing_points
-        from backend.llm_provider import get_langchain_llm
-        from backend.prompts.interviewer import DRILL_QUESTION_GEN_PROMPT
+    from backend.graphs.drill_pipeline import DrillPipeline
 
-        # 立即发送进度事件，防止代理层因首包超时返回 524
-        yield f"data: {json.dumps({'type': 'progress', 'message': '正在准备知识库...'}, ensure_ascii=False)}\n\n"
-
-        init_sr_for_existing_points(user_id)
-        topic_display = _get_topic_display(user_id)
-        topic_name = topic_display.get(req.topic, req.topic)
-        drill_ctx = get_topic_context_for_drill(req.topic, user_id)
-
-        due_reviews = get_due_reviews(user_id, req.topic)
-        due_points = [wp["point"] for wp in due_reviews[:5]]
-        all_weak = list(drill_ctx["weak_points"])
-        for dp in due_points:
-            if dp not in all_weak:
-                all_weak.insert(0, dp)
-
-        yield f"data: {json.dumps({'type': 'progress', 'message': '正在检索知识库...'}, ensure_ascii=False)}\n\n"
-
-        queries = []
-        if all_weak:
-            queries.append(" ".join(all_weak[:5]))
-        queries.append(f"{topic_name} 核心知识点 面试常见问题")
-        all_chunks = []
-        for q in queries:
-            chunks = await safe_retrieve_topic_context(req.topic, q, user_id, top_k=5, timeout=60.0)
-            if chunks:
-                all_chunks.extend(chunks)
-            else:
-                yield f"data: {json.dumps({'type': 'progress', 'message': '知识库检索超时或失败，跳过部分知识...'}, ensure_ascii=False)}\n\n"
-        seen = set()
-        unique_chunks = []
-        for c in all_chunks:
-            key = c[:100]
-            if key not in seen:
-                seen.add(key)
-                unique_chunks.append(c)
-        knowledge_ctx = "\n\n---\n\n".join(unique_chunks)[:5000]
-
-        past_insights_text = "\n".join(
-            f"- {ins[:200]}" for ins in drill_ctx.get("past_insights", [])
-        ) or "暂无历史数据"
-        high_freq = _load_high_freq(req.topic, user_id) or "暂无"
-
-        weak_lines = []
-        for w in all_weak[:10]:
-            prefix = "[到期复习] " if w in due_points else ""
-            weak_lines.append(f"- {prefix}{w}")
-
-        mastery_score = drill_ctx["mastery_score"]
-        if mastery_score <= 30:
-            diff_min, diff_max = 1, 3
-            question_strategy = (
-                "当前为新手阶段（掌握度 0-30），题目策略：\n"
-                "- 70% 基础概念题 + 对比辨析题，30% 简单应用题\n"
-                "- 概念题要考理解而非背诵——问「为什么这样设计」而非「请背诵定义」"
-            )
-        elif mastery_score <= 60:
-            diff_min, diff_max = 2, 4
-            question_strategy = (
-                "当前有基础（掌握度 30-60），题目策略：\n"
-                "- 40% 深度概念题，40% 场景应用题，20% 设计权衡题"
-            )
-        else:
-            diff_min, diff_max = 3, 5
-            question_strategy = (
-                "当前已熟练（掌握度 60-100），题目策略：\n"
-                "- 20% 概念题（考边界 case 和底层原理），80% 场景设计 + 系统权衡题"
-            )
-
-        prompt = DRILL_QUESTION_GEN_PROMPT.format(
-            topic_name=topic_name,
-            knowledge_context=knowledge_ctx,
-            user_profile=get_profile_summary_for_drill(user_id),
-            mastery_info=drill_ctx["mastery_info"],
-            weak_points="\n".join(weak_lines) or "暂无",
-            high_freq_questions=high_freq,
-            recent_questions="\n".join(f"- {q}" for q in drill_ctx["recent_questions"][-10:]) or "暂无",
-            past_insights=past_insights_text,
-            question_strategy=question_strategy,
-            diff_min=diff_min,
-            diff_max=diff_max,
-        )
-
-        yield f"data: {json.dumps({'type': 'progress', 'message': 'AI 正在生成题目...'}, ensure_ascii=False)}\n\n"
-
-        llm = get_langchain_llm()
-        from backend.utils.stream_parser import extract_complete_objects
-
-        accumulated = ""
-        emitted_count = 0
-
-        async for chunk in llm.astream([
-            SystemMessage(content="你是专项训练出题引擎。只返回 JSON 数组，不要其他内容。"),
-            HumanMessage(content=prompt),
-        ]):
-            token = chunk.content if hasattr(chunk, "content") else str(chunk)
-            accumulated += token
-
-            objects, _ = extract_complete_objects(accumulated)
-            while emitted_count < len(objects):
-                q = objects[emitted_count]
-                if "id" not in q:
-                    q["id"] = emitted_count + 1
-                emitted_count += 1
-                yield f"data: {json.dumps({'type': 'question', 'data': q}, ensure_ascii=False)}\n\n"
-
-        if emitted_count == 0:
-            try:
-                questions = _parse_json_response(accumulated)
-                if isinstance(questions, list):
-                    for i, q in enumerate(questions[:10]):
-                        if "id" not in q:
-                            q["id"] = i + 1
-                        yield f"data: {json.dumps({'type': 'question', 'data': q}, ensure_ascii=False)}\n\n"
-                    emitted_count = len(questions[:10])
-            except Exception:
-                yield f"data: {json.dumps({'type': 'error', 'message': '出题失败，请重试'})}\n\n"
-                return
-
-        session_id = str(uuid.uuid4())[:8]
-        all_questions, _ = extract_complete_objects(accumulated)
-        for i, q in enumerate(all_questions):
-            if "id" not in q:
-                q["id"] = i + 1
-        questions = all_questions[:10]
-
-        create_session(session_id, req.mode.value, req.topic, questions=questions, user_id=user_id)
-        save_live(drill_sessions, session_id, "drill", user_id, {
-            "topic": req.topic, "questions": questions, "user_id": user_id,
-        })
-
-        yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'topic': req.topic, 'mode': req.mode.value, 'total': len(questions)}, ensure_ascii=False)}\n\n"
-
+    pipeline = DrillPipeline(topic=req.topic, user_id=user_id, mode=req.mode.value)
     return StreamingResponse(
-        stream_questions(),
+        pipeline.run(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -322,15 +183,31 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
 
         async def _stream_drill():
             eval_result = {}
-            async for sse_line in stream_evaluate_drill_answers(topic, questions, answers, user_id):
-                yield sse_line
-                if sse_line.startswith("data: "):
-                    try:
-                        evt = json.loads(sse_line[6:].strip())
-                        if evt.get("type") == "eval_result":
-                            eval_result = evt["data"]
-                    except (json.JSONDecodeError, KeyError):
-                        pass
+
+            # Phase 5A: if a small-tier channel exists, use the decoupled
+            # evaluator (parallel per-Q scoring on cheap model + big-model
+            # summary). Otherwise fall back to the legacy big-batch stream.
+            from backend.graphs.decoupled_eval import has_small_tier, evaluate_decoupled
+
+            if has_small_tier():
+                yield f"data: {json.dumps({'type': 'progress', 'message': '并发评分中 (small tier)...'}, ensure_ascii=False)}\n\n"
+                try:
+                    eval_result = await evaluate_decoupled(topic, questions, answers, user_id)
+                    yield f"data: {json.dumps({'type': 'eval_result', 'data': eval_result}, ensure_ascii=False)}\n\n"
+                except Exception as exc:
+                    yield f"data: {json.dumps({'type': 'progress', 'message': f'并发评分失败，回退到批量评估: {exc}'}, ensure_ascii=False)}\n\n"
+                    eval_result = {}
+
+            if not eval_result:
+                async for sse_line in stream_evaluate_drill_answers(topic, questions, answers, user_id):
+                    yield sse_line
+                    if sse_line.startswith("data: "):
+                        try:
+                            evt = json.loads(sse_line[6:].strip())
+                            if evt.get("type") == "eval_result":
+                                eval_result = evt["data"]
+                        except (json.JSONDecodeError, KeyError):
+                            pass
 
             scores = eval_result.get("scores", [])
             overall = eval_result.get("overall", {})
@@ -347,7 +224,7 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                 wp = s.get("weak_point")
                 sc = s.get("score")
                 if wp and isinstance(sc, (int, float)):
-                    update_weak_point_sr(topic, wp, sc, user_id)
+                    update_weak_point_sr(topic, wp, sc, user_id, difficulty=s.get("difficulty", 3))
 
             await _update_drill_profile(topic, overall, scores, len(questions), user_id)
             del_live(drill_sessions, session_id)
