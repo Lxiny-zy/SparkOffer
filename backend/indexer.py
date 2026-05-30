@@ -304,3 +304,75 @@ async def safe_retrieve_topic_context(
     except Exception as e:
         logger.warning(f"Knowledge retrieval failed for topic={topic}: {e}")
         return []
+
+
+# ── Startup warmup ────────────────────────────────────────────────────────────
+
+def _first_user_id() -> str | None:
+    """Oldest user's id from the DB — the user whose indices we warm at startup.
+
+    Mirrors scripts/warmup_index.py's lookup so manual and automatic warmup
+    target the same user.
+    """
+    import sqlite3
+    db_path = settings.db_path
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT id FROM users ORDER BY created_at ASC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.warning("Index warmup: could not read first user id: %s", e)
+        return None
+
+
+async def warmup_user_indices(user_id: str | None = None) -> None:
+    """Pre-load every topic index into the in-process cache at startup.
+
+    Without this, the first retrieval for each topic pays a 12-27s cold start: a
+    synchronous load_index_from_storage (disk cache present) or, worse, a full
+    rebuild that re-embeds every chunk via the embedding API. Warming on startup
+    moves that cost off the user's first request.
+
+    Designed to run fire-and-forget from the app lifespan:
+      - Never raises — a failed topic logs and falls back to lazy-load on demand.
+      - Topics are warmed SEQUENTIALLY, not concurrently, to stay under the
+        embedding API concurrency limit (cf. commit 5ce4d7b).
+      - build_topic_index is cache-aware, so an already-warm topic returns fast.
+    """
+    if user_id is None:
+        user_id = _first_user_id()
+    if not user_id:
+        logger.info("Index warmup skipped: no user available yet.")
+        return
+
+    try:
+        topics = load_topics(user_id)
+    except Exception as e:
+        logger.warning("Index warmup skipped: cannot load topics for %s: %s", user_id, e)
+        return
+    if not topics:
+        logger.info("Index warmup skipped: user %s has no topics.", user_id)
+        return
+
+    logger.info("Index warmup starting: user=%s topics=%s", user_id, list(topics.keys()))
+    for key in topics:
+        t0 = time.time()
+        try:
+            await asyncio.to_thread(build_topic_index, key, user_id)
+            logger.info("Index warmup ready: topic=%s (%.1fs)", key, time.time() - t0)
+        except asyncio.CancelledError:
+            logger.info("Index warmup cancelled.")
+            raise
+        except Exception as e:
+            logger.warning(
+                "Index warmup failed for topic=%s: %s (lazy-load will retry on demand)",
+                key, e,
+            )
+    logger.info("Index warmup complete: user=%s", user_id)

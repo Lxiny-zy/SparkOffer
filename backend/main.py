@@ -61,11 +61,24 @@ async def lifespan(app: FastAPI):
     from backend.embedding_tasks import get_task_queue
     await get_task_queue().start()
 
+    # Pre-warm knowledge indices in the background. The first retrieval per topic
+    # otherwise pays a 12-27s cold start (synchronous index load / full rebuild +
+    # re-embedding). Fire-and-forget so startup isn't blocked; lazy-load still
+    # covers any topic that hasn't finished warming. Keep a reference so the task
+    # isn't garbage-collected mid-flight.
+    import asyncio
+    from backend.indexer import warmup_user_indices
+    app.state.warmup_task = asyncio.create_task(warmup_user_indices())
+
     logger.info("Startup complete.")
 
     yield
 
-    # Graceful shutdown: stop embedding task queue
+    # Graceful shutdown: cancel warmup if still running, then stop the task queue
+    warmup_task = getattr(app.state, "warmup_task", None)
+    if warmup_task is not None and not warmup_task.done():
+        warmup_task.cancel()
+
     from backend.embedding_tasks import get_task_queue as _get_tq
     await _get_tq().stop()
 
