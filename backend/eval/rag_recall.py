@@ -216,6 +216,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         row = {
             "id": q.get("id", ""),
             "topic": topic,
+            "difficulty": q.get("difficulty", "unspecified"),
             "type": q.get("type", "unspecified"),
             **m,
             "ms": round(ms, 0),
@@ -235,6 +236,16 @@ async def _main_async(args: argparse.Namespace) -> int:
     print("-" * 78)
     print("Overall:")
     _print_group("ALL", results)
+
+    # Headline split: hard should score below easy — if it doesn't, the set still
+    # lacks discriminating power (the whole reason v2 added hard queries).
+    by_diff: dict[str, list[dict]] = {}
+    for r in results:
+        by_diff.setdefault(r["difficulty"], []).append(r)
+    if len(by_diff) > 1:
+        print("By difficulty:")
+        for d, rows in sorted(by_diff.items()):
+            _print_group(d, rows)
 
     by_topic: dict[str, list[dict]] = {}
     for r in results:
@@ -261,8 +272,8 @@ async def _main_async(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["id", "topic", "type", "hit_rate", "mrr", "kw_cov",
-                           "precision", "n_chunks", "n_hits", "ms"],
+            f, fieldnames=["id", "topic", "difficulty", "type", "hit_rate", "mrr",
+                           "kw_cov", "precision", "n_chunks", "n_hits", "ms"],
         )
         writer.writeheader()
         writer.writerows(results)

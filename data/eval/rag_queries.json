@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "description": "RAG 召回率离线评估集。每条 query 用关键词匹配判断 chunk 命中，无需标注具体 chunk_id。扩充方式：补 expected_keywords 即可。",
+  "version": 2,
+  "description": "RAG 召回率离线评估集。每条 query 用关键词匹配判断 chunk 命中，无需标注具体 chunk_id。\n\nv2 新增分层：\n- difficulty: easy | hard —— easy 为旧版控制组（query 文本直接含答案词，几乎必中，用于确认链路正常）；hard 为区分性题（v1 全 HitRate=1.0 触顶，测不出短板，故新增）。\n- type: 题型/陷阱类别——\n    direct        = query 直接点名概念（easy 控制组）\n    semantic_gap  = 用症状/场景描述，不出现目标术语，逼语义桥接\n    term_ambiguity= 同 topic 内多个近义/同源术语竞争，须选对那一个\n    long_tail     = 主导章节里的细枝末节，易被大块泛 chunk 盖过\n    cross_chapter = 需要那条把两个概念联系起来的 chunk\n\nhard 题的 must_include_any 刻意选「只有正确 chunk 才含」的精确词，故任何 miss 都是检索失败而非标注问题。扩充方式：补 must_include_any / expected_keywords 即可。",
   "scoring": {
     "method": "keyword_match",
     "rule": "chunk 文本中包含 must_include_any 中任一关键词（不区分大小写）即视为命中"
@@ -9,6 +9,8 @@
     {
       "id": "agent-01",
       "topic": "agent",
+      "difficulty": "easy",
+      "type": "direct",
       "query": "Transformer 中 multi-head attention 的并行机制",
       "must_include_any": ["multi-head", "多头", "并行", "attention"],
       "expected_keywords": ["multi-head", "并行", "线性投影", "head"],
@@ -17,6 +19,8 @@
     {
       "id": "agent-02",
       "topic": "agent",
+      "difficulty": "easy",
+      "type": "direct",
       "query": "RAG 召回率与精确率的权衡",
       "must_include_any": ["召回", "RAG", "精确率"],
       "expected_keywords": ["召回", "精确率", "top_k", "重排"],
@@ -25,6 +29,8 @@
     {
       "id": "agent-03",
       "topic": "agent",
+      "difficulty": "easy",
+      "type": "direct",
       "query": "Agent 的记忆体系如何分层设计",
       "must_include_any": ["记忆", "memory", "短期", "长期"],
       "expected_keywords": ["短期记忆", "长期记忆", "工作记忆", "向量"],
@@ -33,6 +39,8 @@
     {
       "id": "agent-04",
       "topic": "agent",
+      "difficulty": "easy",
+      "type": "direct",
       "query": "MCP 协议解决了什么问题",
       "must_include_any": ["MCP", "协议"],
       "expected_keywords": ["MCP", "协议", "工具", "Anthropic"],
@@ -41,6 +49,8 @@
     {
       "id": "python-01",
       "topic": "python",
+      "difficulty": "easy",
+      "type": "direct",
       "query": "Python GIL 对多线程性能的影响",
       "must_include_any": ["GIL"],
       "expected_keywords": ["GIL", "多线程", "CPU 密集", "解释器锁"],
@@ -49,6 +59,8 @@
     {
       "id": "python-02",
       "topic": "python",
+      "difficulty": "easy",
+      "type": "direct",
       "query": "asyncio 事件循环阻塞的常见原因",
       "must_include_any": ["asyncio", "事件循环"],
       "expected_keywords": ["事件循环", "阻塞", "同步", "to_thread"],
@@ -57,6 +69,8 @@
     {
       "id": "python-03",
       "topic": "python",
+      "difficulty": "easy",
+      "type": "direct",
       "query": "Python 装饰器的实现原理",
       "must_include_any": ["装饰器", "decorator"],
       "expected_keywords": ["装饰器", "闭包", "高阶函数", "@"],
@@ -65,6 +79,8 @@
     {
       "id": "java-01",
       "topic": "java",
+      "difficulty": "easy",
+      "type": "direct",
       "query": "JVM Full GC 频繁的排查思路",
       "must_include_any": ["GC", "Full GC"],
       "expected_keywords": ["Full GC", "堆", "老年代", "GC 日志"],
@@ -73,6 +89,8 @@
     {
       "id": "java-02",
       "topic": "java",
+      "difficulty": "easy",
+      "type": "direct",
       "query": "Spring AOP 的实现原理",
       "must_include_any": ["AOP", "代理"],
       "expected_keywords": ["AOP", "动态代理", "切面", "JDK", "CGLib"],
@@ -81,10 +99,205 @@
     {
       "id": "java-03",
       "topic": "java",
+      "difficulty": "easy",
+      "type": "direct",
       "query": "MySQL 索引失效的常见场景",
       "must_include_any": ["索引", "失效"],
       "expected_keywords": ["索引", "失效", "B+ 树", "最左前缀", "回表"],
       "notes": "测试 db-01_MySQL 基础与索引召回"
+    },
+
+    {
+      "id": "hard-py-01",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "我用多线程跑一段纯数学计算，开了 4 个线程结果反而比单线程还慢，这是为什么",
+      "must_include_any": ["GIL", "全局解释器锁"],
+      "expected_keywords": ["GIL", "CPU 密集", "字节码", "切换"],
+      "notes": "py-05/extra-02 GIL。症状描述不出现 GIL，逼语义桥接（多线程+CPU 密集变慢 → GIL）"
+    },
+    {
+      "id": "hard-py-02",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "CPython 解释器是按什么粒度在多个线程之间轮流切换执行权的",
+      "must_include_any": ["5ms", "时间片"],
+      "expected_keywords": ["释放", "切换", "5ms", "字节码"],
+      "notes": "py-05『GIL 工作机制』细节：3.2+ 每 5ms 释放。长尾点，易被 GIL 概览大块盖过"
+    },
+    {
+      "id": "hard-py-03",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "同一个线程里递归调用、需要重复获取同一把锁又不能死锁，该用哪种锁",
+      "must_include_any": ["RLock", "可重入"],
+      "expected_keywords": ["RLock", "可重入", "递归"],
+      "notes": "py-05 同步原语。干扰项：普通 Lock（不可重入）章节同样讲『锁』，须选 RLock"
+    },
+    {
+      "id": "hard-py-04",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "异步服务里调了个第三方同步库，一调用整个服务就卡住不响应了，怎么处理",
+      "must_include_any": ["run_in_executor", "to_thread"],
+      "expected_keywords": ["run_in_executor", "线程池", "阻塞", "事件循环"],
+      "notes": "py-05『坑2：asyncio 中阻塞调用』。不出现 run_in_executor，逼从症状映射到方案"
+    },
+    {
+      "id": "hard-py-05",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "把任务丢进进程池执行时报了序列化相关的错，哪些东西是不能直接传进去的",
+      "must_include_any": ["pickle", "PicklingError"],
+      "expected_keywords": ["pickle", "lambda", "闭包", "模块级"],
+      "notes": "py-05『坑3』/extra-02。症状（序列化错）→ pickle 限制（lambda/闭包不可 pickle）"
+    },
+    {
+      "id": "hard-py-06",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "并发跑一批协程，想按谁先完成就先拿谁的结果，而不是干等全部结束",
+      "must_include_any": ["as_completed"],
+      "expected_keywords": ["as_completed", "完成顺序"],
+      "notes": "py-05 asyncio。干扰项：gather（按输入序）、wait（done/pending），精确答案是 as_completed"
+    },
+
+    {
+      "id": "hard-java-01",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "几十 G 的堆，GC 停顿动辄几百毫秒影响线上响应，想换个停顿几乎不随堆大小增长的收集器",
+      "must_include_any": ["ZGC", "染色指针"],
+      "expected_keywords": ["ZGC", "染色指针", "读屏障", "停顿"],
+      "notes": "java-05 GC。干扰项：G1（低延迟但非亚毫秒/不随堆恒定）、CMS。精确答案 ZGC"
+    },
+    {
+      "id": "hard-java-02",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "一个赋值为 123 的 static int，在类加载的某个阶段它的值其实还是 0，是哪个阶段",
+      "must_include_any": ["准备", "Preparation"],
+      "expected_keywords": ["准备", "默认值", "零值", "初始化"],
+      "notes": "java-05 类加载。长尾点：『准备』阶段设零值 vs『初始化』赋真值，须区分两阶段"
+    },
+    {
+      "id": "hard-java-03",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "等值查询一条不存在的记录，InnoDB 在 RR 隔离级别下会加什么锁来挡住别人插入",
+      "must_include_any": ["Gap Lock", "间隙锁"],
+      "expected_keywords": ["Gap Lock", "退化", "间隙", "插入"],
+      "notes": "db-02 行锁。干扰项：Record Lock（记录存在时）、Next-Key Lock。答案是 Next-Key 退化为 Gap Lock"
+    },
+    {
+      "id": "hard-java-04",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "cross_chapter",
+      "query": "同样是快照读，为什么有的隔离级别能重复读到一致结果，有的每次读可能不一样",
+      "must_include_any": ["每次 SELECT", "第一次 SELECT", "复用首次"],
+      "expected_keywords": ["ReadView", "RC", "RR", "快照读"],
+      "notes": "db-02『RC vs RR 的 ReadView 差异』。须命中讲生成时机差异的那条 chunk（每次 vs 首次）"
+    },
+    {
+      "id": "hard-java-05",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "两个事务各自先改了一行，又都想改对方改过的那行，结果一个被自动回滚，数据库靠什么发现的",
+      "must_include_any": ["wait-for", "等待图"],
+      "expected_keywords": ["死锁检测", "wait-for", "回滚", "代价最小"],
+      "notes": "db-02 死锁。症状（循环等待+自动回滚）→ wait-for graph 检测。不出现『死锁』二字"
+    },
+    {
+      "id": "hard-java-06",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "JIT 分析出某对象不会被方法外引用，于是可能不在堆上创建它，这类优化叫什么",
+      "must_include_any": ["逃逸分析", "栈上分配"],
+      "expected_keywords": ["逃逸分析", "栈上分配", "标量替换", "锁消除"],
+      "notes": "java-05 JIT。长尾点：逃逸分析三连（栈上分配/标量替换/锁消除），易被 GC 大块淹没"
+    },
+
+    {
+      "id": "hard-agent-01",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "想让向量匹配用小片段更精准，但喂给大模型时又要保留完整上下文，有什么检索策略",
+      "must_include_any": ["父子", "ParentDocumentRetriever", "Parent Document"],
+      "expected_keywords": ["父子", "小 chunk", "大 chunk", "上下文"],
+      "notes": "extra-03 Chunking。需求描述 → 父子 chunk 策略，不出现『父子』字样"
+    },
+    {
+      "id": "hard-agent-02",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "检索前先让大模型编一个假设性答案，再拿这个假答案去做向量检索，这个技巧叫什么",
+      "must_include_any": ["HyDE", "假设"],
+      "expected_keywords": ["HyDE", "假设答案", "embedding"],
+      "notes": "extra-03 查询重写。干扰项：Multi-query、Step-back 同章节，精确答案 HyDE"
+    },
+    {
+      "id": "hard-agent-03",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "把 query 和文档拼在一起进同一个 transformer 算相关性，精度高但慢，所以只对少量候选用",
+      "must_include_any": ["cross-encoder", "rerank", "重排"],
+      "expected_keywords": ["cross-encoder", "rerank", "top-20", "精排"],
+      "notes": "extra-03 Reranking。机制描述 → cross-encoder rerank。干扰项：bi-encoder/向量召回"
+    },
+    {
+      "id": "hard-agent-04",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "技术文档做切分时，单块大概多少字符、留多少重叠比较合适",
+      "must_include_any": ["400-600", "400"],
+      "expected_keywords": ["400-600", "overlap", "技术文档"],
+      "notes": "extra-03『Chunk size 选择』细节：技术文档 400-600 char + 50-100 overlap。长尾数值"
+    },
+    {
+      "id": "hard-agent-05",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "把大模型的上下文窗口当内存、外部存储当磁盘，靠分页机制自主换入换出记忆的方案",
+      "must_include_any": ["MemGPT", "虚拟内存", "Letta"],
+      "expected_keywords": ["MemGPT", "虚拟内存", "分页", "Core Memory"],
+      "notes": "agent-04『MemGPT/Letta』。类比描述（内存/磁盘/分页）→ MemGPT，不出现该名"
+    },
+    {
+      "id": "hard-agent-06",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "cross_chapter",
+      "query": "记忆召回时只看语义相似度不够，还要综合哪些因素一起打分排序",
+      "must_include_any": ["importance", "recency", "重要性", "时间衰减"],
+      "expected_keywords": ["相似度", "重要性", "时间衰减", "recency"],
+      "notes": "agent-04 召回打分公式 similarity+importance+recency。须命中含三因子的 chunk"
+    },
+    {
+      "id": "hard-agent-07",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "按认知科学把记忆分成存事实的、存具体发生过的事的、存技能流程的三类，分别叫什么",
+      "must_include_any": ["Episodic", "情景", "Procedural", "程序"],
+      "expected_keywords": ["语义记忆", "情景记忆", "程序记忆"],
+      "notes": "agent-04『按内容维度分类』：Semantic/Episodic/Procedural。长尾三分类术语"
     }
   ]
 }
