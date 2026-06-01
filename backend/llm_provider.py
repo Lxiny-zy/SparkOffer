@@ -58,6 +58,48 @@ def _build_http_clients(proxy: str = "", *, timeout: httpx.Timeout | None = _LLM
     return httpx.Client(**kw), httpx.AsyncClient(**kw)
 
 
+# Status codes that indicate a deterministic config/request error — failing over
+# to another channel won't help and would needlessly trip every channel's
+# cooldown. 429 (rate limit) is intentionally excluded: it IS worth failing over.
+_FATAL_STATUS_CODES = frozenset({400, 401, 403, 404, 422})
+
+
+def _extract_status_code(exc: Exception) -> int | None:
+    """Best-effort HTTP status from a LangChain/openai/httpx exception.
+
+    LangChain wraps the underlying openai/httpx error, so the status may live on
+    the exception itself, on its ``.response``, or on a chained cause/context.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        code = getattr(cur, "status_code", None)
+        if isinstance(code, int):
+            return code
+        resp_code = getattr(getattr(cur, "response", None), "status_code", None)
+        if isinstance(resp_code, int):
+            return resp_code
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _is_fatal_config_error(exc: Exception) -> bool:
+    """True for a deterministic 4xx (except 429) — don't fail over on these."""
+    return _extract_status_code(exc) in _FATAL_STATUS_CODES
+
+
+def _reraise_if_fatal(exc: Exception, channel: dict) -> None:
+    """Re-raise a deterministic 4xx instead of failing over.
+
+    Failover can't fix a config/request error and would needlessly trip every
+    channel's cooldown. Shared by all three ResilientChatModel retry loops.
+    """
+    if _is_fatal_config_error(exc):
+        logger.error("LLM channel '%s' fatal config error, not failing over: %s", channel["name"], exc)
+        raise exc
+
+
 # ── ResilientChatModel — transparent failover wrapper ──
 
 class ResilientChatModel:
@@ -108,6 +150,7 @@ class ResilientChatModel:
                 report_success("llm", channel["id"])
                 return result
             except Exception as e:
+                _reraise_if_fatal(e, channel)
                 logger.warning("LLM channel '%s' invoke failed: %s", channel["name"], e)
                 report_error("llm", channel["id"])
                 tried.add(channel["id"])
@@ -124,6 +167,7 @@ class ResilientChatModel:
                 report_success("llm", channel["id"])
                 return result
             except Exception as e:
+                _reraise_if_fatal(e, channel)
                 logger.warning("LLM channel '%s' ainvoke failed: %s", channel["name"], e)
                 report_error("llm", channel["id"])
                 tried.add(channel["id"])
@@ -145,6 +189,7 @@ class ResilientChatModel:
                     yield chunk
                 return
             except Exception as e:
+                _reraise_if_fatal(e, channel)
                 logger.warning("LLM channel '%s' astream failed: %s", channel["name"], e)
                 report_error("llm", channel["id"])
                 tried.add(channel["id"])
@@ -250,6 +295,11 @@ def _create_embedding():
                     "api_key": ch.get("api_key", ""),
                     "http_client": sync_c,
                     "embed_batch_size": 10,
+                    # Fail fast: cap the SDK's internal retry/backoff (default
+                    # max_retries=10 + tenacity) so a single query embed can't
+                    # blow past the outer 60s retrieval timeout and leak threads.
+                    "max_retries": 1,
+                    "timeout": 20.0,
                 }
                 if ch.get("api_base"):
                     kwargs["api_base"] = ch["api_base"]
@@ -264,12 +314,16 @@ def _create_embedding():
         model_name = get_effective("embedding", "api_model")
         if not model_name:
             raise RuntimeError("Embedding API model is required when backend=api")
-        sync_c, _ = _build_http_clients(timeout=None)
+        sync_c, _ = _build_http_clients(timeout=_EMBED_TIMEOUT)
         kwargs = {
             "model_name": model_name,
             "api_key": api_key,
             "http_client": sync_c,
             "embed_batch_size": 10,
+            # Same fail-fast cap as the channel-pool branch; the previous
+            # timeout=None disabled httpx timeouts entirely (could hang forever).
+            "max_retries": 1,
+            "timeout": 20.0,
         }
         if api_base:
             kwargs["api_base"] = api_base
