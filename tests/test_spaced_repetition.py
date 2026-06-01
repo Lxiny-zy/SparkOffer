@@ -44,7 +44,7 @@ def test_interval_progression_first_three_passes():
     s = sm2_update(s, 8.0)
     assert (s["interval_days"], s["repetitions"]) == (3, 2)   # reps 1 → 3 days
     s = sm2_update(s, 8.0)
-    assert (s["interval_days"], s["repetitions"]) == (7, 3)   # int(3 * 2.5) = 7
+    assert (s["interval_days"], s["repetitions"]) == (8, 3)   # round(3 * 2.5) = round(7.5) = 8
 
 
 def test_fail_resets_repetitions_and_interval():

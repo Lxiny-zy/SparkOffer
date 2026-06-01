@@ -29,9 +29,13 @@ def sm2_update(sr_state: dict, score_0_10: float) -> dict:
         if reps == 0:
             interval = 1
         elif reps == 1:
+            # Deliberately more aggressive than SM-2's standard 6 days — interview
+            # prep wants the second review sooner.
             interval = 3
         else:
-            interval = int(sr_state.get("interval_days", 1) * ef)
+            # round() not int(): truncation systematically biased intervals down,
+            # which over-schedules reviews.
+            interval = round(sr_state.get("interval_days", 1) * ef)
         reps += 1
     else:  # Fail — reset
         interval = 1
