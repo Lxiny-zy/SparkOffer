@@ -26,6 +26,7 @@ from backend.live_store import (
     graphs, drill_sessions, job_prep_sessions,
     save_live, get_live, del_live,
 )
+from backend.utils.sse_helpers import sse_event, streaming_response
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api")
@@ -190,12 +191,12 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             from backend.graphs.decoupled_eval import has_small_tier, evaluate_decoupled
 
             if has_small_tier():
-                yield f"data: {json.dumps({'type': 'progress', 'message': '并发评分中 (small tier)...'}, ensure_ascii=False)}\n\n"
+                yield sse_event({"type": "progress", "message": "并发评分中 (small tier)..."})
                 try:
                     eval_result = await evaluate_decoupled(topic, questions, answers, user_id)
-                    yield f"data: {json.dumps({'type': 'eval_result', 'data': eval_result}, ensure_ascii=False)}\n\n"
+                    yield sse_event({"type": "eval_result", "data": eval_result})
                 except Exception as exc:
-                    yield f"data: {json.dumps({'type': 'progress', 'message': f'并发评分失败，回退到批量评估: {exc}'}, ensure_ascii=False)}\n\n"
+                    yield sse_event({"type": "progress", "message": f"并发评分失败，回退到批量评估: {exc}"})
                     eval_result = {}
 
             if not eval_result:
@@ -244,14 +245,10 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                 "scores": scores,
                 "overall": overall,
             }
-            yield f"data: {json.dumps({'type': 'complete', 'data': result}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            yield sse_event({"type": "complete", "data": result})
+            yield sse_event({"type": "done"})
 
-        return StreamingResponse(
-            _stream_drill(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        return streaming_response(_stream_drill())
 
     # -- JD prep mode --
     entry = get_live(job_prep_sessions, session_id, "job_prep")
@@ -310,14 +307,10 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                 "position": meta.get("position"),
                 "company": meta.get("company"),
             }
-            yield f"data: {json.dumps({'type': 'complete', 'data': result}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            yield sse_event({"type": "complete", "data": result})
+            yield sse_event({"type": "done"})
 
-        return StreamingResponse(
-            _stream_job_prep(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        return streaming_response(_stream_job_prep())
 
     # -- Resume mode --
     if session_id not in graphs:
@@ -338,7 +331,7 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
     topic_name = state.values.get("topic_name", entry.get("topic"))
 
     async def _stream_resume():
-        yield f"data: {json.dumps({'type': 'eval_start', 'total': len(messages)}, ensure_ascii=False)}\n\n"
+        yield sse_event({"type": "eval_start", "total": len(messages)})
 
         review_text = ""
         async for sse_line in stream_generate_review(
@@ -401,14 +394,10 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             "dimension_scores": extraction.get("dimension_scores"),
             "avg_score": extraction.get("avg_score"),
         }
-        yield f"data: {json.dumps({'type': 'complete', 'data': result}, ensure_ascii=False)}\n\n"
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        yield sse_event({"type": "complete", "data": result})
+        yield sse_event({"type": "done"})
 
-    return StreamingResponse(
-        _stream_resume(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return streaming_response(_stream_resume())
 
 
 @router.post("/interview/reference-answer")

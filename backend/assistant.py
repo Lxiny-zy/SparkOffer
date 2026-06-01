@@ -819,9 +819,14 @@ async def stream_assistant_chat(
             ],
         })
 
-        for tc in tool_calls:
-            result = await _execute_tool(tc["name"], tc["args"], user_id)
+        # 本轮的多个 tool_call 并发执行：每个工具都是独立的 async DB/向量/索引
+        # 读取，无共享可变状态，墙钟时间从"各延迟之和"降到"取最大值"。结果按
+        # 原顺序消费，保证 action 事件顺序确定、tool 消息与 tool_call_id 对齐。
+        results = await asyncio.gather(
+            *(_execute_tool(tc["name"], tc["args"], user_id) for tc in tool_calls)
+        )
 
+        for tc, result in zip(tool_calls, results):
             # If it's a frontend action, emit it
             if "action" in result:
                 yield f"data: {json.dumps({'type': 'action', **result}, ensure_ascii=False)}\n\n"

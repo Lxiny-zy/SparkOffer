@@ -30,13 +30,13 @@ class TTLDict:
     def __setitem__(self, key: str, value: dict):
         with self._lock:
             self._data[key] = (time.time() + self._default_ttl, value)
-            # Evict oldest if over max size
+            # Evict least-recently-used if over max size. Access refreshes the
+            # expiry (see __getitem__), so the min-by-expiry entry is the LRU one.
             if len(self._data) > self._max_size:
                 self._evict_expired()
                 if len(self._data) > self._max_size:
-                    # Remove oldest entry
-                    oldest_key = min(self._data, key=lambda k: self._data[k][0])
-                    del self._data[oldest_key]
+                    lru_key = min(self._data, key=lambda k: self._data[k][0])
+                    del self._data[lru_key]
 
     def __getitem__(self, key: str) -> dict:
         with self._lock:
@@ -46,7 +46,8 @@ class TTLDict:
             if time.time() > expire:
                 del self._data[key]
                 raise KeyError(key)
-            # Refresh TTL on access
+            # Refresh TTL on access: live sessions expire on 2h of INACTIVITY,
+            # not 2h after creation — an active interview should stay warm.
             self._data[key] = (time.time() + self._default_ttl, value)
             return value
 

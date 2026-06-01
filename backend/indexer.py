@@ -272,6 +272,11 @@ async def async_rebuild_topic_index(topic: str, user_id: str):
 # ── Safe retrieval timeout (seconds) ──
 _RETRIEVAL_TIMEOUT = 60.0
 
+# Upper bound for warming a single topic at startup. A warm disk-cache load is
+# seconds; a full rebuild can be longer, but past this we skip to the next topic
+# so one slow/unreachable topic can't stall the whole serial warmup queue.
+_WARMUP_PER_TOPIC_TIMEOUT = 120.0
+
 
 def retrieve_topic_context(topic: str, question: str, user_id: str, top_k: int = 5) -> list[str]:
     """Retrieve raw text chunks from topic index (for answer evaluation)."""
@@ -365,11 +370,20 @@ async def warmup_user_indices(user_id: str | None = None) -> None:
     for key in topics:
         t0 = time.time()
         try:
-            await asyncio.to_thread(build_topic_index, key, user_id)
+            await asyncio.wait_for(
+                asyncio.to_thread(build_topic_index, key, user_id),
+                timeout=_WARMUP_PER_TOPIC_TIMEOUT,
+            )
             logger.info("Index warmup ready: topic=%s (%.1fs)", key, time.time() - t0)
         except asyncio.CancelledError:
             logger.info("Index warmup cancelled.")
             raise
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Index warmup timed out for topic=%s after %.0fs — skipping to next "
+                "(lazy-load will retry on demand)",
+                key, _WARMUP_PER_TOPIC_TIMEOUT,
+            )
         except Exception as e:
             logger.warning(
                 "Index warmup failed for topic=%s: %s (lazy-load will retry on demand)",

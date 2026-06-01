@@ -5,6 +5,7 @@ and takes priority over environment variables.  Supports multi-channel configs.
 """
 
 import json
+import os
 import threading
 import logging
 import uuid
@@ -212,9 +213,14 @@ def get_channels(section: str) -> list[dict]:
 def _write_and_bump():
     global _config_version
     AI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    AI_CONFIG_PATH.write_text(
+    # Atomic write: serialize to a temp file in the same dir, then os.replace().
+    # A crash mid-write must not leave a truncated ai_config.json — that would
+    # silently drop all runtime channel config back to .env on next load.
+    tmp = AI_CONFIG_PATH.with_suffix(AI_CONFIG_PATH.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(
         json.dumps(_cache, indent=2, ensure_ascii=False), encoding="utf-8",
     )
+    os.replace(tmp, AI_CONFIG_PATH)
     _config_version += 1
 
 

@@ -393,38 +393,42 @@ async def find_similar_weak_point(
     # Embed the new point (async with timeout)
     new_vec = await _embed(new_point)
 
-    # Compare against each existing profile weak point
-    best_idx = None
-    best_score = -1.0
-
-    points_to_embed = []
-    points_indices = []
+    # Resolve a vector for every existing weak point — cache hits plus a single
+    # batch embed for the misses — then do ONE matrix cosine + argmax, instead of
+    # N reshape(1,-1) calls each recomputing new_vec's norm (cf. search_memory).
+    indices: list[int] = []
+    vectors: list = []
+    missing_texts: list[str] = []
+    missing_slots: list[int] = []
 
     for i, wp in enumerate(existing_points):
         point_text = wp.get("point", "") if isinstance(wp, dict) else str(wp)
         if not point_text:
             continue
+        indices.append(i)
         if point_text in cached:
-            sim = float(_cosine_similarity(new_vec, cached[point_text].reshape(1, -1))[0])
-            if sim > best_score:
-                best_score = sim
-                best_idx = i
+            vectors.append(cached[point_text])
         else:
-            points_to_embed.append(point_text)
-            points_indices.append(i)
+            missing_slots.append(len(vectors))
+            vectors.append(None)  # placeholder, filled after the batch embed
+            missing_texts.append(point_text)
 
-    # Embed any uncached points (async with timeout)
-    if points_to_embed:
-        vecs = await _embed_batch(points_to_embed)
-        for text, vec, idx in zip(points_to_embed, vecs, points_indices):
+    # Embed uncached points once and write them back into `cached`, so a point
+    # rewritten by an LLM UPDATE isn't re-embedded on every subsequent call.
+    if missing_texts:
+        embedded = await _embed_batch(missing_texts)
+        for slot, text, vec in zip(missing_slots, missing_texts, embedded):
             vec_np = np.array(vec, dtype=np.float32)
-            sim = float(_cosine_similarity(new_vec, vec_np.reshape(1, -1))[0])
-            if sim > best_score:
-                best_score = sim
-                best_idx = idx
+            vectors[slot] = vec_np
+            cached[text] = vec_np
 
-    if best_score >= threshold:
-        return best_idx
+    if not vectors:
+        return None
+
+    sims = _cosine_similarity(new_vec, np.stack(vectors))
+    best_pos = int(np.argmax(sims))
+    if float(sims[best_pos]) >= threshold:
+        return indices[best_pos]
     return None
 
 
