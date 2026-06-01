@@ -31,6 +31,8 @@ data/qa_notes/
 # Generated / cache
 data/.index_cache/
 data/models/
+backend/eval/reports/*
+!backend/eval/reports/.gitkeep
 .DS_Store
 llm.md
 

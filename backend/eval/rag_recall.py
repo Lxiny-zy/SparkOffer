@@ -304,6 +304,15 @@ def main():
         init_config()
     except Exception as e:
         logger.warning("ai_config.init_config failed (%s) — relying on .env", e)
+    # Set LlamaSettings.embed_model exactly like main.py's lifespan. Without this,
+    # a disk-cache-hit retrieval falls back to LlamaIndex's default OpenAI ada-002
+    # against the public OpenAI endpoint — every query then times out (the cause
+    # of the all-zero baseline report).
+    try:
+        from backend.indexer import _init_llama_settings
+        _init_llama_settings()
+    except Exception as e:
+        logger.warning("_init_llama_settings failed: %s", e)
     try:
         from backend.storage.database import init_all_tables
         init_all_tables()

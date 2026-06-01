@@ -68,19 +68,37 @@ _EVAL_PATTERN = re.compile(r"<!--EVAL:(.*?)-->", re.DOTALL)
 def _parse_inline_eval(content: str) -> tuple[str, dict | None]:
     """Extract and strip hidden eval JSON from interviewer response.
 
+    Uses the LAST EVAL marker (the real one is the response's final line; an
+    earlier match would be a stray example the model echoed mid-answer). The
+    parsed ``score`` is clamped to 0-10 and dropped if non-numeric / out of range,
+    so a malformed or injected marker can't poison the profile.
+
     Returns (clean_content, eval_dict_or_None).
     """
-    m = _EVAL_PATTERN.search(content)
-    if not m:
+    matches = list(_EVAL_PATTERN.finditer(content))
+    if not matches:
         return content, None
 
+    m = matches[-1]
     clean = _EVAL_PATTERN.sub("", content).rstrip()
     try:
         eval_data = json.loads(m.group(1))
-        return clean, eval_data
     except json.JSONDecodeError:
         logger.warning(f"Failed to parse inline eval: {m.group(1)[:100]}")
         return clean, None
+
+    if not isinstance(eval_data, dict):
+        return clean, None
+
+    # Clamp / validate score: keep only numeric 0-10, else drop the field so
+    # downstream averaging ignores it rather than ingesting a bogus value.
+    score = eval_data.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        eval_data.pop("score", None)
+    else:
+        eval_data["score"] = max(0, min(10, int(round(score))))
+
+    return clean, eval_data
 
 
 def _make_init_interview(user_id: str):
