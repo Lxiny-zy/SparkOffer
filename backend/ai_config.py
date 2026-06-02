@@ -35,6 +35,9 @@ _SETTINGS_KEY_MAP = {
     ("embedding", "local_path"): "local_embedding_path",
     ("asr", "dashscope_api_key"): "dashscope_api_key",
     ("asr", "model"): "asr_model",
+    ("reranker", "api_base"): "reranker_api_base",
+    ("reranker", "api_key"): "reranker_api_key",
+    ("reranker", "api_model"): "reranker_api_model",
     ("qiniu", "access_key"): "qiniu_access_key",
     ("qiniu", "secret_key"): "qiniu_secret_key",
     ("qiniu", "bucket"): "qiniu_bucket",
@@ -90,7 +93,7 @@ def _build_env_channels():
     """Create synthetic channels from .env values for sections without JSON channels."""
     from backend.channel_manager import load_channels, has_channels
 
-    for section, builder in (("llm", _env_llm_channel), ("embedding", _env_embedding_channel), ("asr", _env_asr_channel)):
+    for section, builder in (("llm", _env_llm_channel), ("embedding", _env_embedding_channel), ("asr", _env_asr_channel), ("reranker", _env_reranker_channel)):
         if not has_channels(section):
             ch = builder()
             if ch:
@@ -134,10 +137,23 @@ def _env_asr_channel() -> dict | None:
     }
 
 
+def _env_reranker_channel() -> dict | None:
+    base = getattr(settings, "reranker_api_base", "")
+    key = getattr(settings, "reranker_api_key", "")
+    model = getattr(settings, "reranker_api_model", "")
+    if not (base and key):
+        return None
+    return {
+        "id": "env-reranker", "name": ".env",
+        "api_base": base, "keys": [key], "api_model": model,
+        "priority": 1, "enabled": True,
+    }
+
+
 def _reload_channel_manager():
     """Feed current channels from cache into channel_manager."""
     from backend.channel_manager import load_channels
-    for section in ("llm", "embedding", "asr"):
+    for section in ("llm", "embedding", "asr", "reranker"):
         sec = _cache.get(section)
         if isinstance(sec, dict) and "channels" in sec:
             load_channels(section, sec["channels"])
@@ -163,7 +179,7 @@ def save_ai_config(config: dict):
     global _cache, _config_version
     with _lock:
         # Deep merge: only set keys that are explicitly provided
-        for section in ("llm", "embedding", "asr", "qiniu"):
+        for section in ("llm", "embedding", "asr", "reranker", "qiniu"):
             incoming = config.get(section)
             if incoming is None:
                 continue
@@ -186,7 +202,7 @@ def save_channels(channels_config: dict):
     """Save multi-channel config. channels_config = {llm: [...], embedding: [...], asr: [...]}."""
     global _cache, _config_version
     with _lock:
-        for section in ("llm", "embedding", "asr"):
+        for section in ("llm", "embedding", "asr", "reranker"):
             channels = channels_config.get(section)
             if channels is None:
                 continue

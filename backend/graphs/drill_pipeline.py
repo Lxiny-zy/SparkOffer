@@ -225,7 +225,7 @@ class DrillPipeline:
         # same active weak_points (common during a single sitting).
         cache = get_cache()
         cache_key = self._knowledge_cache_key(all_weak)
-        cached_payload = cache.get_json(cache_key)
+        cached_payload = await asyncio.to_thread(cache.get_json, cache_key)
         if cached_payload and isinstance(cached_payload, dict):
             self.ctx["knowledge_ctx"] = cached_payload.get("knowledge_ctx", "")
             self.ctx["knowledge_chunks"] = cached_payload.get("chunks", 0)
@@ -235,12 +235,22 @@ class DrillPipeline:
             return
 
         try:
-            chunks, stats = await retrieve_for_drill(
-                topic=self.topic,
-                user_id=self.user_id,
-                weak_points=all_weak,
-                fallback_query=fallback_query,
+            # Hard end-to-end budget for the whole RAG hop (retrieve + dedup +
+            # rerank). This sits on the SSE question-gen path, so cap it well
+            # below the worst-case sum of per-stage timeouts and degrade to empty
+            # context on overrun rather than making the user wait minutes.
+            chunks, stats = await asyncio.wait_for(
+                retrieve_for_drill(
+                    topic=self.topic,
+                    user_id=self.user_id,
+                    weak_points=all_weak,
+                    fallback_query=fallback_query,
+                ),
+                timeout=100.0,
             )
+        except asyncio.TimeoutError:
+            logger.warning("Phase 3 RAG exceeded 100s budget; continuing with empty context")
+            chunks, stats = [], None
         except Exception as exc:
             logger.warning("Phase 3 RAG failed (%s); falling back to empty context", exc)
             chunks, stats = [], None
@@ -254,11 +264,11 @@ class DrillPipeline:
 
         # Cache TTL 1h — long enough to span a multi-drill sitting but short
         # enough that knowledge-base edits propagate the same day.
-        cache.set_json(cache_key, {
+        await asyncio.to_thread(cache.set_json, cache_key, {
             "knowledge_ctx": knowledge_ctx,
             "chunks": len(chunks),
             "queries": stats.queries if stats else 0,
-        }, ttl=3600)
+        }, 3600)
 
     def _knowledge_cache_key(self, weak_points: list[str]) -> str:
         import hashlib

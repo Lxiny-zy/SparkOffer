@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     local_embedding_path: str = ""
     embedding_model: str = ""  # deprecated fallback for EMBEDDING_MODEL
 
+    # Reranker (Cross-Encoder re-ranking API)
+    reranker_api_base: str = ""
+    reranker_api_key: str = ""
+    reranker_api_model: str = ""
+
     # DashScope ASR (speech-to-text)
     dashscope_api_key: str = ""
     asr_model: str = "qwen3-asr-flash-filetrans"
