@@ -104,7 +104,7 @@ async def start_interview_stream(req: StartInterviewRequest, user_id: str = Depe
     if req.mode != InterviewMode.TOPIC_DRILL:
         raise HTTPException(400, "Streaming is only supported for topic_drill mode.")
 
-    topics = load_topics(user_id)
+    topics = await asyncio.to_thread(load_topics, user_id)
     if not req.topic or req.topic not in topics:
         raise HTTPException(400, f"Invalid topic. Available: {list(topics.keys())}")
 

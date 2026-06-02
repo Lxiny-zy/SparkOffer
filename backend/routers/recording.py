@@ -1,4 +1,5 @@
 """Recording transcription & analysis routes."""
+import asyncio
 import uuid
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
@@ -27,7 +28,7 @@ async def recording_transcribe(
 
     try:
         from backend.transcribe import transcribe_audio
-        text = transcribe_audio(audio_bytes, suffix=suffix)
+        text = await asyncio.to_thread(transcribe_audio, audio_bytes, suffix=suffix)
         return {"transcript": text, "segments": []}
     except Exception as e:
         raise HTTPException(500, f"Transcription failed: {e}")

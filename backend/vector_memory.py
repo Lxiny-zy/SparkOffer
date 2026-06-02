@@ -321,9 +321,7 @@ async def search_memory(
     top_k: int = 5,
 ) -> list[dict]:
     """Semantic search with time decay. Returns [{content, chunk_type, topic, score, created_at}]."""
-    conn = get_db()
-
-    # Build filter query
+    # Build filter query (pure string assembly — cheap, stays on the loop)
     where = ["user_id = ?"]
     params: list = [user_id]
     if chunk_types:
@@ -333,39 +331,45 @@ async def search_memory(
     if topic:
         where.append("topic = ?")
         params.append(topic)
-
     where_clause = " WHERE " + " AND ".join(where)
-    rows = conn.execute(
-        f"SELECT id, chunk_type, content, topic, session_id, embedding, created_at FROM memory_vectors{where_clause}",
-        params,
-    ).fetchall()
 
+    # SQLite read (up to MAX_VECTORS_PER_USER BLOB rows) is sync — run it in a
+    # worker thread so the event loop isn't blocked. get_db() returns this
+    # thread's own connection (connections are thread-local).
+    def _query_db():
+        return get_db().execute(
+            f"SELECT id, chunk_type, content, topic, session_id, embedding, created_at FROM memory_vectors{where_clause}",
+            params,
+        ).fetchall()
+
+    rows = await asyncio.to_thread(_query_db)
     if not rows:
         return []
 
     # Embed query (async with timeout)
     query_vec = await _embed(query)
 
-    # Build matrix and compute similarities
-    embeddings = np.stack([_deserialize(r["embedding"]) for r in rows])
-    similarities = _cosine_similarity(query_vec, embeddings)
+    # Deserialize + stack + cosine + time-decay + sort are all CPU-bound over up
+    # to 500 rows — keep them off the event loop too.
+    def _rank() -> list[dict]:
+        embeddings = np.stack([_deserialize(r["embedding"]) for r in rows])
+        similarities = _cosine_similarity(query_vec, embeddings)
+        results = []
+        for i, row in enumerate(rows):
+            decay = _time_decay(row["created_at"])
+            score = float(similarities[i]) * decay
+            results.append({
+                "content": row["content"],
+                "chunk_type": row["chunk_type"],
+                "topic": row["topic"],
+                "session_id": row["session_id"],
+                "score": score,
+                "created_at": row["created_at"],
+            })
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:top_k]
 
-    # Apply time decay
-    results = []
-    for i, row in enumerate(rows):
-        decay = _time_decay(row["created_at"])
-        score = float(similarities[i]) * decay
-        results.append({
-            "content": row["content"],
-            "chunk_type": row["chunk_type"],
-            "topic": row["topic"],
-            "session_id": row["session_id"],
-            "score": score,
-            "created_at": row["created_at"],
-        })
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:top_k]
+    return await asyncio.to_thread(_rank)
 
 
 async def find_similar_weak_point(

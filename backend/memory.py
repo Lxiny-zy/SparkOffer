@@ -466,14 +466,21 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str):
             })
 
 
-def _deterministic_update(profile: dict, new_weak: list, new_strong: list,
-                          topic: str | None, now: str, user_id: str):
-    """Fallback: vector cosine dedup when LLM parse fails."""
-    from backend.vector_memory import find_similar_weak_point_sync
+async def _deterministic_update(profile: dict, new_weak: list, new_strong: list,
+                                topic: str | None, now: str, user_id: str):
+    """Fallback: vector cosine dedup when LLM parse fails.
+
+    Awaits find_similar_weak_point directly in the loop. Each point previously
+    went through find_similar_weak_point_sync → _run_async which, under the async
+    llm_update_profile caller, spun up a ThreadPoolExecutor + fresh event loop per
+    point (an N+1 of event loops). New points still dedup against ones appended
+    earlier in the same batch — the comparison list is the growing profile["weak_points"].
+    """
+    from backend.vector_memory import find_similar_weak_point
 
     for wp in new_weak:
         point = wp.get("point", wp) if isinstance(wp, dict) else str(wp)
-        match_idx = find_similar_weak_point_sync(point, profile.get("weak_points", []), user_id=user_id)
+        match_idx = await find_similar_weak_point(point, profile.get("weak_points", []), user_id=user_id)
         if match_idx is not None:
             profile["weak_points"][match_idx]["times_seen"] = profile["weak_points"][match_idx].get("times_seen", 1) + 1
             profile["weak_points"][match_idx]["last_seen"] = now
@@ -672,7 +679,7 @@ async def llm_update_profile(
                 raise ValueError(f"Expected dict, got {type(ops)}")
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             logger.warning(f"Profile update LLM parse failed ({e}), falling back to deterministic")
-            _deterministic_update(profile, new_weak_points, new_strong_points, topic, now, user_id)
+            await _deterministic_update(profile, new_weak_points, new_strong_points, topic, now, user_id)
 
     # ── Snapshot current mastery for frontend comparison overlay ──
     import copy

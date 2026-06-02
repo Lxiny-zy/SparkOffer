@@ -10,7 +10,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from backend.models import ResumeInterviewState, InterviewPhase
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
-from backend.indexer import query_resume, retrieve_topic_context, load_topics
+from backend.indexer import query_resume, gather_topic_contexts, load_topics
 from backend.memory import get_profile_summary
 from backend.prompts.interviewer import RESUME_INTERVIEWER_SYSTEM
 
@@ -22,27 +22,18 @@ _KNOWLEDGE_LIMIT = 3000
 def _retrieve_all_topic_knowledge(user_id: str, query: str = "") -> str:
     """Retrieve knowledge snippets across all user topics for resume interview.
 
-    Uses per-topic timeout protection (60s each) to prevent hanging on large indexes.
+    Topics are retrieved concurrently (one shared pool) under a single overall
+    deadline — previously each topic ran in its own max_workers=1 pool, serially,
+    for up to 6×60s.
     """
-    import concurrent.futures
-
     try:
         topics = load_topics(user_id)
         if not topics:
             return ""
-        chunks = []
         q = query or "核心知识点 面试常见问题"
-        for topic_key in list(topics.keys())[:6]:
-            try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(retrieve_topic_context, topic_key, q, user_id, 2)
-                    results = future.result(timeout=60.0)
-                chunks.extend(results)
-            except concurrent.futures.TimeoutError:
-                logger.warning(f"Knowledge retrieval timed out (60s) for topic {topic_key} in resume interview")
-                continue
-            except Exception:
-                continue
+        topic_keys = list(topics.keys())[:6]
+        per_topic = gather_topic_contexts([(k, q) for k in topic_keys], user_id, top_k=2)
+        chunks = [c for topic_chunks in per_topic for c in topic_chunks]
         if not chunks:
             return ""
         return "\n\n---\n\n".join(c[:500] for c in chunks)[:_KNOWLEDGE_LIMIT]
@@ -125,6 +116,7 @@ def _make_init_interview(user_id: str):
         return {
             "messages": [response],
             "resume_context": resume_ctx,
+            "knowledge_context": knowledge_ctx,
             "phase": InterviewPhase.GREETING.value,
             "questions_asked": [],
             "phase_question_count": 0,
@@ -141,7 +133,9 @@ def _make_interviewer_ask(user_id: str):
         asked = state.get("questions_asked", [])
         asked_str = "\n".join(f"- {q}" for q in asked) if asked else "无"
 
-        knowledge_ctx = _retrieve_all_topic_knowledge(user_id)
+        # Knowledge was retrieved once at init and cached in state — the query is
+        # fixed, so re-retrieving every turn returns identical chunks.
+        knowledge_ctx = state.get("knowledge_context", "")
         system_prompt = RESUME_INTERVIEWER_SYSTEM.format(
             resume_context=state.get("resume_context", ""),
             knowledge_context=knowledge_ctx or "（暂无知识库数据）",

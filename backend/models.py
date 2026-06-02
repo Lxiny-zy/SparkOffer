@@ -31,6 +31,7 @@ class ResumeInterviewState(TypedDict, total=False):
     messages: Annotated[list, add_messages]
     phase: str           # InterviewPhase value
     resume_context: str
+    knowledge_context: str   # cached at init; reused every ask (query is fixed)
     questions_asked: list[str]
     phase_question_count: int
     is_finished: bool

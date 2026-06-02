@@ -1,4 +1,5 @@
 """JD 定向备面服务."""
+import hashlib
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -7,9 +8,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.config import settings
 from backend.graphs.topic_drill import _parse_json_response
-from backend.indexer import query_resume, retrieve_topic_context, load_topics
+from backend.indexer import query_resume, gather_topic_contexts, load_topics
 from backend.llm_provider import get_langchain_llm
 from backend.memory import get_profile_summary
+from backend.redis_cache import get_cache
 from backend.prompts.job_prep import (
     JOB_PREP_EVAL_PROMPT,
     JOB_PREP_PREVIEW_PROMPT,
@@ -19,17 +21,29 @@ from backend.prompts.job_prep import (
 logger = logging.getLogger("uvicorn")
 
 
+_JD_KNOWLEDGE_TTL = 600  # seconds; a prep flow (preview→questions→eval) is short
+
+
 def _get_knowledge_for_jd(jd_text: str, user_id: str) -> str:
     """Retrieve knowledge base context matching JD keywords.
 
-    Uses per-topic timeout protection (60s each) to prevent hanging on large indexes.
+    Cached by (user, jd) for the duration of a prep flow: the preview, question
+    and eval steps all call this with the same jd_text, so without the cache the
+    multi-topic retrieval would run 2–3× per session. On a miss the matched topics
+    are retrieved concurrently (was: serial, one max_workers=1 pool per topic).
     """
-    import concurrent.futures
-
     try:
         topics = load_topics(user_id)
         if not topics:
             return ""
+
+        cache = get_cache()
+        digest = hashlib.sha256(jd_text.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        ck = f"jdknow:{user_id}:{digest}"
+        cached = cache.get_json(ck)
+        if cached is not None:
+            return cached
+
         jd_lower = jd_text.lower()
         matched = []
         for key, info in topics.items():
@@ -38,21 +52,14 @@ def _get_knowledge_for_jd(jd_text: str, user_id: str) -> str:
                 matched.append(key)
         if not matched:
             matched = list(topics.keys())[:3]
-        chunks = []
-        for topic_key in matched[:5]:
-            try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(retrieve_topic_context, topic_key, "核心知识点 面试常见问题", user_id, 2)
-                    results = future.result(timeout=60.0)
-                chunks.extend(results)
-            except concurrent.futures.TimeoutError:
-                logger.warning(f"Knowledge retrieval timed out (60s) for topic {topic_key} in JD prep")
-                continue
-            except Exception:
-                continue
-        if not chunks:
-            return ""
-        return "\n\n---\n\n".join(c[:500] for c in chunks)[:3000]
+
+        per_topic = gather_topic_contexts(
+            [(k, "核心知识点 面试常见问题") for k in matched[:5]], user_id, top_k=2,
+        )
+        chunks = [c for topic_chunks in per_topic for c in topic_chunks]
+        result = "\n\n---\n\n".join(c[:500] for c in chunks)[:3000] if chunks else ""
+        cache.set_json(ck, result, _JD_KNOWLEDGE_TTL)
+        return result
     except Exception as e:
         logger.warning("Knowledge retrieval for JD prep failed: %s", e)
         return ""

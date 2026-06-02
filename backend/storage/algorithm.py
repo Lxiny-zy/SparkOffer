@@ -49,6 +49,12 @@ def list_algorithm_cards(*, user_id: str, difficulty: str = None,
     if search:
         where.append("(title LIKE ? OR problem_text LIKE ?)")
         params.extend([f"%{search}%", f"%{search}%"])
+    if tag:
+        # tags is a JSON array — membership test in SQL via json_each so the tag
+        # filter, LIMIT/OFFSET pagination and total agree. (Was: filter in Python
+        # AFTER LIMIT/OFFSET → dropped matches on later pages, wrong total.)
+        where.append("EXISTS (SELECT 1 FROM json_each(algorithm_cards.tags) WHERE value = ?)")
+        params.append(tag)
 
     where_sql = " AND ".join(where)
 
@@ -65,12 +71,7 @@ def list_algorithm_cards(*, user_id: str, difficulty: str = None,
         params + [limit, offset],
     ).fetchall()
 
-    items = [_row_to_dict(r) for r in rows]
-    if tag:
-        items = [it for it in items if tag in it["tags"]]
-        total = len(items)
-
-    return {"items": items, "total": total}
+    return {"items": [_row_to_dict(r) for r in rows], "total": total}
 
 
 def get_algorithm_card(card_id: str, *, user_id: str) -> dict | None:

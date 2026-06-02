@@ -22,6 +22,7 @@ export default function Graph() {
   const [graphData, setGraphData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [hoveredNode, setHoveredNode] = useState<any>(null);
+  const hoveredNodeRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<any>(null);
   const [dimensions, setDimensions] = useState<{ width: number; height: number }>({ width: 800, height: 500 });
@@ -56,13 +57,18 @@ export default function Graph() {
     }
   };
 
+  // Read hover from a ref so this callback stays referentially stable (deps []).
+  // A [hoveredNode] dep rebuilt it on every hover, changing the nodeCanvasObject
+  // prop and forcing ForceGraph2D to re-process the whole graph. handleNodeHover
+  // calls fgRef.refresh() to repaint the highlight without a prop change.
   const paintNode = useCallback((node: any, ctx: CanvasRenderingContext2D) => {
+    const isHovered = hoveredNodeRef.current === node;
     const r = 5 + (node.difficulty || 3) * 1.2;
     const color = scoreToColor(node.score);
     const isLight = !document.documentElement.classList.contains("dark");
     const textColor = isLight ? "#18181B" : "#FAFAF9";
 
-    if (hoveredNode === node) {
+    if (isHovered) {
       ctx.shadowColor = color;
       ctx.shadowBlur = 16;
     }
@@ -73,20 +79,26 @@ export default function Graph() {
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    if (hoveredNode === node) {
+    if (isHovered) {
       ctx.strokeStyle = textColor;
       ctx.lineWidth = 1.5;
       ctx.stroke();
     }
 
     const label = node.focus_area || node.question.slice(0, 20);
-    ctx.font = `${hoveredNode === node ? 12 : 10}px DM Sans, sans-serif`;
+    ctx.font = `${isHovered ? 12 : 10}px DM Sans, sans-serif`;
     ctx.textAlign = "center";
     ctx.fillStyle = textColor;
-    ctx.globalAlpha = hoveredNode === node ? 1 : 0.7;
+    ctx.globalAlpha = isHovered ? 1 : 0.7;
     ctx.fillText(label, node.x, node.y - r - 5);
     ctx.globalAlpha = 1;
-  }, [hoveredNode]);
+  }, []);
+
+  const handleNodeHover = useCallback((node: any) => {
+    hoveredNodeRef.current = node;
+    setHoveredNode(node);          // drives the tooltip overlay
+    fgRef.current?.refresh?.();    // repaint canvas highlight without a prop change
+  }, []);
 
   const paintLink = useCallback((link: any, ctx: CanvasRenderingContext2D) => {
     const alpha = Math.max(0.08, (link.similarity - SIMILARITY_THRESHOLD) * 3);
@@ -176,7 +188,7 @@ export default function Graph() {
                 ctx.fill();
               }}
               linkCanvasObject={paintLink}
-              onNodeHover={setHoveredNode}
+              onNodeHover={handleNodeHover}
               cooldownTicks={80}
               d3AlphaDecay={0.03}
               d3VelocityDecay={0.3}

@@ -40,6 +40,13 @@ def list_favorites(*, user_id: str, topic: str = None, tag: str = None,
     if topic:
         where.append("topic = ?")
         params.append(topic)
+    if tag:
+        # tags is a JSON array — test membership in SQL via json_each so the tag
+        # filter, LIMIT/OFFSET pagination and total all agree. (Was: filter in
+        # Python AFTER LIMIT/OFFSET, which dropped matches on later pages and
+        # reported the per-page count as the grand total.)
+        where.append("EXISTS (SELECT 1 FROM json_each(favorites.tags) WHERE value = ?)")
+        params.append(tag)
 
     where_sql = " AND ".join(where)
 
@@ -54,13 +61,7 @@ def list_favorites(*, user_id: str, topic: str = None, tag: str = None,
         params + [limit, offset],
     ).fetchall()
 
-    items = [_row_to_dict(r) for r in rows]
-    # Filter by tag in Python (JSON array field)
-    if tag:
-        items = [it for it in items if tag in it["tags"]]
-        total = len(items)
-
-    return {"items": items, "total": total}
+    return {"items": [_row_to_dict(r) for r in rows], "total": total}
 
 
 def update_favorite(fav_id: str, *, user_id: str, tags: list = None, note: str = None) -> bool:

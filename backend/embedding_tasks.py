@@ -163,6 +163,9 @@ class EmbeddingTaskQueue:
         self._max_workers = max_workers
         self._max_queue_size = max_queue_size
         self._workers: list[asyncio.Task] = []
+        # Detached background tasks (delayed retries + auto-start). Tracked so
+        # they aren't GC'd mid-flight and can be cancelled on stop().
+        self._bg_tasks: set[asyncio.Task] = set()
         self._started = False
         self._stats = {"completed": 0, "failed": 0, "retried": 0, "dropped": 0}
         # task_id -> TaskStatus. Bounded retention via _gc_statuses().
@@ -187,6 +190,9 @@ class EmbeddingTaskQueue:
         for w in self._workers:
             w.cancel()
         self._workers.clear()
+        for t in list(self._bg_tasks):
+            t.cancel()
+        self._bg_tasks.clear()
 
     def submit(
         self,
@@ -207,8 +213,9 @@ class EmbeddingTaskQueue:
         get_status() / list_statuses() so UI can poll progress.
         """
         if not self._started:
-            # Auto-start in background
-            asyncio.ensure_future(self._auto_start_and_submit(
+            # Auto-start in background, then submit. Best-effort: the real
+            # enqueue happens inside _auto_start_and_submit once the loop is up.
+            self._track(self._auto_start_and_submit(
                 task_id, func, args, kwargs, priority, max_retries,
                 user_id, topic, label, file_count,
             ))
@@ -255,6 +262,51 @@ class EmbeddingTaskQueue:
             **kwargs,
         )
 
+    def _track(self, coro) -> asyncio.Task:
+        """Run a detached coroutine, keeping a reference so it isn't GC'd mid-flight
+        and surfacing any exception in the logs."""
+        t = asyncio.create_task(coro)
+        self._bg_tasks.add(t)
+        t.add_done_callback(self._on_bg_done)
+        return t
+
+    def _on_bg_done(self, t: asyncio.Task):
+        self._bg_tasks.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc is not None:
+                logger.error(f"Embedding queue background task errored: {exc}")
+
+    def _spawn_retry(self, task: EmbeddingTask, delay: float):
+        """Reserve the dedup id and schedule a delayed re-enqueue off the worker."""
+        self._pending_ids.add(task.task_id)
+        self._track(self._schedule_retry(task, delay))
+
+    async def _schedule_retry(self, task: EmbeddingTask, delay: float):
+        """Re-enqueue `task` after `delay`s WITHOUT occupying a worker.
+
+        The worker returns as soon as it spawns this, so the backoff sleep no
+        longer pins it (which previously starved every other queued task during
+        a retry). Uses put_nowait: a full queue drops the retry instead of
+        deadlocking — a blocking put run inside a worker can wedge all workers
+        once the queue fills and every worker is awaiting put."""
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            self._pending_ids.discard(task.task_id)
+            raise
+        if not self._started:
+            self._pending_ids.discard(task.task_id)
+            return
+        try:
+            self._queue.put_nowait(task)
+        except asyncio.QueueFull:
+            self._pending_ids.discard(task.task_id)
+            self._stats["dropped"] += 1
+            logger.warning(f"Embedding task queue full, dropping retry: {task.task_id}")
+            self._update_status(task.task_id, state="failed",
+                                finished_at=time.time(), error="队列已满，重试已丢弃")
+
     async def _worker(self, name: str):
         """Worker loop: pull tasks and execute with retry."""
         while self._started:
@@ -289,19 +341,23 @@ class EmbeddingTaskQueue:
         cb = get_circuit_breaker()
 
         if not cb.can_execute():
-            # Circuit is open — schedule retry after recovery timeout
-            backoff = cb.recovery_timeout + 5.0
-            logger.info(
-                f"Circuit breaker OPEN, deferring task {task.task_id} for {backoff:.0f}s"
-            )
-            await asyncio.sleep(backoff)
+            # Circuit is open — re-enqueue after the recovery timeout WITHOUT
+            # sleeping here (that would pin this worker for ~recovery_timeout,
+            # starving the rest of the queue). _spawn_retry defers the put.
             if task.retry_count < task.max_retries:
                 task.retry_count += 1
-                self._pending_ids.add(task.task_id)
-                await self._queue.put(task)
+                backoff = cb.recovery_timeout + 5.0
+                logger.info(
+                    f"Circuit breaker OPEN, deferring task {task.task_id} for {backoff:.0f}s"
+                )
+                self._update_status(task.task_id, state="pending",
+                                    message=f"嵌入服务暂不可用，{backoff:.0f}s 后重试")
+                self._spawn_retry(task, backoff)
             else:
                 self._stats["failed"] += 1
                 logger.warning(f"Task {task.task_id} exhausted retries (circuit open)")
+                self._update_status(task.task_id, state="failed",
+                                    finished_at=time.time(), error="嵌入服务持续不可用")
             return
 
         try:
@@ -328,16 +384,13 @@ class EmbeddingTaskQueue:
                     f"Embedding task {task.task_id} failed (attempt {task.retry_count}/{task.max_retries}), "
                     f"retrying in {backoff}s: {e}"
                 )
+                # Defer the re-enqueue to a detached task so the backoff doesn't
+                # occupy this worker, and use put_nowait (never a blocking put).
                 self._update_status(
-                    task.task_id, retry_count=task.retry_count,
+                    task.task_id, retry_count=task.retry_count, state="pending",
                     message=f"失败重试 {task.retry_count}/{task.max_retries}，{backoff}s 后重试",
                 )
-                await asyncio.sleep(backoff)
-                self._pending_ids.add(task.task_id)
-                # Reset state back to pending for next attempt
-                self._update_status(task.task_id, state="pending",
-                                    message="重试等待中")
-                await self._queue.put(task)
+                self._spawn_retry(task, backoff)
             else:
                 self._stats["failed"] += 1
                 logger.error(

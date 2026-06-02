@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+import weakref
 from pathlib import Path
 
 from llama_index.core import (
@@ -27,8 +28,10 @@ _INDEX_CACHE_MAX_SIZE = 50
 
 _index_cache: dict[tuple[str, str], tuple[float, "VectorStoreIndex"]] = {}  # key -> (expire_time, index)
 
-# Background rebuild lock — prevent concurrent rebuilds for the same (user, topic)
-_rebuild_locks: dict[tuple[str, str], asyncio.Lock] = {}
+# Background rebuild lock — prevent concurrent rebuilds for the same (user, topic).
+# WeakValueDictionary so idle locks (no in-flight rebuild holding a reference) are
+# GC'd instead of accumulating one entry per (user, topic) forever.
+_rebuild_locks: "weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock]" = weakref.WeakValueDictionary()
 
 
 def _cache_get(key: tuple[str, str]) -> "VectorStoreIndex | None":
@@ -40,6 +43,11 @@ def _cache_get(key: tuple[str, str]) -> "VectorStoreIndex | None":
     if time.time() > expire_time:
         _index_cache.pop(key, None)
         return None
+    # Refresh TTL on access so a frequently-used index isn't evicted as the
+    # "oldest" entry by _cache_set — makes TTL time-since-last-use (true LRU).
+    # Reassigning an existing key doesn't change dict size, so this stays safe
+    # against the unlocked eviction scan in _cache_set.
+    _index_cache[key] = (time.time() + _INDEX_CACHE_TTL, index)
     return index
 
 
@@ -248,10 +256,13 @@ async def async_rebuild_topic_index(topic: str, user_id: str):
         so the rebuild finishes quickly (with degraded quality, but no deadlock)
     """
     cache_key = (user_id, topic)
-    if cache_key not in _rebuild_locks:
-        _rebuild_locks[cache_key] = asyncio.Lock()
-
-    lock = _rebuild_locks[cache_key]
+    # get-or-create with a local strong ref taken before/at the dict insert, so the
+    # WeakValueDictionary entry can't be GC'd out from under us. No await in this
+    # block → atomic under the single-threaded event loop.
+    lock = _rebuild_locks.get(cache_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _rebuild_locks[cache_key] = lock
     if lock.locked():
         logger.info(f"Index rebuild already in progress for {topic}/{user_id}, skipping.")
         return
@@ -309,6 +320,55 @@ async def safe_retrieve_topic_context(
     except Exception as e:
         logger.warning(f"Knowledge retrieval failed for topic={topic}: {e}")
         return []
+
+
+def gather_topic_contexts(
+    requests: list[tuple[str, str]],
+    user_id: str,
+    top_k: int = 2,
+    timeout: float = _RETRIEVAL_TIMEOUT,
+    max_workers: int = 4,
+) -> list[list[str]]:
+    """Run several retrieve_topic_context calls concurrently under one overall
+    deadline. Returns results aligned to ``requests`` order (each item is a
+    (topic_key, question) pair); slots that error or are still running when
+    ``timeout`` elapses come back as [].
+
+    Replaces the old "fresh ThreadPoolExecutor(max_workers=1) per topic" pattern,
+    which ran retrievals serially (worst case len(requests)×timeout). Never blocks
+    on stragglers — shutdown(wait=False) lets a hung sync retrieval finish in the
+    background while the caller proceeds with whatever completed in time.
+    """
+    import concurrent.futures
+
+    if not requests:
+        return []
+
+    results: list[list[str]] = [[] for _ in requests]
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, min(len(requests), max_workers))
+    )
+    try:
+        future_to_idx = {
+            executor.submit(retrieve_topic_context, topic, question, user_id, top_k): i
+            for i, (topic, question) in enumerate(requests)
+        }
+        done, _ = concurrent.futures.wait(future_to_idx, timeout=timeout)
+        for future in done:
+            i = future_to_idx[future]
+            try:
+                results[i] = future.result()
+            except Exception as e:
+                logger.warning(f"Knowledge retrieval failed for topic={requests[i][0]}: {e}")
+        not_done = len(requests) - len(done)
+        if not_done:
+            logger.warning(
+                f"Knowledge retrieval: {not_done}/{len(requests)} topic queries "
+                f"exceeded {timeout}s; proceeding with partial results"
+            )
+    finally:
+        executor.shutdown(wait=False)
+    return results
 
 
 # ── Startup warmup ────────────────────────────────────────────────────────────

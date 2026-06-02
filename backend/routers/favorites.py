@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api")
 
 
 @router.post("/favorites")
-async def create_favorite(body: dict, user_id: str = Depends(get_current_user)):
+def create_favorite(body: dict, user_id: str = Depends(get_current_user)):
     return _add_fav(
         user_id=user_id,
         session_id=body.get("session_id"),
@@ -29,7 +29,7 @@ async def create_favorite(body: dict, user_id: str = Depends(get_current_user)):
 
 
 @router.get("/favorites")
-async def list_favorites_endpoint(
+def list_favorites_endpoint(
     topic: str = None, tag: str = None,
     sort_by: str = "created_at", sort_order: str = "desc",
     limit: int = 50, offset: int = 0,
@@ -43,7 +43,7 @@ async def list_favorites_endpoint(
 
 
 @router.put("/favorites/{fav_id}")
-async def update_favorite_endpoint(fav_id: str, body: dict, user_id: str = Depends(get_current_user)):
+def update_favorite_endpoint(fav_id: str, body: dict, user_id: str = Depends(get_current_user)):
     ok = _update_fav(fav_id, user_id=user_id, tags=body.get("tags"), note=body.get("note"))
     if not ok:
         raise HTTPException(404, "Favorite not found.")
@@ -51,7 +51,7 @@ async def update_favorite_endpoint(fav_id: str, body: dict, user_id: str = Depen
 
 
 @router.delete("/favorites/{fav_id}")
-async def delete_favorite_endpoint(fav_id: str, user_id: str = Depends(get_current_user)):
+def delete_favorite_endpoint(fav_id: str, user_id: str = Depends(get_current_user)):
     ok = _del_fav(fav_id, user_id=user_id)
     if not ok:
         raise HTTPException(404, "Favorite not found.")
@@ -59,12 +59,12 @@ async def delete_favorite_endpoint(fav_id: str, user_id: str = Depends(get_curre
 
 
 @router.get("/favorites/tags")
-async def list_favorite_tags(user_id: str = Depends(get_current_user)):
+def list_favorite_tags(user_id: str = Depends(get_current_user)):
     return _get_fav_tags(user_id=user_id)
 
 
 @router.post("/favorites/export")
-async def export_favorites_endpoint(body: dict, user_id: str = Depends(get_current_user)):
+def export_favorites_endpoint(body: dict, user_id: str = Depends(get_current_user)):
     fmt = body.get("format", "json")
     content = _export_favs(
         user_id=user_id, ids=body.get("ids"),

@@ -1,4 +1,6 @@
 """Resume upload & speech-to-text routes."""
+import asyncio
+
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 
 from backend.config import settings
@@ -53,7 +55,7 @@ async def transcribe(file: UploadFile = File(...), user_id: str = Depends(get_cu
     try:
         from backend.transcribe import transcribe_audio
         suffix = "." + (file.filename or "audio.webm").rsplit(".", 1)[-1]
-        text = transcribe_audio(audio_bytes, suffix=suffix)
+        text = await asyncio.to_thread(transcribe_audio, audio_bytes, suffix=suffix)
         return {"text": text}
     except Exception as e:
         raise HTTPException(500, f"Transcription failed: {e}")

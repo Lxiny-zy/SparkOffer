@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api")
 
 
 @router.post("/algorithm/solve")
-async def algorithm_solve(req: AlgorithmSolveRequest, user_id: str = Depends(get_current_user)):
+def algorithm_solve(req: AlgorithmSolveRequest, user_id: str = Depends(get_current_user)):
     prompt = ALGORITHM_SOLVE_PROMPT.format(
         problem_text=req.problem_text, language=req.language,
     )
@@ -54,7 +54,7 @@ async def algorithm_solve(req: AlgorithmSolveRequest, user_id: str = Depends(get
 
 
 @router.post("/algorithm/chat")
-async def algorithm_chat(req: AlgorithmChatRequest, user_id: str = Depends(get_current_user)):
+def algorithm_chat(req: AlgorithmChatRequest, user_id: str = Depends(get_current_user)):
     session = get_live(algorithm_sessions, req.session_id, "algorithm")
     if not session or session["user_id"] != user_id:
         raise HTTPException(404, "Algorithm session not found.")
@@ -81,7 +81,7 @@ async def algorithm_chat(req: AlgorithmChatRequest, user_id: str = Depends(get_c
 
 
 @router.post("/algorithm/save")
-async def algorithm_save(req: AlgorithmSaveRequest, user_id: str = Depends(get_current_user)):
+def algorithm_save(req: AlgorithmSaveRequest, user_id: str = Depends(get_current_user)):
     session = get_live(algorithm_sessions, req.session_id, "algorithm")
     if not session or session["user_id"] != user_id:
         raise HTTPException(404, "Algorithm session not found.")
@@ -104,7 +104,7 @@ async def algorithm_save(req: AlgorithmSaveRequest, user_id: str = Depends(get_c
 
 
 @router.get("/algorithm/cards")
-async def list_algorithm_cards_endpoint(
+def list_algorithm_cards_endpoint(
     difficulty: str = None, tag: str = None, search: str = None,
     sort_by: str = "created_at", sort_order: str = "desc",
     limit: int = 50, offset: int = 0,
@@ -117,7 +117,7 @@ async def list_algorithm_cards_endpoint(
 
 
 @router.get("/algorithm/cards/{card_id}")
-async def get_algorithm_card_endpoint(card_id: str, user_id: str = Depends(get_current_user)):
+def get_algorithm_card_endpoint(card_id: str, user_id: str = Depends(get_current_user)):
     card = _get_algo(card_id, user_id=user_id)
     if not card:
         raise HTTPException(404, "Algorithm card not found.")
@@ -125,7 +125,7 @@ async def get_algorithm_card_endpoint(card_id: str, user_id: str = Depends(get_c
 
 
 @router.put("/algorithm/cards/{card_id}")
-async def update_algorithm_card_endpoint(card_id: str, body: dict, user_id: str = Depends(get_current_user)):
+def update_algorithm_card_endpoint(card_id: str, body: dict, user_id: str = Depends(get_current_user)):
     ok = _update_algo(
         card_id, user_id=user_id,
         title=body.get("title"), difficulty=body.get("difficulty"),
@@ -138,7 +138,7 @@ async def update_algorithm_card_endpoint(card_id: str, body: dict, user_id: str 
 
 
 @router.delete("/algorithm/cards/{card_id}")
-async def delete_algorithm_card_endpoint(card_id: str, user_id: str = Depends(get_current_user)):
+def delete_algorithm_card_endpoint(card_id: str, user_id: str = Depends(get_current_user)):
     ok = _del_algo(card_id, user_id=user_id)
     if not ok:
         raise HTTPException(404, "Algorithm card not found.")
@@ -146,12 +146,12 @@ async def delete_algorithm_card_endpoint(card_id: str, user_id: str = Depends(ge
 
 
 @router.get("/algorithm/tags")
-async def list_algorithm_tags(user_id: str = Depends(get_current_user)):
+def list_algorithm_tags(user_id: str = Depends(get_current_user)):
     return _get_algo_tags(user_id=user_id)
 
 
 @router.post("/algorithm/export")
-async def export_algorithm_cards_endpoint(body: dict, user_id: str = Depends(get_current_user)):
+def export_algorithm_cards_endpoint(body: dict, user_id: str = Depends(get_current_user)):
     fmt = body.get("format", "json")
     content = _export_algo(
         user_id=user_id, ids=body.get("ids"),
