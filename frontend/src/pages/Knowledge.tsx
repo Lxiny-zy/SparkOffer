@@ -150,7 +150,9 @@ export default function Knowledge() {
   const handleCreateFile = async () => {
     const name = newFileName.trim();
     if (!name) return;
-    const fname = name.endsWith(".md") ? name : name + ".md";
+    const ALLOWED_EXTS = [".md", ".txt", ".py"];
+    const hasValidExt = ALLOWED_EXTS.some((ext) => name.endsWith(ext));
+    const fname = hasValidExt ? name : name + ".md";
     try {
       await createCoreKnowledge(selected!, fname, "");
       setNewFileName("");
@@ -621,12 +623,12 @@ export default function Knowledge() {
               {tab === "core" ? (
                 <div>
               <div className="text-[13px] text-dim mb-3">
-                AI 出题和评分的参考依据，编辑后影响该领域的题目质量。支持 Markdown 格式。
+                AI 出题和评分的参考依据，编辑后影响该领域的题目质量。支持 .md / .txt / .py 格式。
               </div>
               <div className="flex gap-2 mb-4">
                 {showNewFile ? (
                   <div className="flex gap-2 flex-1">
-                    <Input className="flex-1" placeholder="文件名 (例: 装饰器.md)" value={newFileName} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewFileName(e.target.value)} onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === "Enter" && handleCreateFile()} />
+                    <Input className="flex-1" placeholder="文件名 (例: 装饰器.md, notes.txt)" value={newFileName} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewFileName(e.target.value)} onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === "Enter" && handleCreateFile()} />
                     <Button variant="default" size="sm" onClick={handleCreateFile}>创建</Button>
                     <Button variant="outline" size="sm" onClick={() => { setShowNewFile(false); setNewFileName(""); }}>取消</Button>
                   </div>
