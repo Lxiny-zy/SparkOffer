@@ -50,7 +50,7 @@ class RetrievalStats:
     final_chunks: int
     embed_cache_hits: int
     embed_cache_misses: int
-    reranker_applied: bool = False
+    reranker_status: str = "off"   # "applied" | "degraded" | "off"
 
 
 async def retrieve_for_drill(
@@ -124,7 +124,7 @@ async def retrieve_for_drill(
     # weak-point-precise chunks RRF surfaced. Fall back to the generic query only
     # when no weak_points were logged.
     rerank_query = " ".join(weak_points[:5]).strip() or fallback_query
-    reranked, reranker_applied = await _rerank_if_available(rerank_query, deduped)
+    reranked, reranker_status = await _rerank_if_available(rerank_query, deduped)
 
     final = reranked[:final_top_n]
     stats = RetrievalStats(
@@ -134,7 +134,7 @@ async def retrieve_for_drill(
         final_chunks=len(final),
         embed_cache_hits=hits,
         embed_cache_misses=misses,
-        reranker_applied=reranker_applied,
+        reranker_status=reranker_status,
     )
     return final, stats
 
@@ -255,18 +255,21 @@ async def _embed_many(texts: list[str]) -> tuple[list[np.ndarray | None], int, i
 
 # ── Reranker ──
 
-async def _rerank_if_available(query: str, chunks: list[str]) -> tuple[list[str], bool]:
+async def _rerank_if_available(query: str, chunks: list[str]) -> tuple[list[str], str]:
     """Apply Cross-Encoder reranking if configured, otherwise pass through.
 
-    rerank() already returns (chunks, False) when no reranker is configured, so
+    Returns (chunks, status): "applied" | "degraded" | "off" — surfaced in the
+    pipeline timeline so the user can see whether reranking actually ran.
+
+    rerank() already returns (chunks, "off") when no reranker is configured, so
     we don't pre-check the config here — doing so would call get_channel() twice
     and rotate the channel's key index an extra time on every drill.
     """
     if len(chunks) <= 1:
-        return chunks, False
+        return chunks, "off"
     try:
         from backend.reranker import rerank
         return await rerank(query, chunks, top_n=len(chunks))
     except Exception as e:
         logger.warning("Reranker unavailable, skipping: %s", e)
-        return chunks, False
+        return chunks, "degraded"

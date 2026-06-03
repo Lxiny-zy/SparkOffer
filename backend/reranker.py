@@ -83,17 +83,20 @@ def _cache_key(query: str, chunks: list[str], top_n: int) -> str:
     return f"rerank:{h.hexdigest()[:24]}"
 
 
-async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[str], bool]:
+async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[str], str]:
     """Re-rank chunks by relevance to query via Cross-Encoder API.
 
-    Returns (reranked_chunks, success). On failure returns (original_chunks, False).
+    Returns (chunks, status) where status is one of:
+      "applied"  — reranked successfully (order may have changed)
+      "degraded" — a reranker is configured but the call failed → original order
+      "off"      — no reranker configured (or nothing to rerank) → original order
     """
     if not chunks or len(chunks) <= 1:
-        return chunks, False
+        return chunks, "off"
 
     config = _get_reranker_config()
     if not config:
-        return chunks, False
+        return chunks, "off"
 
     effective_top_n = min(top_n, len(chunks))
     cache = get_cache()
@@ -104,7 +107,7 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
             reordered = [chunks[i] for i in cached if i < len(chunks)]
             if reordered:
                 logger.debug("Reranker cache hit: %s", ck)
-                return reordered, True
+                return reordered, "applied"
         except (TypeError, IndexError):
             pass
 
@@ -141,7 +144,7 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
         results = data.get("results", [])
         if not results:
             logger.warning("Reranker returned empty results")
-            return chunks, False
+            return chunks, "degraded"
 
         indices = [r["index"] for r in sorted(results, key=lambda r: r.get("relevance_score", 0), reverse=True)]
         reordered = [chunks[i] for i in indices if i < len(chunks)]
@@ -151,7 +154,7 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
             "Reranker applied: query=%r, %d chunks → top %d, model=%s",
             query[:50], len(chunks), len(reordered), config["api_model"],
         )
-        return reordered, True
+        return reordered, "applied"
 
     except httpx.TimeoutException:
         logger.warning("Reranker timeout (90s): query=%r, %d chunks", query[:50], len(chunks))
@@ -163,4 +166,4 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
         logger.warning("Reranker failed: %s", e)
         _report(channel_id, False)
 
-    return chunks, False
+    return chunks, "degraded"

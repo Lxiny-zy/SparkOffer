@@ -136,9 +136,15 @@ class DrillPipeline:
                 return f"缓存命中 · {n} 个片段 (跳过 RAG)"
             stats = self.ctx.get("retrieval_stats")
             if stats is not None:
+                rerank_seg = {
+                    "applied": " · 重排 ✓ 生效",
+                    "degraded": " · 重排 ⚠ 降级",
+                    "off": " · 重排 未启用",
+                }.get(stats.reranker_status, "")
                 return (
                     f"{queries} 路检索 · {stats.raw_chunks}→{stats.fused_chunks}→{n} 片段 · "
                     f"缓存 {stats.embed_cache_hits}/{stats.embed_cache_hits + stats.embed_cache_misses}"
+                    f"{rerank_seg}"
                 )
             return f"{queries} 次检索 · {n} 个去重后片段"
         if stage == "generate":
