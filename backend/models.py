@@ -222,10 +222,21 @@ class ASRChannelConfig(BaseModel):
     enabled: bool = True
     proxy: str = ""
 
+class RerankerChannelConfig(BaseModel):
+    id: str = ""
+    name: str = "Default"
+    api_base: str = ""
+    keys: list[str] = Field(default_factory=list)
+    api_model: str = ""
+    priority: int = 1
+    enabled: bool = True
+    proxy: str = ""
+
 class ChannelsConfig(BaseModel):
     llm: list[LLMChannelConfig] = Field(default_factory=list)
     embedding: list[EmbeddingChannelConfig] = Field(default_factory=list)
     asr: list[ASRChannelConfig] = Field(default_factory=list)
+    reranker: list[RerankerChannelConfig] = Field(default_factory=list)
 
 class TestChannelRequest(BaseModel):
     section: str

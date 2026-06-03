@@ -39,6 +39,17 @@ export interface ASRChannel {
   proxy?: string;
 }
 
+export interface RerankerChannel {
+  id: string;
+  name: string;
+  api_base: string;
+  keys: string[];
+  api_model: string;
+  priority: number;
+  enabled: boolean;
+  proxy?: string;
+}
+
 export interface ChannelHealth {
   id: string;
   name: string;
@@ -57,4 +68,5 @@ export interface AllChannelsResponse {
   llm: SectionChannels<LLMChannel>;
   embedding: SectionChannels<EmbeddingChannel>;
   asr: SectionChannels<ASRChannel>;
+  reranker: SectionChannels<RerankerChannel>;
 }

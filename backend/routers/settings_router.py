@@ -118,6 +118,7 @@ def get_channels_config(user_id: str = Depends(get_current_user)):
         "llm": {"channels": get_channels("llm"), "health": get_health("llm")},
         "embedding": {"channels": get_channels("embedding"), "health": get_health("embedding")},
         "asr": {"channels": get_channels("asr"), "health": get_health("asr")},
+        "reranker": {"channels": get_channels("reranker"), "health": get_health("reranker")},
     }
 
 
@@ -137,6 +138,7 @@ def update_channels_config(req: ChannelsConfig, user_id: str = Depends(get_curre
         "llm": [ch.model_dump() for ch in req.llm],
         "embedding": [ch.model_dump() for ch in req.embedding],
         "asr": [ch.model_dump() for ch in req.asr],
+        "reranker": [ch.model_dump() for ch in req.reranker],
     }
     save_channels(config)
     invalidate_singletons()
@@ -208,6 +210,40 @@ async def test_channel(req: TestChannelRequest, user_id: str = Depends(get_curre
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    elif section == "reranker":
+        try:
+            from backend.llm_provider import _normalize_proxy_url
+            api_base = (ch.get("api_base", "") or "").rstrip("/")
+            if not api_base:
+                return {"ok": False, "error": "API Base URL 不能为空"}
+            url = api_base if api_base.endswith("/rerank") else f"{api_base}/rerank"
+            client_kw: dict = {"headers": {"User-Agent": "curl/7.88.1"}, "follow_redirects": True}
+            if proxy:
+                client_kw["proxy"] = _normalize_proxy_url(proxy)
+            async with _httpx.AsyncClient(timeout=20.0, **client_kw) as client:
+                resp = await client.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {ch.get('api_key', '')}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": ch.get("api_model", ""),
+                        "query": "什么是向量检索",
+                        "documents": ["向量检索通过语义相似度匹配文档", "今天天气晴朗适合出门"],
+                        "top_n": 2,
+                        "return_documents": False,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            n = len(data.get("results", []))
+            return {"ok": True, "message": f"Rerank OK — {n} 条结果"}
+        except _httpx.HTTPStatusError as e:
+            return {"ok": False, "error": f"HTTP {e.response.status_code}: {e.response.text[:200]}"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     return {"ok": False, "error": f"Unknown section: {section}"}
 
 
@@ -218,6 +254,7 @@ def get_channels_health(user_id: str = Depends(get_current_user)):
         "llm": get_health("llm"),
         "embedding": get_health("embedding"),
         "asr": get_health("asr"),
+        "reranker": get_health("reranker"),
     }
 
 

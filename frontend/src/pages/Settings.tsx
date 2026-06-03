@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   Bot, Database, Mic, Cloud, Eye, EyeOff, Loader2,
-  CheckCircle2, XCircle, Save, RotateCcw, User, Lock, Activity,
+  CheckCircle2, XCircle, Save, RotateCcw, User, Lock, Activity, ListOrdered,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -21,7 +21,7 @@ import ChannelManager from "@/components/ChannelManager";
 // 网关健康仪表盘 ── L1 hero
 // ─────────────────────────────────────────────────────────────
 interface SectionHealth { healthy: number; total: number; }
-interface HealthSummary { llm: SectionHealth; embedding: SectionHealth; asr: SectionHealth; }
+interface HealthSummary { llm: SectionHealth; embedding: SectionHealth; asr: SectionHealth; reranker: SectionHealth; }
 
 function HealthRing({ healthy, total, label, color, icon }: {
   healthy: number; total: number; label: string; color: string; icon: React.ReactNode;
@@ -68,9 +68,9 @@ function HealthRing({ healthy, total, label, color, icon }: {
 }
 
 function HealthDashboard({ summary }: { summary: HealthSummary | null }) {
-  const s = summary || { llm: {healthy:0,total:0}, embedding: {healthy:0,total:0}, asr: {healthy:0,total:0} };
-  const allHealthy = s.llm.healthy === s.llm.total && s.embedding.healthy === s.embedding.total && s.asr.healthy === s.asr.total;
-  const anyConfigured = s.llm.total + s.embedding.total + s.asr.total > 0;
+  const s = summary || { llm: {healthy:0,total:0}, embedding: {healthy:0,total:0}, asr: {healthy:0,total:0}, reranker: {healthy:0,total:0} };
+  const allHealthy = s.llm.healthy === s.llm.total && s.embedding.healthy === s.embedding.total && s.asr.healthy === s.asr.total && s.reranker.healthy === s.reranker.total;
+  const anyConfigured = s.llm.total + s.embedding.total + s.asr.total + s.reranker.total > 0;
   return (
     <Card className="mb-6 stat-card-gradient relative overflow-hidden card-hover-lift animate-fade-in-up">
       <div
@@ -87,10 +87,11 @@ function HealthDashboard({ summary }: { summary: HealthSummary | null }) {
             </span>
           )}
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-5 md:gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 md:gap-4">
           <HealthRing healthy={s.llm.healthy} total={s.llm.total} label="LLM"       color="var(--aurora-1)" icon={<Bot size={20} />} />
           <HealthRing healthy={s.embedding.healthy} total={s.embedding.total} label="Embedding" color="var(--tertiary)"  icon={<Database size={20} />} />
           <HealthRing healthy={s.asr.healthy} total={s.asr.total} label="ASR"       color="var(--teal)"    icon={<Mic size={20} />} />
+          <HealthRing healthy={s.reranker.healthy} total={s.reranker.total} label="Reranker" color="var(--aurora-2)" icon={<ListOrdered size={20} />} />
         </div>
       </CardContent>
     </Card>
@@ -320,6 +321,7 @@ export default function Settings() {
         llm: summarize(data.llm),
         embedding: summarize(data.embedding),
         asr: summarize(data.asr),
+        reranker: summarize(data.reranker),
       });
     } catch { /* silent */ }
   }, []);
@@ -479,6 +481,24 @@ export default function Settings() {
         </CardHeader>
         <CardContent>
           <ChannelManager section="asr" />
+        </CardContent>
+      </Card>
+
+      {/* Reranker Channels */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-secondary/10 flex items-center justify-center">
+              <ListOrdered className="w-5 h-5 text-secondary" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Reranker Channels</CardTitle>
+              <CardDescription>Cross-Encoder re-ranking — Cohere-compatible /rerank (optional)</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <ChannelManager section="reranker" />
         </CardContent>
       </Card>
 
