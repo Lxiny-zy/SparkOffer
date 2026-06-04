@@ -215,6 +215,9 @@
   html {
     font-size: var(--font-size);
     scrollbar-gutter: stable;
+    /* Firefox scrollbar — translucent brand thumb, transparent track */
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--primary) 32%, transparent) transparent;
   }
 
   body {
@@ -529,10 +532,23 @@
 .stagger-children > *:nth-child(5) { animation-delay: 0.25s; }
 .stagger-children > *:nth-child(6) { animation-delay: 0.3s; }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
+/* Floating capsule scrollbar — translucent brand tint, padding-box inset so it
+   reads as a ~6px pill with breathing room. Blends in both light/dark; replaces
+   the old opaque var(--muted-foreground) thumb that showed as a white bar on dark. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--muted-foreground); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--primary); }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--primary) 28%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 9999px;
+  transition: background 0.2s ease;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--primary) 55%, transparent);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner { background: transparent; }
 
 /* ═══════════════════════════════════════════════════════════
    Markdown 内容渲染 — 多彩配色，亮/暗双主题完整适配
@@ -1086,8 +1102,10 @@
     min-width: 44px;
   }
 
-  /* Larger scrollbar for touch */
-  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  /* Thinner scrollbar on small screens — inherits the translucent thumb, just
+     trims the inset so the slimmer thumb stays visible. */
+  ::-webkit-scrollbar { width: 7px; height: 7px; }
+  ::-webkit-scrollbar-thumb { border-width: 1.5px; }
 
   /* Prevent text selection on interactive elements */
   button, [role="button"] {
@@ -1341,3 +1359,72 @@
   animation: text-shimmer 4s ease-in-out infinite;
   opacity: 0.6;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Pointer interaction layer — cursor-following effects (设计感)
+   Driven by PointerFX.tsx (sets --cursor-x/y, --mx/my). Touch &
+   reduced-motion devices skip the JS entirely, so these stay inert.
+   ═══════════════════════════════════════════════════════════ */
+
+/* Cursor-following radial highlight inside a card. Pure pseudo-element overlay →
+   zero layout shift. Opt in via the `.spotlight` class + `data-spotlight`.
+   Uses ::after (not ::before) so it never collides with tech-border/scan-line,
+   which already own ::before. The highlight sits at z-index:-1 inside an isolated
+   stacking context, so real content (incl. absolutely-positioned decor) paints
+   above it untouched — no need to force `position: relative` on children. */
+.spotlight { position: relative; isolation: isolate; }
+.spotlight::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  z-index: -1;
+  background: radial-gradient(
+    circle 220px at var(--mx, 50%) var(--my, 50%),
+    color-mix(in srgb, var(--aurora-2) 16%, transparent),
+    transparent 60%
+  );
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  pointer-events: none;
+}
+.spotlight:hover::after { opacity: 1; }
+
+/* Ambient glow that softly trails the pointer. Intentionally faint. */
+.cursor-glow {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 340px;
+  height: 340px;
+  border-radius: 9999px;
+  pointer-events: none;
+  z-index: 40;
+  will-change: transform;
+  mix-blend-mode: screen;
+  transform: translate3d(
+    calc(var(--cursor-x, -9999px) - 170px),
+    calc(var(--cursor-y, -9999px) - 170px),
+    0
+  );
+  background: radial-gradient(circle, color-mix(in srgb, var(--aurora-2) 10%, transparent), transparent 65%);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.cursor-glow.is-active { opacity: 1; }
+
+/* Magnetic pull — JS sets the transform; this just smooths it. */
+.magnetic { transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1); will-change: transform; }
+
+/* Premium sheen sweeping across a button on hover. */
+.btn-sheen { position: relative; overflow: hidden; }
+.btn-sheen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(110deg, transparent 35%, rgba(255, 255, 255, 0.16) 50%, transparent 65%);
+  transform: translateX(-120%);
+  transition: transform 0.6s ease;
+}
+.btn-sheen:hover::after { transform: translateX(120%); }

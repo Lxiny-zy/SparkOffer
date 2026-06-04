@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Sun, Moon, ArrowRight, Brain, Target, Mic, BarChart3, Repeat, BookOpen, BriefcaseBusiness, Sparkles, Upload, MessageSquare, ChartLine, Zap, Shield, Code2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useTilt } from "@/hooks/useTilt";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import CatAvatar from "@/components/CatAvatar";
@@ -54,6 +55,7 @@ const DEMO_LINES = [
 
 export default function Landing() {
   const navigate = useNavigate();
+  const heroTilt = useTilt();
   const [theme, setTheme] = useState<string>(() => {
     if (typeof window === "undefined") return "dark";
     return localStorage.getItem("theme") || "dark";
@@ -121,7 +123,7 @@ export default function Landing() {
             </p>
 
             <div className="flex flex-col sm:flex-row items-center gap-3 justify-center lg:justify-start animate-fade-in-up [animation-delay:0.2s]">
-              <Button variant="cta" size="xl" onClick={() => navigate("/login")} className="w-full sm:w-auto">
+              <Button variant="cta" size="xl" magnetic onClick={() => navigate("/login")} className="w-full sm:w-auto">
                 立即开始训练
                 <ArrowRight size={18} />
               </Button>
@@ -142,11 +144,30 @@ export default function Landing() {
           </div>
 
           {/* Right: Showcase card */}
-          <div className="relative animate-fade-in-up [animation-delay:0.2s]">
-            {/* Glow halo behind */}
-            <div className="absolute inset-0 -z-10 blur-3xl opacity-50" style={{ background: "radial-gradient(circle at center, var(--aurora-2), transparent 70%)" }} />
+          <div
+            ref={heroTilt.ref}
+            onMouseMove={heroTilt.onMouseMove}
+            onMouseLeave={heroTilt.onMouseLeave}
+            className="relative animate-fade-in-up [animation-delay:0.2s]"
+          >
+            {/* Glow halo behind — parallaxes opposite the card */}
+            <div
+              className="absolute inset-0 -z-10 blur-3xl opacity-50 transition-transform duration-200 ease-out"
+              style={{
+                background: "radial-gradient(circle at center, var(--aurora-2), transparent 70%)",
+                transform: "translate(calc(var(--px, 0) * 34px), calc(var(--py, 0) * 34px))",
+              }}
+            />
 
-            <Card variant="glass" className="overflow-hidden scan-line">
+            <Card
+              variant="glass"
+              hoverLift={false}
+              className="overflow-hidden scan-line transition-transform duration-200 ease-out"
+              style={{
+                transform:
+                  "perspective(900px) rotateX(calc(var(--py, 0) * -5deg)) rotateY(calc(var(--px, 0) * 5deg))",
+              }}
+            >
               {/* Tab bar */}
               <div className="flex items-center gap-2 px-4 py-3 border-b border-border/30">
                 <div className="w-2.5 h-2.5 rounded-full bg-red/70" />
@@ -286,7 +307,7 @@ export default function Landing() {
             ].map((p) => {
               const I = p.icon;
               return (
-                <div key={p.text} className="flex items-center gap-2 px-4 py-2 rounded-full glass-subtle text-sm text-dim hover:text-text transition-colors duration-300">
+                <div key={p.text} className="flex items-center gap-2 px-4 py-2 rounded-full glass-subtle text-sm text-dim hover:text-text hover:-translate-y-0.5 transition-all duration-300">
                   <I size={14} style={{ color: "var(--aurora-2)" }} />
                   {p.text}
                 </div>
@@ -312,7 +333,7 @@ export default function Landing() {
                 <span className="text-text"> 了吗？</span>
               </h2>
               <p className="text-dim mb-8 max-w-md mx-auto">免费、无广告、本地优先。你的训练数据完全归你所有。</p>
-              <Button variant="cta" size="xl" onClick={() => navigate("/login")}>
+              <Button variant="cta" size="xl" magnetic onClick={() => navigate("/login")}>
                 免费开始
                 <ArrowRight size={18} />
               </Button>

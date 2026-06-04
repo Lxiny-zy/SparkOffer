@@ -23,7 +23,7 @@ const buttonVariants = cva(
         link:
           "text-primary underline-offset-4 hover:underline",
         cta:
-          "cta-gradient font-semibold tracking-wide",
+          "cta-gradient btn-sheen font-semibold tracking-wide",
       },
       size: {
         default: "h-10 px-6 py-2",
@@ -44,14 +44,17 @@ interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
+  /** Subtle magnetic pull toward the cursor on hover (driven by PointerFX). */
+  magnetic?: boolean;
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
+  ({ className, variant, size, asChild = false, magnetic = false, ...props }, ref) => {
     const Comp = asChild ? Slot : "button";
     return (
       <Comp
-        className={cn(buttonVariants({ variant, size, className }))}
+        className={cn(buttonVariants({ variant, size, className }), magnetic && "magnetic")}
+        data-magnetic={magnetic ? "" : undefined}
         ref={ref}
         {...props}
       />

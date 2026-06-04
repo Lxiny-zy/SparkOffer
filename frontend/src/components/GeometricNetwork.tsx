@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { pointer } from "@/lib/pointer";
 
 interface Node {
   x: number;
@@ -12,6 +13,7 @@ const LINK_DIST = 160;
 const NODE_RADIUS = 1.8;
 const SPEED = 0.22;
 const DENSITY = 38000; // px² per node
+const CURSOR_DIST = 200; // nodes within this of the cursor link up to it
 
 export default function GeometricNetwork() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -26,6 +28,9 @@ export default function GeometricNetwork() {
     let nodes: Node[] = [];
     let raf = 0;
     let colors = readColors();
+    // Cached canvas viewport rect — maps the shared pointer (clientX/Y) into
+    // canvas-local space. Refreshed on resize + ResizeObserver (sidebar collapse).
+    let rect = canvas.getBoundingClientRect();
 
     function readColors() {
       const root = getComputedStyle(document.documentElement);
@@ -68,6 +73,7 @@ export default function GeometricNetwork() {
       } else if (nodes.length > target) {
         nodes.length = target;
       }
+      rect = canvas!.getBoundingClientRect();
     }
 
     function draw() {
@@ -106,6 +112,30 @@ export default function GeometricNetwork() {
         }
       }
 
+      // Cursor reactivity — links reach toward the pointer when it's over the
+      // canvas. Brighter than ambient links so the network visibly "leans in".
+      // Purely visual (no velocity changes) → stable, no clumping.
+      if (!reduced && pointer.active) {
+        const cx = pointer.x - rect.left;
+        const cy = pointer.y - rect.top;
+        if (cx >= 0 && cx <= w && cy >= 0 && cy <= h) {
+          for (const n of nodes) {
+            const dx = n.x - cx;
+            const dy = n.y - cy;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < CURSOR_DIST * CURSOR_DIST) {
+              const d = Math.sqrt(d2);
+              const t = 1 - d / CURSOR_DIST;
+              ctx!.strokeStyle = `rgba(${lr},${lg},${lb},${t * colors.lineOpacity * 2})`;
+              ctx!.beginPath();
+              ctx!.moveTo(cx, cy);
+              ctx!.lineTo(n.x, n.y);
+              ctx!.stroke();
+            }
+          }
+        }
+      }
+
       // Nodes
       const [nr, ng, nb] = colors.node;
       ctx!.fillStyle = `rgba(${nr},${ng},${nb},${colors.nodeOpacity})`;
@@ -137,11 +167,17 @@ export default function GeometricNetwork() {
     const observer = new MutationObserver(() => { colors = readColors(); });
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
 
+    // Keep the cached rect fresh when the canvas changes size without a window
+    // resize event (e.g. the sidebar collapsing widens the main area).
+    const ro = new ResizeObserver(() => { rect = canvas!.getBoundingClientRect(); });
+    ro.observe(canvas);
+
     return () => {
       cancelAnimationFrame(raf);
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       window.removeEventListener("resize", onResize);
       observer.disconnect();
+      ro.disconnect();
     };
   }, []);
 

@@ -8,6 +8,7 @@ import Sidebar from "./components/Sidebar";
 import FloatingAssistant from "./components/FloatingAssistant";
 import ErrorBoundary from "./components/ErrorBoundary";
 import GeometricNetwork from "./components/GeometricNetwork";
+import PointerFX from "./components/PointerFX";
 import Landing from "./pages/Landing";
 import Login from "./pages/Login";
 import Home from "./pages/Home";
@@ -176,6 +177,7 @@ function App() {
     <AuthProvider>
       <BrowserRouter>
         <ErrorBoundary>
+          <PointerFX />
           <SessionExpiredModal />
           <AppRoutes />
           <Toaster position="top-right" richColors closeButton expand={false} duration={3500} />

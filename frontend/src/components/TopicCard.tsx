@@ -12,11 +12,12 @@ interface TopicCardProps {
 export default function TopicCard({ topicKey, name, icon, onClick, selected }: TopicCardProps) {
   return (
     <div
+      data-spotlight={selected ? undefined : ""}
       className={cn(
         "flex items-center gap-3 px-5 py-4 rounded-3xl cursor-pointer transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] text-left active:scale-[0.97] relative overflow-hidden",
         selected
           ? "bg-primary/10 shadow-[0_0_20px_var(--glow-primary)] ring-2 ring-primary"
-          : "bg-card shadow-sm card-hover-lift"
+          : "bg-card shadow-sm card-hover-lift spotlight"
       )}
       onClick={onClick}
     >

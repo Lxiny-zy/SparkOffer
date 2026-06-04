@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { useTilt } from "@/hooks/useTilt";
 import CatAvatar from "@/components/CatAvatar";
 
 export default function Login() {
@@ -18,6 +19,7 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
+  const cardTilt = useTilt();
 
   useEffect(() => {
     fetch("/api/auth/config")
@@ -79,9 +81,28 @@ export default function Login() {
           返回首页
         </button>
 
-        <Card variant="glass" className="relative overflow-hidden tech-border animate-scale-in">
-          {/* Decorative glow halo */}
-          <div className="absolute -top-20 -right-20 w-48 h-48 rounded-full opacity-40 blur-3xl pointer-events-none" style={{ background: "var(--aurora-2)" }} />
+        <div
+          ref={cardTilt.ref}
+          onMouseMove={cardTilt.onMouseMove}
+          onMouseLeave={cardTilt.onMouseLeave}
+          className="animate-scale-in"
+        >
+          <Card
+            variant="glass"
+            className="relative overflow-hidden tech-border transition-transform duration-200 ease-out"
+            style={{
+              transform:
+                "perspective(900px) rotateX(calc(var(--py, 0) * -4deg)) rotateY(calc(var(--px, 0) * 4deg))",
+            }}
+          >
+            {/* Decorative glow halo — parallaxes for depth */}
+            <div
+              className="absolute -top-20 -right-20 w-48 h-48 rounded-full opacity-40 blur-3xl pointer-events-none transition-transform duration-200 ease-out"
+              style={{
+                background: "var(--aurora-2)",
+                transform: "translate(calc(var(--px, 0) * -28px), calc(var(--py, 0) * -28px))",
+              }}
+            />
 
           <CardHeader className="relative items-center text-center pb-2">
             <div className="relative mb-2">
@@ -149,6 +170,7 @@ export default function Login() {
             )}
           </CardContent>
         </Card>
+        </div>
 
         <p className="text-center text-xs text-dim mt-6">
           由 ❤️ + Claude 驱动 · 本地优先 · 数据归你

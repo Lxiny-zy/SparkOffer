@@ -40,7 +40,7 @@ function MetricCard({ label, value, delta }: { label: string; value: number | nu
   const color = metricColorVar(value);
   const deltaPct = delta != null ? Math.round(delta * 100) : null;
   return (
-    <div className="rounded-xl border border-border/40 bg-card/60 px-4 py-3 text-center">
+    <div data-spotlight className="spotlight rounded-xl border border-border/40 bg-card/60 px-4 py-3 text-center transition-all duration-300 hover:-translate-y-0.5 hover:border-primary/40">
       <div className="text-[11px] text-muted-fg mb-1">{label}</div>
       <div className="text-2xl font-bold font-mono tabular-nums" style={{ color }}>{p}%</div>
       {deltaPct != null && deltaPct !== 0 && (
@@ -282,7 +282,7 @@ export default function RAGDashboard() {
       <div className="flex items-center gap-2 flex-wrap">
         <Badge
           variant={selectedTopic === "" ? "default" : "outline"}
-          className="cursor-pointer"
+          className="cursor-pointer hover:-translate-y-px hover:brightness-110"
           onClick={() => setSelectedTopic("")}
         >
           全部
@@ -291,7 +291,7 @@ export default function RAGDashboard() {
           <Badge
             key={k}
             variant={selectedTopic === k ? "default" : "outline"}
-            className="cursor-pointer"
+            className="cursor-pointer hover:-translate-y-px hover:brightness-110"
             onClick={() => setSelectedTopic(k)}
           >
             {topics[k]?.name || k}
@@ -318,7 +318,7 @@ export default function RAGDashboard() {
                 <Badge
                   key={m}
                   variant={judgeMode === m ? "default" : "outline"}
-                  className={cn("cursor-pointer", evalRunning && "pointer-events-none opacity-50")}
+                  className={cn("cursor-pointer hover:-translate-y-px hover:brightness-110", evalRunning && "pointer-events-none opacity-50")}
                   onClick={() => !evalRunning && setJudgeMode(m)}
                   title={m === "standard"
                     ? "标准：检索指标嵌入锚定，生成侧 LLM 评判（约 5 次调用/题）"

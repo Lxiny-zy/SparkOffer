@@ -327,12 +327,13 @@ export default function Home() {
           return (
             <div
               key={card.mode}
+              data-spotlight={isActive ? undefined : ""}
               className={cn(
                 "w-full relative overflow-hidden cursor-pointer text-left rounded-3xl active:scale-[0.97] group",
                 "transition-[transform,border-color,box-shadow,background-color] duration-300 ease-[cubic-bezier(0.2,0,0,1)]",
                 isActive
                   ? "glass-strong animated-border shadow-[0_8px_32px_var(--tech-glow)]"
-                  : "bg-card border border-border/60 hover:border-primary/30 hover:shadow-[0_4px_16px_var(--glow-primary)]"
+                  : "bg-card border border-border/60 spotlight hover:border-primary/30 hover:shadow-[0_4px_16px_var(--glow-primary)] hover:-translate-y-0.5"
               )}
               onClick={() => {
                 const switching = mode !== card.mode;

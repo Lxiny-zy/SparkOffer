@@ -263,7 +263,8 @@ export default function Profile() {
             {Object.entries(profile!.topic_mastery!).map(([topic, data]) => (
               <Card
                 key={topic}
-                className="cursor-pointer card-hover-lift card-spotlight transition-all"
+                hoverLift
+                className="cursor-pointer transition-all"
                 onClick={() => navigate(`/profile/topic/${topic}`)}
               >
                 <CardContent className="p-4">
