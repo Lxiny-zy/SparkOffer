@@ -241,5 +241,27 @@ def init_all_tables():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_qa_sessions_user ON qa_sessions(user_id, updated_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_qa_messages_session ON qa_messages(session_id, id ASC)")
 
+    # ── rag_metrics ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rag_metrics (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id          TEXT NOT NULL,
+            user_id             TEXT NOT NULL,
+            topic               TEXT NOT NULL,
+            stage               TEXT NOT NULL,
+            context_relevance   REAL,
+            context_precision   REAL,
+            context_recall      REAL,
+            faithfulness        REAL,
+            answer_relevance    REAL,
+            answer_correctness  REAL,
+            chunk_count         INTEGER,
+            detail_json         TEXT DEFAULT '{}',
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_metrics_user ON rag_metrics(user_id, created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_metrics_topic ON rag_metrics(user_id, topic, created_at DESC)")
+
     conn.commit()
     logger.info("All database tables and indexes initialized.")

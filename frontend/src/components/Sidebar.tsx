@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
   Home, User, BookOpen, GitFork, Clock, Star, Mic, BriefcaseBusiness, Code2,
-  Sun, Moon, LogOut, Menu, X, ChevronLeft, ChevronRight, Settings, MessageSquare,
+  Sun, Moon, LogOut, Menu, X, ChevronLeft, ChevronRight, Settings, MessageSquare, BarChart3,
   LucideIcon,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
@@ -45,6 +45,7 @@ const NAV_GROUPS: NavGroup[] = [
       { path: "/graph", label: "能力星图", icon: GitFork },
       { path: "/history", label: "时光机", icon: Clock },
       { path: "/favorites", label: "宝藏夹", icon: Star },
+      { path: "/rag-dashboard", label: "RAG 仪表盘", icon: BarChart3 },
     ],
   },
   {

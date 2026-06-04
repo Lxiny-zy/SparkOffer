@@ -115,7 +115,10 @@ class DrillPipeline:
                 yield sse_event({"type": "error", "message": f"{STAGE_LABELS.get(stage, stage)}失败: {exc}"})
                 return
             duration_ms = (time.perf_counter() - t0) * 1000.0
-            yield _stage_event(stage, "ok", duration_ms=duration_ms, detail=self._stage_detail(stage))
+            extra = {}
+            if stage == "retrieve":
+                extra = self._rag_metrics_payload()
+            yield _stage_event(stage, "ok", duration_ms=duration_ms, detail=self._stage_detail(stage), **extra)
 
     # ── stage_detail: short string summarizing what the stage produced ──
 
@@ -302,6 +305,23 @@ class DrillPipeline:
         except Exception:
             pass
         return f"{topic_name} 核心知识点 面试常见问题"
+
+    def _rag_metrics_payload(self) -> dict:
+        """Build optional rag_metrics dict for the SSE pipeline_stage event."""
+        stats = self.ctx.get("retrieval_stats")
+        if stats is None or stats.rag_metrics is None:
+            return {}
+        m = stats.rag_metrics
+        # m is already RetrievalMetrics.to_dict() (values rounded, context_recall
+        # may be None) — pass through verbatim, don't re-round (round(None) crashes).
+        return {
+            "rag_metrics": {
+                "context_relevance": m.get("context_relevance"),
+                "context_precision": m.get("context_precision"),
+                "context_recall": m.get("context_recall"),
+                "chunk_details": m.get("chunk_details", []),
+            }
+        }
 
     def _rag_quality_hint(self) -> str:
         """Tell the LLM how much to lean on knowledge_context this round.
@@ -665,6 +685,24 @@ class DrillPipeline:
             self.session_id, self.mode, self.topic,
             questions=self.questions, user_id=self.user_id,
         )
+
+        # Persist retrieval-stage RAG metrics
+        stats = self.ctx.get("retrieval_stats")
+        if stats and stats.rag_metrics:
+            try:
+                from backend.storage.rag_metrics_store import save_rag_metrics
+                m = stats.rag_metrics
+                save_rag_metrics(
+                    self.session_id, self.user_id, self.topic, "question_gen",
+                    context_relevance=m.get("context_relevance"),
+                    context_precision=m.get("context_precision"),
+                    context_recall=m.get("context_recall"),
+                    chunk_count=stats.final_chunks,
+                    detail={"chunk_details": m.get("chunk_details", [])},
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist RAG metrics: %s", exc)
+
         save_live(drill_sessions, self.session_id, "drill", self.user_id, {
             "topic": self.topic,
             "questions": self.questions,

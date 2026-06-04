@@ -79,6 +79,13 @@ interface StreamCallbacks {
   onStage?: (event: PipelineStageEvent) => void;
 }
 
+export interface RAGRetrievalMetrics {
+  context_relevance: number;
+  context_precision: number;
+  context_recall: number | null;
+  chunk_details: { score: number; source: string }[];
+}
+
 export interface PipelineStageEvent {
   stage: string;
   label?: string;
@@ -86,6 +93,7 @@ export interface PipelineStageEvent {
   ts: number;
   duration_ms?: number;
   detail?: string;
+  rag_metrics?: RAGRetrievalMetrics;
 }
 
 export async function startInterviewStream(mode: string, topic: string | null, { onQuestion, onQuestionUpdate, onDone, onError, onStage }: StreamCallbacks): Promise<void> {
@@ -132,8 +140,16 @@ export async function sendMessage(sessionId: string, message: string, callbacks?
   }, callbacks);
 }
 
+export interface RAGEvalMetrics {
+  faithfulness: number;
+  answer_relevance: number;
+  answer_correctness: number;
+  per_question: { question_id: number; faithfulness: number; answer_relevance: number }[];
+}
+
 interface EndInterviewCallbacks {
   onProgress?: (message: string) => void;
+  onRAGMetrics?: (data: RAGEvalMetrics) => void;
 }
 
 export async function endInterview(
@@ -163,6 +179,8 @@ export async function endInterview(
     for await (const event of iterSSEFrames(res)) {
       if (event.type === "eval_progress" && callbacks?.onProgress) {
         callbacks.onProgress(event.message);
+      } else if (event.type === "rag_eval_metrics" && callbacks?.onRAGMetrics) {
+        callbacks.onRAGMetrics(event.data);
       } else if (event.type === "complete") {
         result = event.data;
       }
@@ -597,4 +615,44 @@ export async function exportAlgorithmCards(format: string, ids: string[] | null 
   });
   if (!res.ok) throw new Error(await res.text());
   return res;
+}
+
+// ── RAG Metrics ──
+
+export interface RAGMetricsRecord {
+  id: number;
+  session_id: string;
+  topic: string;
+  stage: string;
+  context_relevance: number | null;
+  context_precision: number | null;
+  context_recall: number | null;
+  faithfulness: number | null;
+  answer_relevance: number | null;
+  answer_correctness: number | null;
+  chunk_count: number | null;
+  detail: Record<string, any>;
+  created_at: string;
+}
+
+export async function getRAGMetrics(params: {
+  topic?: string;
+  stage?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<RAGMetricsRecord[]> {
+  const qs = new URLSearchParams();
+  if (params.topic) qs.set("topic", params.topic);
+  if (params.stage) qs.set("stage", params.stage);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const res = await authFetch(`${API_BASE}/interview/rag-metrics?${qs}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getSessionRAGMetrics(sessionId: string): Promise<RAGMetricsRecord[]> {
+  const res = await authFetch(`${API_BASE}/interview/rag-metrics/${sessionId}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }

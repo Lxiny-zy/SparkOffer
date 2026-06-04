@@ -5,7 +5,7 @@ import { markdownComponents } from "../components/ChatBubble";
 import { Check, Minus, Star, Lightbulb, Eye, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import ChatBubble from "../components/ChatBubble";
-import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress } from "../api/interview";
+import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics } from "../api/interview";
 import useVoiceInput from "../hooks/useVoiceInput";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -281,8 +281,10 @@ export default function Interview() {
         question_id: q.id,
         answer: answers[q.id] || "",
       }));
+      let ragMetrics: RAGEvalMetrics | null = null;
       const data = await endInterview(sessionId, answerList, {
         onProgress: (msg) => setEvalProgress(msg),
+        onRAGMetrics: (m) => { ragMetrics = m; },
       });
       navigate(`/review/${sessionId}`, {
         state: {
@@ -296,6 +298,7 @@ export default function Interview() {
           company: effectiveInit.company,
           position: effectiveInit.position,
           meta: data.meta || effectiveInit.meta,
+          ragEvalMetrics: ragMetrics,
         },
       });
     } catch (err: any) {

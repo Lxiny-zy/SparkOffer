@@ -21,9 +21,9 @@ from typing import Iterable
 
 import numpy as np
 
-from backend.indexer import safe_retrieve_topic_context
+from backend.indexer import safe_retrieve_topic_context, safe_retrieve_topic_context_with_scores, ChunkWithMeta
 from backend.redis_cache import get_cache
-from backend.vector_memory import _cosine_similarity
+from backend.vector_store.base import _cosine_similarity
 
 logger = logging.getLogger("uvicorn")
 
@@ -51,6 +51,7 @@ class RetrievalStats:
     embed_cache_hits: int
     embed_cache_misses: int
     reranker_status: str = "off"   # "applied" | "degraded" | "off"
+    rag_metrics: dict | None = None  # serialized RetrievalMetrics from rag_metrics.py
 
 
 async def retrieve_for_drill(
@@ -80,21 +81,13 @@ async def retrieve_for_drill(
     if not queries:
         queries.append(fallback_query)
     elif len(queries) < 3:
-        # Always include the fallback so we don't over-fit to weak_points
-        # when the user has only 1-2 logged.
         queries.append(fallback_query)
 
-    # Fan out — LlamaIndex retrieval is sync, but safe_retrieve_topic_context
-    # already wraps it in asyncio.to_thread + timeout.
-    # Use return_exceptions so a single timeout/error doesn't void the whole
-    # batch — we still want partial RAG context.
-    # Cap concurrent retrieval queries — each query drives an embedding request
-    # against the same key (see _EMBED_CONCURRENCY).
     sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
 
     async def _bounded(query: str):
         async with sem:
-            return await safe_retrieve_topic_context(
+            return await safe_retrieve_topic_context_with_scores(
                 topic, query, user_id, top_k=per_query_top_k, timeout=timeout
             )
 
@@ -103,30 +96,67 @@ async def retrieve_for_drill(
         return_exceptions=True,
     )
 
-    per_query_results: list[list[str]] = []
+    per_query_chunks: list[list[ChunkWithMeta]] = []
+    per_query_texts: list[list[str]] = []
     for q, r in zip(queries, raw_results):
         if isinstance(r, Exception):
             logger.warning("RAG sub-query %r failed: %s", q[:60], r)
-            per_query_results.append([])
+            per_query_chunks.append([])
+            per_query_texts.append([])
         else:
-            per_query_results.append(r)
+            per_query_chunks.append(r)
+            per_query_texts.append([c.content for c in r])
 
-    raw_count = sum(len(r) for r in per_query_results)
-    fused_ranked = _reciprocal_rank_fusion(per_query_results, k=RRF_K)
+    raw_count = sum(len(r) for r in per_query_texts)
+
+    # RRF fusion on text content; build a lookup for metadata
+    chunk_meta_map: dict[str, ChunkWithMeta] = {}
+    for chunk_list in per_query_chunks:
+        for cm in chunk_list:
+            if cm.content not in chunk_meta_map:
+                chunk_meta_map[cm.content] = cm
+
+    fused_ranked = _reciprocal_rank_fusion(per_query_texts, k=RRF_K)
     chunks_post_fusion = [c for c, _score in fused_ranked]
 
-    # Semantic dedup using cached embeddings.
-    deduped, hits, misses = await _semantic_dedup(chunks_post_fusion)
+    # Semantic dedup — now also returns embeddings for metrics computation.
+    deduped, hits, misses, dedup_embeddings = await _semantic_dedup(chunks_post_fusion)
 
-    # Cross-Encoder reranking (skipped if not configured). Rerank against the
-    # user's actual weak_points — the same intent that drove retrieval — NOT the
-    # generic fallback_query. Reranking by generic topic relevance would bury the
-    # weak-point-precise chunks RRF surfaced. Fall back to the generic query only
-    # when no weak_points were logged.
     rerank_query = " ".join(weak_points[:5]).strip() or fallback_query
     reranked, reranker_status = await _rerank_if_available(rerank_query, deduped)
 
     final = reranked[:final_top_n]
+
+    # Build aligned metadata and embeddings for final chunks
+    final_sources: list[str] = []
+    final_embeddings: list = []
+    dedup_emb_map = {text: emb for text, emb in zip(deduped, dedup_embeddings)}
+    for chunk_text in final:
+        cm = chunk_meta_map.get(chunk_text)
+        src = f"{cm.source_file}" if cm else ""
+        if cm and cm.header_path:
+            src = f"{src} > {cm.header_path}" if src else cm.header_path
+        final_sources.append(src)
+        final_embeddings.append(dedup_emb_map.get(chunk_text))
+
+    # Compute RAG retrieval quality metrics (embedding-only, zero LLM cost).
+    # compute_retrieval_metrics returns None when it can't measure (degraded
+    # embeddings, dim mismatch) — keep rag_metrics None in that case so we don't
+    # persist a fake all-zeros record that looks like collapsed retrieval.
+    rag_metrics_dict = None
+    try:
+        from backend.rag_metrics import compute_retrieval_metrics
+        metrics = await compute_retrieval_metrics(
+            query_texts=queries,
+            chunks=final,
+            chunk_embeddings=final_embeddings,
+            chunk_sources=final_sources,
+            weak_points=weak_points,
+        )
+        rag_metrics_dict = metrics.to_dict() if metrics is not None else None
+    except Exception as exc:
+        logger.warning("RAG metrics computation failed: %s", exc)
+
     stats = RetrievalStats(
         queries=len(queries),
         raw_chunks=raw_count,
@@ -135,6 +165,7 @@ async def retrieve_for_drill(
         embed_cache_hits=hits,
         embed_cache_misses=misses,
         reranker_status=reranker_status,
+        rag_metrics=rag_metrics_dict,
     )
     return final, stats
 
@@ -155,35 +186,37 @@ def _reciprocal_rank_fusion(rankings: Iterable[list[str]], k: int = RRF_K) -> li
 
 # ── Semantic dedup ──
 
-async def _semantic_dedup(chunks: list[str]) -> tuple[list[str], int, int]:
+async def _semantic_dedup(chunks: list[str]) -> tuple[list[str], int, int, list]:
     """Drop chunks whose cosine to a kept chunk ≥ SIMILARITY_THRESHOLD.
 
-    Returns (kept_chunks, cache_hits, cache_misses).
+    Returns (kept_chunks, cache_hits, cache_misses, kept_embeddings).
     """
     if not chunks:
-        return [], 0, 0
+        return [], 0, 0, []
 
     embeddings, hits, misses = await _embed_many(chunks)
-    # Some embeddings may have failed (None) — keep those chunks but don't
-    # let them participate in the cosine check; they go through verbatim.
     kept: list[str] = []
-    kept_matrix: np.ndarray | None = None  # (k, D) of kept embeddings, grown incrementally
+    kept_embs: list = []
+    kept_matrix: np.ndarray | None = None
 
     for chunk, emb in zip(chunks, embeddings):
         if emb is None:
             kept.append(chunk)
+            kept_embs.append(None)
             continue
         if kept_matrix is None:
             kept.append(chunk)
+            kept_embs.append(emb)
             kept_matrix = emb[np.newaxis, :]
             continue
         sims = _cosine_similarity(emb, kept_matrix)
         if float(np.max(sims)) >= SIMILARITY_THRESHOLD:
-            continue   # near-duplicate; skip
+            continue
         kept.append(chunk)
+        kept_embs.append(emb)
         kept_matrix = np.vstack((kept_matrix, emb))
 
-    return kept, hits, misses
+    return kept, hits, misses, kept_embs
 
 
 # ── Embedding with cache ──

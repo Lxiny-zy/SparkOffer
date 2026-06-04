@@ -1,7 +1,9 @@
 """NumpyVectorStore —— SQLite BLOB + numpy 暴力余弦的默认后端。
 
-逻辑原样取自 vector_memory.py 的自建向量库实现；抽象成 VectorStore 后端后，
-行为与重构前逐条等价。适配 ≤500 向量/用户 的项目规模（sub-ms 检索）。
+检索/衰减逻辑取自 vector_memory.py 的自建向量库实现。写入与淘汰语义与
+QdrantVectorStore 对齐：add() 按 (user_id|session_id|chunk_type|content) 幂等
+（重复写入覆盖而非堆叠重复行），cleanup_oldest() 按 created_at 淘汰最旧。
+适配 ≤500 向量/用户 的项目规模（sub-ms 检索）。
 
 所有方法为同步 —— SQLite 的线程本地连接 (get_db) 配合调用方的
 asyncio.to_thread 使用，不阻塞事件循环。
@@ -38,6 +40,15 @@ class NumpyVectorStore(AbstractVectorStore):
             return
         conn = get_db()
         for r in records:
+            # Idempotent on the same identity tuple QdrantVectorStore keys its
+            # point id on (user_id|session_id|chunk_type|content): delete any
+            # existing row first so a re-indexed session doesn't accumulate
+            # duplicate vectors here while the qdrant backend stays deduped.
+            conn.execute(
+                "DELETE FROM memory_vectors WHERE user_id = ? AND chunk_type = ? "
+                "AND content = ? AND COALESCE(session_id, '') = COALESCE(?, '')",
+                (user_id, r.chunk_type, r.content, r.session_id),
+            )
             conn.execute(
                 "INSERT INTO memory_vectors "
                 "(chunk_type, content, topic, session_id, metadata, embedding, user_id, created_at) "
@@ -123,10 +134,13 @@ class NumpyVectorStore(AbstractVectorStore):
         ).fetchone()[0]
         if count <= max_count:
             return
-        # 保留 id 最大（最新）的 max_count 条，删其余。
+        # 保留 created_at 最新的 max_count 条（id 仅做确定性 tie-break），删其余。
+        # 以 created_at 为主序与 QdrantVectorStore.cleanup_oldest 对齐，使两个后端
+        # 越过上限时淘汰同一批记录（qdrant 无插入自增 id，只能按 created_at）。
         conn.execute(
             "DELETE FROM memory_vectors WHERE user_id = ? AND id NOT IN ("
-            "  SELECT id FROM memory_vectors WHERE user_id = ? ORDER BY id DESC LIMIT ?"
+            "  SELECT id FROM memory_vectors WHERE user_id = ? "
+            "  ORDER BY created_at DESC, id DESC LIMIT ?"
             ")",
             (user_id, user_id, max_count),
         )

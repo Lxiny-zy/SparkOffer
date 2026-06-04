@@ -98,9 +98,9 @@ def _init_llama_settings():
 def _build_nodes(docs: list) -> list:
     """Route documents to the right node parser by extension.
 
-    .md  → MarkdownNodeParser (preserves Header_1..N metadata so retrieved
-           chunks carry their heading path — better signal for embeddings
-           and downstream LLM prompts).
+    .md  → MarkdownNodeParser (preserves the section heading path under the
+           "header_path" metadata key so retrieved chunks carry their heading
+           breadcrumb — better signal for embeddings and downstream LLM prompts).
     other → SentenceSplitter (LlamaIndex default 1024-token chunking).
     """
     md_docs, other_docs = [], []
@@ -469,12 +469,66 @@ _RETRIEVAL_TIMEOUT = 60.0
 _WARMUP_PER_TOPIC_TIMEOUT = 120.0
 
 
+from dataclasses import dataclass
+
+
+@dataclass
+class ChunkWithMeta:
+    """A retrieved chunk with its similarity score and source metadata."""
+    content: str
+    score: float
+    source_file: str
+    header_path: str
+
+
 def retrieve_topic_context(topic: str, question: str, user_id: str, top_k: int = 5) -> list[str]:
     """Retrieve raw text chunks from topic index (for answer evaluation)."""
     index = build_topic_index(topic, user_id)
     retriever = index.as_retriever(similarity_top_k=top_k)
     nodes = retriever.retrieve(question)
     return [node.get_content() for node in nodes]
+
+
+def retrieve_topic_context_with_scores(
+    topic: str, question: str, user_id: str, top_k: int = 5,
+) -> list[ChunkWithMeta]:
+    """Retrieve chunks with similarity scores and source metadata preserved."""
+    index = build_topic_index(topic, user_id)
+    retriever = index.as_retriever(similarity_top_k=top_k)
+    nodes = retriever.retrieve(question)
+    results: list[ChunkWithMeta] = []
+    for node in nodes:
+        meta = node.metadata if hasattr(node, "metadata") else {}
+        # MarkdownNodeParser stores the heading path under a single "header_path"
+        # key formatted as "/H1/H2/" (it does NOT emit Header_1/Header_2/...).
+        # Normalize that slash path into a " > " breadcrumb.
+        raw_header = (meta.get("header_path") or "").strip("/")
+        header_path = raw_header.replace("/", " > ") if raw_header else ""
+        results.append(ChunkWithMeta(
+            content=node.get_content(),
+            score=node.score if hasattr(node, "score") and node.score is not None else 0.0,
+            source_file=meta.get("file_name", ""),
+            header_path=header_path,
+        ))
+    return results
+
+
+async def safe_retrieve_topic_context_with_scores(
+    topic: str, question: str, user_id: str,
+    top_k: int = 5, timeout: float = _RETRIEVAL_TIMEOUT,
+) -> list[ChunkWithMeta]:
+    """Async-safe wrapper around retrieve_topic_context_with_scores."""
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(retrieve_topic_context_with_scores, topic, question, user_id, top_k),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Knowledge retrieval (scored) timed out for topic=%s", topic)
+        return []
+    except Exception as e:
+        logger.warning("Knowledge retrieval (scored) failed for topic=%s: %s", topic, e)
+        return []
 
 
 async def safe_retrieve_topic_context(

@@ -3,8 +3,9 @@ import { useState, useEffect, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { markdownComponents, remarkPlugins } from "../components/ChatBubble";
 import { BookOpen, BriefcaseBusiness, Sparkles, RefreshCw, Star } from "lucide-react";
-import { getReview, getReferenceAnswer, addFavorite } from "../api/interview";
+import { getReview, getReferenceAnswer, addFavorite, getSessionRAGMetrics, type RAGEvalMetrics } from "../api/interview";
 import { cn } from "@/lib/utils";
+import { metricColorVar } from "@/lib/metrics";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -453,9 +454,26 @@ interface DrillReviewProps {
   topic: string | null | undefined;
   sessionId: string | undefined;
   cachedRefAnswers: Record<string, string>;
+  ragEvalMetrics?: RAGEvalMetrics | null;
 }
 
-function DrillReview({ scores, overall, questions, answers, topic, sessionId, cachedRefAnswers }: DrillReviewProps) {
+function RAGQualityBadge({ value, label }: { value: number | null | undefined; label: string }) {
+  if (value == null) return null;
+  const pct = Math.round(value);
+  const color = metricColorVar(value / 100);
+  const bg = pct >= 70 ? "rgba(56,106,32,0.12)" : pct >= 40 ? "rgba(125,88,0,0.12)" : "rgba(179,38,30,0.12)";
+  return (
+    <div className="flex flex-col items-center gap-0.5 rounded-lg border border-border/40 bg-card/60 px-3 py-2 min-w-[80px]">
+      <span className="text-[11px] text-muted-fg">{label}</span>
+      <span className="text-lg font-semibold font-mono tabular-nums" style={{ color }}>{pct}%</span>
+      <div className="w-full h-1 rounded-full bg-muted overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: color }} />
+      </div>
+    </div>
+  );
+}
+
+function DrillReview({ scores, overall, questions, answers, topic, sessionId, cachedRefAnswers, ragEvalMetrics }: DrillReviewProps) {
   const answerMap: Record<number, string> = {};
   for (const a of (answers || [])) answerMap[a.question_id] = a.answer;
   const scoreMap: Record<number, Score> = {};
@@ -529,6 +547,17 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
           { label: "综合", value: avgScore, unit: typeof avgScore === "number" ? "/10" : "" },
         ]}
       />
+
+      {ragEvalMetrics && (
+        <div className="mb-4 animate-fade-in">
+          <div className="text-[11px] font-medium text-muted-fg tracking-wider mb-2">RAG 质量</div>
+          <div className="grid grid-cols-3 gap-2">
+            <RAGQualityBadge label="忠实度" value={ragEvalMetrics.faithfulness} />
+            <RAGQualityBadge label="切题度" value={ragEvalMetrics.answer_relevance} />
+            <RAGQualityBadge label="综合质量" value={ragEvalMetrics.answer_correctness} />
+          </div>
+        </div>
+      )}
 
       <PointList title="薄弱点" items={overall?.new_weak_points} />
       <PointList title="亮点" items={overall?.new_strong_points} tone="green" />
@@ -604,6 +633,26 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
                         )}
                       </div>
                     )}
+
+                    {/* RAG 指标 */}
+                    {ragEvalMetrics?.per_question && (() => {
+                      const pq = ragEvalMetrics.per_question.find((r) => r.question_id === q.id);
+                      if (!pq) return null;
+                      return (
+                        <div className="flex gap-2 mt-2 text-[11px]">
+                          {pq.faithfulness != null && (
+                            <Badge variant="outline" className="font-mono text-[10px] gap-1" style={{ borderColor: metricColorVar(pq.faithfulness / 10), color: metricColorVar(pq.faithfulness / 10) }}>
+                              忠实 {pq.faithfulness}/10
+                            </Badge>
+                          )}
+                          {pq.answer_relevance != null && (
+                            <Badge variant="outline" className="font-mono text-[10px] gap-1" style={{ borderColor: metricColorVar(pq.answer_relevance / 10), color: metricColorVar(pq.answer_relevance / 10) }}>
+                              切题 {pq.answer_relevance}/10
+                            </Badge>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* 操作行 */}
                     <div className="mt-3 pt-3 border-t border-border/50 flex items-center gap-1 flex-wrap">
@@ -832,6 +881,7 @@ export default function Review() {
   const [meta, setMeta] = useState<Record<string, any>>(stateData.meta || {});
   const [showTranscript, setShowTranscript] = useState(false);
   const [refAnswersCache, setRefAnswersCache] = useState<Record<string, string>>({});
+  const [ragEvalMetrics, setRagEvalMetrics] = useState<RAGEvalMetrics | null>(stateData.ragEvalMetrics || null);
   const [loading, setLoading] = useState(!review && !scores);
 
   useEffect(() => {
@@ -864,6 +914,27 @@ export default function Review() {
         .finally(() => setLoading(false));
     }
   }, [sessionId, review, scores]);
+
+  useEffect(() => {
+    if (ragEvalMetrics || !sessionId) return;
+    getSessionRAGMetrics(sessionId)
+      .then((records) => {
+        const evalRec = records.find((r) => r.stage === "answer_eval");
+        if (evalRec && (evalRec.faithfulness != null || evalRec.answer_relevance != null)) {
+          setRagEvalMetrics({
+            faithfulness: Math.round((evalRec.faithfulness ?? 0) * 100),
+            answer_relevance: Math.round((evalRec.answer_relevance ?? 0) * 100),
+            answer_correctness: Math.round((evalRec.answer_correctness ?? 0) * 100),
+            per_question: (evalRec.detail as any)?.per_question?.map((pq: any) => ({
+              question_id: pq.qid,
+              faithfulness: pq.f,
+              answer_relevance: pq.ar,
+            })) || [],
+          });
+        }
+      })
+      .catch(() => {});
+  }, [sessionId, ragEvalMetrics]);
 
   if (loading) {
     return (
@@ -908,7 +979,7 @@ export default function Review() {
         ) : isJobPrep ? (
           <JobPrepReview scores={scores} overall={overall} questions={questions} answers={answers} meta={meta} />
         ) : showDrill ? (
-          <DrillReview scores={scores} overall={overall} questions={questions} answers={answers} topic={topic} sessionId={sessionId} cachedRefAnswers={refAnswersCache} />
+          <DrillReview scores={scores} overall={overall} questions={questions} answers={answers} topic={topic} sessionId={sessionId} cachedRefAnswers={refAnswersCache} ragEvalMetrics={ragEvalMetrics} />
         ) : (
           <>
             <DimensionScores

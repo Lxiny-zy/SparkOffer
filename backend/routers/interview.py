@@ -32,6 +32,28 @@ from backend.auth import get_current_user
 router = APIRouter(prefix="/api")
 
 
+@router.get("/interview/rag-metrics")
+async def get_rag_metrics(
+    topic: str = None, stage: str = None,
+    limit: int = 50, offset: int = 0,
+    user_id: str = Depends(get_current_user),
+):
+    from backend.storage.rag_metrics_store import get_rag_metrics_history
+    return await asyncio.to_thread(
+        get_rag_metrics_history, user_id, topic, stage, limit, offset,
+    )
+
+
+@router.get("/interview/rag-metrics/{session_id}")
+async def get_session_rag_metrics(
+    session_id: str, user_id: str = Depends(get_current_user),
+):
+    from backend.storage.rag_metrics_store import get_rag_metrics_for_session
+    return await asyncio.to_thread(
+        get_rag_metrics_for_session, session_id, user_id,
+    )
+
+
 @router.post("/interview/start")
 async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get_current_user)):
     session_id = str(uuid.uuid4())[:8]
@@ -216,6 +238,57 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             q_diff = {q["id"]: q.get("difficulty", 3) for q in questions}
             for s in scores:
                 s.setdefault("difficulty", q_diff.get(s.get("question_id"), 3))
+
+            # Clamp LLM-emitted RAG scores to 0-10 (or drop) before they feed
+            # the metrics, per-question badges, and persisted detail — a model
+            # returning 50 must not render as 500%. See clamp_score_0_10.
+            from backend.rag_metrics import clamp_score_0_10
+            for s in scores:
+                if "faithfulness_score" in s:
+                    s["faithfulness_score"] = clamp_score_0_10(s.get("faithfulness_score"))
+                if "answer_relevance_score" in s:
+                    s["answer_relevance_score"] = clamp_score_0_10(s.get("answer_relevance_score"))
+
+            # Emit RAG generation quality metrics (extracted from LLM eval)
+            try:
+                from backend.rag_metrics import extract_generation_metrics
+                gen_metrics = extract_generation_metrics(scores)
+                if gen_metrics:
+                    yield sse_event({
+                        "type": "rag_eval_metrics",
+                        "data": {
+                            "faithfulness": round(gen_metrics.faithfulness * 100),
+                            "answer_relevance": round(gen_metrics.answer_relevance * 100),
+                            "answer_correctness": round(gen_metrics.answer_correctness * 100),
+                            "per_question": [
+                                {
+                                    "question_id": s.get("question_id"),
+                                    "faithfulness": s.get("faithfulness_score"),
+                                    "answer_relevance": s.get("answer_relevance_score"),
+                                }
+                                for s in scores if not s.get("skipped")
+                            ],
+                        },
+                    })
+                    from backend.storage.rag_metrics_store import save_rag_metrics
+                    save_rag_metrics(
+                        session_id, user_id, topic, "answer_eval",
+                        faithfulness=gen_metrics.faithfulness,
+                        answer_relevance=gen_metrics.answer_relevance,
+                        answer_correctness=gen_metrics.answer_correctness,
+                        chunk_count=len(scores),
+                        detail={
+                            "per_question": [
+                                {"qid": s.get("question_id"),
+                                 "f": s.get("faithfulness_score"),
+                                 "ar": s.get("answer_relevance_score")}
+                                for s in scores if not s.get("skipped")
+                            ]
+                        },
+                    )
+            except Exception as exc:
+                import logging
+                logging.getLogger("uvicorn").warning("RAG eval metrics failed: %s", exc)
 
             review = format_drill_review(questions, answers, scores, overall)
             save_review(session_id, review, scores, overall.get("new_weak_points", []), overall, user_id=user_id)

@@ -281,7 +281,9 @@ class QdrantVectorStore(AbstractVectorStore):
                 break
         if len(points) <= max_count:
             return
-        points.sort(key=lambda p: (p.payload or {}).get("created_at", ""))
+        # 按 created_at 升序删最旧（与 NumpyVectorStore 一致）；point id 作确定性
+        # tie-break，避免 created_at 相同（同批写入）时 scroll 顺序导致的不确定淘汰。
+        points.sort(key=lambda p: ((p.payload or {}).get("created_at", ""), str(p.id)))
         to_delete = [p.id for p in points[: len(points) - max_count]]
         if to_delete:
             self.client.delete(

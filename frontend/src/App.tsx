@@ -27,6 +27,7 @@ const AlgorithmSolver = lazy(() => import("./pages/AlgorithmSolver"));
 const AlgorithmCollection = lazy(() => import("./pages/AlgorithmCollection"));
 const Settings = lazy(() => import("./pages/Settings"));
 const QAArena = lazy(() => import("./pages/QAArena"));
+const RAGDashboard = lazy(() => import("./pages/RAGDashboard"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
 function AppBootScreen() {
@@ -122,6 +123,7 @@ function AppRoutes() {
                 <Route path="/algorithm/collection" element={<AlgorithmCollection />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/qa-arena" element={<QAArena />} />
+                <Route path="/rag-dashboard" element={<RAGDashboard />} />
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </AppShell>

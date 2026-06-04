@@ -10,6 +10,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PipelineTimeline, applyStageEvent, type PipelineStages } from "@/components/PipelineTimeline";
+import { RAGMetricsPanel } from "@/components/RAGMetricsPanel";
 import type { Question, Profile, DueReview, TopicInfo } from "../types/api";
 
 interface ModeCard {
@@ -513,6 +514,9 @@ export default function Home() {
             </div>
 
             <PipelineTimeline stages={pipelineStages} />
+            {pipelineStages.retrieve?.rag_metrics && (
+              <RAGMetricsPanel metrics={pipelineStages.retrieve.rag_metrics} />
+            )}
 
             {streamingQuestions.length > 0 && (
               <>
@@ -554,6 +558,9 @@ export default function Home() {
             </div>
 
             <PipelineTimeline stages={pipelineStages} />
+            {pipelineStages.retrieve?.rag_metrics && (
+              <RAGMetricsPanel metrics={pipelineStages.retrieve.rag_metrics} />
+            )}
 
             <div className="flex items-center gap-2 text-[12px] text-dim flex-wrap">
               <span className="mr-1">难度分布：</span>
