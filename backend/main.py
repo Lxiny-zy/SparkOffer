@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.routers import (
     auth, settings_router, resume, interview, recording,
     profile, knowledge, job_prep, algorithm, favorites,
-    assistant, graph_router, qa_arena,
+    assistant, graph_router, qa_arena, rag_eval,
 )
 
 logger = logging.getLogger("uvicorn")
@@ -105,3 +105,4 @@ app.include_router(favorites.router)
 app.include_router(assistant.router)
 app.include_router(graph_router.router)
 app.include_router(qa_arena.router)
+app.include_router(rag_eval.router)

@@ -88,6 +88,10 @@ drill_sessions: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
 job_prep_sessions: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
 algorithm_sessions: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
 
+# RAG-eval background-job progress (transient; polled by the dashboard). Not
+# persisted to SQLite — the durable result lands in the rag_eval_runs table.
+rag_eval_jobs: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
+
 _MSG_TYPE_MAP = {"human": HumanMessage, "ai": AIMessage, "system": SystemMessage}
 
 

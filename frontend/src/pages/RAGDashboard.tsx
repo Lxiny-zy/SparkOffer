@@ -1,12 +1,13 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, RadarChart, PolarGrid, PolarAngleAxis,
   PolarRadiusAxis, Radar, BarChart, Bar,
 } from "recharts";
-import { BarChart3, RefreshCw, ExternalLink } from "lucide-react";
+import { BarChart3, RefreshCw, ExternalLink, FlaskConical, Loader2, ChevronDown, ChevronUp, AlertTriangle } from "lucide-react";
 import { getRAGMetrics, getTopics, type RAGMetricsRecord } from "../api/interview";
+import { startRagEval, getRagEvalStatus, type RagEvalStatus, type RagEvalSummary, type RagEvalQuestionDetail } from "../api/ragEval";
 import { cn } from "@/lib/utils";
 import { fmtPct01, metricColorVar } from "@/lib/metrics";
 import { Card, CardContent } from "@/components/ui/card";
@@ -90,6 +91,14 @@ export default function RAGDashboard() {
   const [selectedTopic, setSelectedTopic] = useState<string>("");
   const [loading, setLoading] = useState(true);
 
+  // RAG eval (true RAGAS benchmark) — async backend job + frontend polling
+  const [judgeMode, setJudgeMode] = useState<"standard" | "full">("standard");
+  const [nQuestions, setNQuestions] = useState(20);
+  const [evalStatus, setEvalStatus] = useState<RagEvalStatus | null>(null);
+  const [evalRunning, setEvalRunning] = useState(false);
+  const [evalError, setEvalError] = useState<string | null>(null);
+  const pollRef = useRef<number | null>(null);
+
   const loadData = async () => {
     setLoading(true);
     try {
@@ -107,6 +116,43 @@ export default function RAGDashboard() {
   };
 
   useEffect(() => { loadData(); }, []);
+
+  // Stop polling on unmount.
+  useEffect(() => () => { if (pollRef.current) window.clearInterval(pollRef.current); }, []);
+
+  const runEval = async () => {
+    if (!selectedTopic) {
+      setEvalError("请先在上方选择一个具体 Topic（非\"全部\"）再运行评测。");
+      return;
+    }
+    if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+    setEvalError(null);
+    setEvalStatus(null);
+    setEvalRunning(true);
+    try {
+      const { job_id } = await startRagEval({ topic: selectedTopic, n_questions: nQuestions, judge_mode: judgeMode });
+      const poll = async () => {
+        try {
+          const s = await getRagEvalStatus(job_id);
+          setEvalStatus(s);
+          if (s.status === "completed" || s.status === "failed") {
+            if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+            setEvalRunning(false);
+            if (s.status === "failed") setEvalError(s.error || "评测失败");
+          }
+        } catch (e: any) {
+          if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
+          setEvalRunning(false);
+          setEvalError(e?.message || "查询进度失败");
+        }
+      };
+      await poll();
+      pollRef.current = window.setInterval(poll, 1500);
+    } catch (e: any) {
+      setEvalRunning(false);
+      setEvalError(e?.message || "启动评测失败");
+    }
+  };
 
   const filtered = useMemo(() => {
     if (!selectedTopic) return records;
@@ -252,6 +298,82 @@ export default function RAGDashboard() {
           </Badge>
         ))}
       </div>
+
+      {/* RAG 评测（真 RAGAS 基准） */}
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <div className="flex items-center gap-2">
+                <FlaskConical size={16} className="text-primary" />
+                <span className="text-sm font-medium">RAG 评测（真 RAGAS 基准）</span>
+              </div>
+              <p className="text-[11px] text-muted-fg mt-1 max-w-xl">
+                从所选 Topic 知识库自动合成 golden 集，调用模型与向量库跑 hit@k / MRR / precision / recall /
+                faithfulness / answer_relevancy / correctness。后端异步执行，前端轮询进度。
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {(["standard", "full"] as const).map((m) => (
+                <Badge
+                  key={m}
+                  variant={judgeMode === m ? "default" : "outline"}
+                  className={cn("cursor-pointer", evalRunning && "pointer-events-none opacity-50")}
+                  onClick={() => !evalRunning && setJudgeMode(m)}
+                  title={m === "standard"
+                    ? "标准：检索指标嵌入锚定，生成侧 LLM 评判（约 5 次调用/题）"
+                    : "完整：precision 也逐 chunk LLM 判定（约 13 次/题，更慢更贵）"}
+                >
+                  {m === "standard" ? "标准" : "完整"}
+                </Badge>
+              ))}
+              <select
+                value={nQuestions}
+                disabled={evalRunning}
+                onChange={(e) => setNQuestions(Number(e.target.value))}
+                className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground disabled:opacity-50"
+                title="评测题量"
+              >
+                {[5, 10, 20, 30].map((n) => <option key={n} value={n}>{n} 题</option>)}
+              </select>
+              <Button
+                size="sm"
+                onClick={runEval}
+                disabled={evalRunning || !selectedTopic}
+                className="gap-1.5"
+                title={!selectedTopic ? "请先选择一个具体 Topic" : "运行 RAG 评测"}
+              >
+                {evalRunning ? <Loader2 size={14} className="animate-spin" /> : <FlaskConical size={14} />}
+                运行评测
+              </Button>
+            </div>
+          </div>
+
+          {!selectedTopic && (
+            <p className="text-[11px]" style={{ color: "var(--warning)" }}>
+              请先在上方选择一个具体 Topic（非"全部"）再运行评测。
+            </p>
+          )}
+
+          {evalRunning && evalStatus && <EvalProgress status={evalStatus} />}
+          {evalRunning && !evalStatus && (
+            <p className="text-xs text-muted-fg flex items-center gap-1.5">
+              <Loader2 size={12} className="animate-spin" /> 正在启动评测…
+            </p>
+          )}
+
+          {evalError && (
+            <div className="flex items-start gap-2 text-xs text-red-500 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+              <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+              <span>{evalError}</span>
+            </div>
+          )}
+
+          {evalStatus?.status === "completed" && evalStatus.summary && (
+            <RagEvalResultCard status={evalStatus} topicName={topics[evalStatus.topic]?.name || evalStatus.topic} />
+          )}
+        </CardContent>
+      </Card>
 
       {records.length === 0 ? (
         <Card>
@@ -445,5 +567,128 @@ function MetricPill({ value }: { value: number | null | undefined }) {
     <span className="font-mono tabular-nums font-medium" style={{ color: metricColorVar(value) }}>
       {p}%
     </span>
+  );
+}
+
+const EVAL_PHASE_LABEL: Record<string, string> = {
+  pending: "排队中",
+  synthesizing: "合成评测集",
+  evaluating: "评测中",
+  aggregating: "汇总结果",
+  completed: "完成",
+  failed: "失败",
+};
+
+function EvalProgress({ status }: { status: RagEvalStatus }) {
+  const { phase, done, total } = status;
+  const pct = total > 0 ? Math.round((done / total) * 100) : phase === "synthesizing" ? 5 : 0;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between text-[11px] text-muted-fg">
+        <span className="flex items-center gap-1.5">
+          <Loader2 size={12} className="animate-spin" />
+          {EVAL_PHASE_LABEL[phase] || phase}
+          {total > 0 && phase === "evaluating" ? ` · ${done}/${total}` : ""}
+        </span>
+        <span className="font-mono tabular-nums">{pct}%</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+        <div className="h-full rounded-full bg-primary transition-all duration-500" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+const RESULT_METRICS: { key: keyof RagEvalSummary; label: string }[] = [
+  { key: "hit_at_k", label: "Hit@K" },
+  { key: "mrr", label: "MRR" },
+  { key: "context_precision", label: "Precision" },
+  { key: "context_recall", label: "Recall" },
+  { key: "faithfulness", label: "Faithfulness" },
+  { key: "answer_relevancy", label: "Relevancy" },
+  { key: "answer_correctness", label: "Correctness" },
+];
+
+function RagEvalResultCard({ status, topicName }: { status: RagEvalStatus; topicName: string }) {
+  const [showDetail, setShowDetail] = useState(false);
+  const s = status.summary!;
+  const questions: RagEvalQuestionDetail[] = status.detail?.questions ?? [];
+  const radarData = RESULT_METRICS.map(({ key, label }) => ({
+    metric: label,
+    value: s[key] == null ? 0 : Math.round((s[key] as number) * 100),
+  }));
+  return (
+    <div className="rounded-xl border border-border/50 bg-muted/20 p-4 space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <span className="text-sm font-medium">本次评测结果 · {topicName}</span>
+        <span className="text-[11px] text-muted-fg">
+          {s.n_questions} 题{s.error_count > 0 ? ` · ${s.error_count} 题失败` : ""} · {status.judge_mode === "full" ? "完整评判" : "标准评判"}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        {RESULT_METRICS.map(({ key, label }) => (
+          <MetricCard key={key} label={label} value={(s[key] as number | null) ?? null} />
+        ))}
+      </div>
+
+      <ResponsiveContainer width="100%" height={240}>
+        <RadarChart data={radarData} cx="50%" cy="50%" outerRadius="70%">
+          <PolarGrid stroke="var(--border)" />
+          <PolarAngleAxis dataKey="metric" tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
+          <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 9, fill: "var(--muted-foreground)" }} />
+          <Radar dataKey="value" stroke="var(--primary)" fill="var(--primary)" fillOpacity={0.2} strokeWidth={2} />
+        </RadarChart>
+      </ResponsiveContainer>
+
+      <p className="text-[11px] text-muted-fg">
+        注：评测基于<strong className="text-foreground">基础向量检索</strong>，不含线上出题链路的 RRF 融合 / 重排；
+        hit@k、MRR 反映底层检索质量，非端到端出题效果。
+      </p>
+
+      {questions.length > 0 && (
+        <div>
+          <button
+            onClick={() => setShowDetail((v) => !v)}
+            className="flex items-center gap-1 text-[11px] text-muted-fg hover:text-foreground transition-colors"
+          >
+            {showDetail ? <ChevronUp size={12} /> : <ChevronDown size={12} />} 逐题明细（{questions.length}）
+          </button>
+          {showDetail && (
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full text-[11px]">
+                <thead>
+                  <tr className="border-b border-border/50 text-muted-fg">
+                    <th className="text-left py-1.5 px-2 font-medium">问题 / 来源</th>
+                    <th className="text-center py-1.5 px-2 font-medium">Rank</th>
+                    <th className="text-center py-1.5 px-2 font-medium">Prec</th>
+                    <th className="text-center py-1.5 px-2 font-medium">Recall</th>
+                    <th className="text-center py-1.5 px-2 font-medium">Faith</th>
+                    <th className="text-center py-1.5 px-2 font-medium">Relv</th>
+                    <th className="text-center py-1.5 px-2 font-medium">Corr</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {questions.map((q, i) => (
+                    <tr key={i} className="border-b border-border/30 align-top">
+                      <td className="py-1.5 px-2 max-w-[16rem]">
+                        <div className="truncate" title={q.question}>{q.question}</div>
+                        <div className="text-[10px] text-muted-fg truncate" title={q.gold_source}>{q.gold_source || "—"}</div>
+                      </td>
+                      <td className="py-1.5 px-2 text-center font-mono tabular-nums">{q.rank ?? "—"}</td>
+                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.context_precision} /></td>
+                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.context_recall} /></td>
+                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.faithfulness} /></td>
+                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.answer_relevancy} /></td>
+                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.answer_correctness} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

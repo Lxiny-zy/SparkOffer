@@ -35,6 +35,10 @@
   --success: #386A20;
   --warning: #7D5800;
   --info: #00658E;
+  /* Color-word aliases so bare var(--green)/var(--red) call sites resolve
+     (metric coloring in metrics.ts + RAGDashboard charts). Mirrors @theme. */
+  --green: var(--success);
+  --red: var(--destructive);
   --teal: #006B5F;
   --tertiary: #7D5260;
   --tertiary-foreground: #FFFFFF;
@@ -93,6 +97,10 @@
   --success: #A8D88E;
   --warning: #FFB95A;
   --info: #8ECFF2;
+  /* Color-word aliases so bare var(--green)/var(--red) call sites resolve
+     (metric coloring in metrics.ts + RAGDashboard charts). Mirrors @theme. */
+  --green: var(--success);
+  --red: var(--destructive);
   --teal: #6DD6C8;
   --tertiary: #EFB8C8;
   --tertiary-foreground: #492532;

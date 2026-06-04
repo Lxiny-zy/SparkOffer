@@ -263,5 +263,36 @@ def init_all_tables():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_metrics_user ON rag_metrics(user_id, created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_metrics_topic ON rag_metrics(user_id, topic, created_at DESC)")
 
+    # ── rag_eval_runs ──
+    # 离线 RAGAS 基准评测结果（每次评测一行）。与 rag_metrics（线上免费健康度仪表，
+    # 按 session/stage 记录）刻意分表：本表是 run 级、带 gold 标注的基准指标
+    # （hit@k / mrr / precision / recall / faithfulness / relevancy / correctness），
+    # 混入 rag_metrics 会污染按 stage 过滤的趋势图。
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rag_eval_runs (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id              TEXT NOT NULL,
+            user_id             TEXT NOT NULL,
+            topic               TEXT NOT NULL,
+            scope               TEXT DEFAULT 'topic',
+            n_questions         INTEGER NOT NULL,
+            k                   INTEGER NOT NULL,
+            judge_mode          TEXT DEFAULT 'standard',
+            hit_at_k            REAL,
+            mrr                 REAL,
+            context_precision   REAL,
+            context_recall      REAL,
+            faithfulness        REAL,
+            answer_relevancy    REAL,
+            answer_correctness  REAL,
+            status              TEXT NOT NULL,
+            error               TEXT DEFAULT '',
+            detail_json         TEXT DEFAULT '{}',
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_eval_runs_user ON rag_eval_runs(user_id, created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_eval_runs_topic ON rag_eval_runs(user_id, topic, created_at DESC)")
+
     conn.commit()
     logger.info("All database tables and indexes initialized.")
