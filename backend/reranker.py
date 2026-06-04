@@ -15,17 +15,13 @@ from backend.redis_cache import get_cache
 
 logger = logging.getLogger("uvicorn")
 
-# Cross-Encoder rerank is typically sub-second to a few seconds. Keep the read
-# budget tight (20s, matching the embedding client) so a stalled reranker — it
-# sits on the question-generation path — degrades to original order fast instead
-# of blocking a drill for 90s. Reranking is optional; never let it dominate.
-_TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
+_TIMEOUT = httpx.Timeout(connect=10.0, read=90.0, write=10.0, pool=10.0)
 
 
 def _get_reranker_config() -> dict | None:
     """Resolve reranker API config from channel_manager or .env fallback.
 
-    Returns {"api_base", "api_key", "api_model", "channel_id"} or None.
+    Returns {"api_base", "api_key", "api_model", "channel_id", "proxy"} or None.
     ``channel_id`` is the channel_manager id (used to report success/failure so
     a bad channel cools down), or None on the .env fallback path.
     """
@@ -42,6 +38,7 @@ def _get_reranker_config() -> dict | None:
                 "api_key": ch["api_key"],
                 "api_model": ch.get("api_model", ""),
                 "channel_id": ch.get("id"),
+                "proxy": ch.get("proxy", "") or "",
             }
 
     from backend.ai_config import get_effective
@@ -49,7 +46,7 @@ def _get_reranker_config() -> dict | None:
     key = get_effective("reranker", "api_key")
     model = get_effective("reranker", "api_model")
     if base and key:
-        return {"api_base": base, "api_key": key, "api_model": model, "channel_id": None}
+        return {"api_base": base, "api_key": key, "api_model": model, "channel_id": None, "proxy": ""}
     return None
 
 
@@ -124,7 +121,17 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
     }
 
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        client_kw: dict = {
+            "timeout": _TIMEOUT,
+            "headers": {"User-Agent": "curl/7.88.1"},
+            "follow_redirects": True,
+        }
+        proxy = config.get("proxy", "")
+        if proxy:
+            from backend.llm_provider import _normalize_proxy_url
+            client_kw["proxy"] = _normalize_proxy_url(proxy)
+
+        async with httpx.AsyncClient(**client_kw) as client:
             resp = await client.post(
                 url,
                 headers={
@@ -157,7 +164,7 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
         return reordered, "applied"
 
     except httpx.TimeoutException:
-        logger.warning("Reranker timeout (90s): query=%r, %d chunks", query[:50], len(chunks))
+        logger.warning("Reranker timeout (%ds read): query=%r, %d chunks", _TIMEOUT.read, query[:50], len(chunks))
         _report(channel_id, False)
     except httpx.HTTPStatusError as e:
         logger.warning("Reranker HTTP error %d: %s", e.response.status_code, e.response.text[:200])

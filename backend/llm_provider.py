@@ -368,6 +368,21 @@ def invalidate_singletons():
     _llama_config_version = -1
     _embedding_config_version = -1
 
+    # 记忆库向量后端单例也随配置失效（embedding 维度/通道变更后需重连）。
+    try:
+        from backend.vector_store import reset_vector_store
+        reset_vector_store()
+    except Exception:
+        pass
+
+    # 知识库 Qdrant 状态（client / 健康标志 / 维度缓存）一并失效，使换 embedding
+    # 通道后维度校验与降级判定基于新配置。
+    try:
+        from backend.indexer import reset_qdrant_state
+        reset_qdrant_state()
+    except Exception:
+        pass
+
     try:
         from llama_index.core import Settings as LlamaSettings
         LlamaSettings.llm = get_llama_llm()

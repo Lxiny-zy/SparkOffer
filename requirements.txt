@@ -41,3 +41,9 @@ rich>=13.0.0
 
 # Cache (optional — backend auto-fallbacks to in-memory LRU if Redis unreachable)
 redis>=5.0.0
+
+# Vector store (optional — only when VECTOR_BACKEND=qdrant; the default numpy
+# backend needs nothing extra). llama-index-vector-stores-qdrant 用于知识库
+# RAG 索引切到 Qdrant 的可选路径。
+qdrant-client>=1.12.0
+llama-index-vector-stores-qdrant>=0.3.0

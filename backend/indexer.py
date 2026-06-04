@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 import weakref
 from pathlib import Path
@@ -118,6 +119,170 @@ def _build_nodes(docs: list) -> list:
     return nodes
 
 
+# ── Optional Qdrant backend for the knowledge base ──
+# 知识库按 (user_id, topic) 分 collection（LlamaIndex 每个 index 对应一个 store），
+# 与记忆库的「单 collection + payload 多租户」互补 —— 两种 multitenancy 策略并存。
+#
+# 健壮性约定（与记忆库后端对齐）：Qdrant 是软依赖。探针失败 / 运行期出错都会降级回
+# 本地 SimpleVectorStore（磁盘 persist），绝不让知识库检索因 Qdrant 不可用而崩。
+
+_qdrant_client_singleton = None
+_kb_qdrant_healthy: bool | None = None   # None=未探测；探测后缓存健康与否
+_embed_dim_cache: int | None = None      # 当前 embedding 维度（探测一次后缓存）
+
+
+def _use_qdrant_kb() -> bool:
+    """配置上是否要求知识库走 Qdrant（VECTOR_BACKEND=qdrant 且配了 QDRANT_URL）。"""
+    return bool(settings.qdrant_url) and settings.vector_backend_mode() == "qdrant"
+
+
+def _get_qdrant_client():
+    global _qdrant_client_singleton
+    if _qdrant_client_singleton is None:
+        from qdrant_client import QdrantClient
+        _qdrant_client_singleton = QdrantClient(
+            url=settings.qdrant_url, api_key=settings.qdrant_api_key or None, timeout=10.0,
+        )
+    return _qdrant_client_singleton
+
+
+def _qdrant_kb_available() -> bool:
+    """知识库本回合是否真的可用 Qdrant：配置开启 + 连通性探针通过（结果缓存）。
+
+    探针失败缓存为 False，后续直接走本地索引，避免每次 build 都对着挂掉的 Qdrant
+    干等 10s 超时 —— 与记忆库工厂「构造时探测、失败即降级 numpy」同构。配置变更时由
+    reset_qdrant_state() 清空缓存重新探测。
+    """
+    global _kb_qdrant_healthy
+    if not _use_qdrant_kb():
+        return False
+    if _kb_qdrant_healthy is None:
+        try:
+            _get_qdrant_client().get_collections()
+            _kb_qdrant_healthy = True
+            logger.info("Qdrant KB backend healthy.")
+        except Exception as e:
+            _kb_qdrant_healthy = False
+            logger.warning("Qdrant KB 探针失败，知识库降级用本地索引：%s", e)
+    return _kb_qdrant_healthy
+
+
+def _mark_kb_unhealthy() -> None:
+    """运行期 Qdrant 操作出错时调用：本进程后续知识库走本地索引，直到状态被重置。"""
+    global _kb_qdrant_healthy
+    _kb_qdrant_healthy = False
+
+
+def _current_embed_dim() -> int:
+    """当前 embedding 模型的维度（探测一次后缓存）。用于校验 Qdrant collection 维度。"""
+    global _embed_dim_cache
+    if _embed_dim_cache is None:
+        _embed_dim_cache = len(get_embedding().get_text_embedding("dimension probe"))
+    return _embed_dim_cache
+
+
+def reset_qdrant_state() -> None:
+    """清空 Qdrant client / 健康标志 / 维度缓存，使配置变更（换 embedding 通道等）
+    对知识库生效 —— 由 llm_provider.invalidate_singletons 调用。"""
+    global _qdrant_client_singleton, _kb_qdrant_healthy, _embed_dim_cache
+    _qdrant_client_singleton = None
+    _kb_qdrant_healthy = None
+    _embed_dim_cache = None
+
+
+def _kb_collection_name(user_id: str, topic: str) -> str:
+    """Sanitize 成合法 Qdrant collection 名（字母数字 / 下划线 / 连字符）。"""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", f"kb_{user_id}_{topic}")
+
+
+def _qdrant_collection_dim(client, collection: str) -> int | None:
+    """Qdrant collection 的向量维度；取不到返回 None。"""
+    try:
+        vectors = client.get_collection(collection).config.params.vectors
+        return vectors.size if hasattr(vectors, "size") else next(iter(vectors.values())).size
+    except Exception:
+        return None
+
+
+def _build_or_load_qdrant_index(
+    collection: str, source_dir: Path, force_rebuild: bool,
+    required_exts: list[str] | None = None, allow_empty: bool = False,
+) -> VectorStoreIndex:
+    """Qdrant 版构建/加载：已有 collection 直接 from_vector_store 恢复（不重嵌入），
+    否则从磁盘文档构建并写入 Qdrant（不再用本地 persist_dir）。
+
+    加载已有 collection 前会校验其维度与当前 embedding 模型一致；不一致（换过模型）
+    则丢弃并从磁盘源文档重建 —— 知识库的真相源在磁盘，重建无损。"""
+    from llama_index.vector_stores.qdrant import QdrantVectorStore as _LlamaQdrant
+
+    client = _get_qdrant_client()
+    vector_store = _LlamaQdrant(client=client, collection_name=collection)
+    exists = client.collection_exists(collection)
+
+    if exists and not force_rebuild:
+        col_dim = _qdrant_collection_dim(client, collection)
+        if col_dim is not None and col_dim != _current_embed_dim():
+            logger.warning(
+                "Qdrant KB '%s' 维度=%s 与当前 embedding 维度=%s 不一致，从源文档重建。",
+                collection, col_dim, _current_embed_dim(),
+            )
+            client.delete_collection(collection)
+            exists = False
+        else:
+            return VectorStoreIndex.from_vector_store(vector_store)
+
+    if exists and force_rebuild:
+        client.delete_collection(collection)  # 重建前清空，避免重复 node
+
+    if not source_dir.exists():
+        if allow_empty:
+            docs = []
+        else:
+            raise FileNotFoundError(f"Knowledge directory not found: {source_dir}")
+    else:
+        reader_kwargs = {"input_dir": str(source_dir), "recursive": True}
+        if required_exts:
+            reader_kwargs["required_exts"] = required_exts
+        docs = SimpleDirectoryReader(**reader_kwargs).load_data()
+
+    if not docs and not allow_empty:
+        raise ValueError(f"No documents found in {source_dir}")
+
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    return VectorStoreIndex(_build_nodes(docs), storage_context=storage_context)
+
+
+def _build_or_load_local_index(
+    cache_dir: Path, source_dir: Path, force_rebuild: bool,
+    required_exts: list[str] | None = None, allow_empty: bool = False,
+) -> VectorStoreIndex:
+    """本地 SimpleVectorStore 版构建/加载（默认后端，也是 Qdrant 不可用时的降级路径）。
+
+    已有磁盘 persist 缓存直接加载；否则从源文档构建并 persist 到磁盘。"""
+    if cache_dir.exists() and not force_rebuild:
+        storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
+        return load_index_from_storage(storage_context)
+
+    if not source_dir.exists():
+        if allow_empty:
+            docs = []
+        else:
+            raise FileNotFoundError(f"Knowledge directory not found: {source_dir}")
+    else:
+        reader_kwargs = {"input_dir": str(source_dir), "recursive": True}
+        if required_exts:
+            reader_kwargs["required_exts"] = required_exts
+        docs = SimpleDirectoryReader(**reader_kwargs).load_data()
+
+    if not docs and not allow_empty:
+        raise ValueError(f"No documents found in {source_dir}")
+
+    index = VectorStoreIndex(_build_nodes(docs))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    index.storage_context.persist(persist_dir=str(cache_dir))
+    return index
+
+
 def build_resume_index(user_id: str, force_rebuild: bool = False) -> VectorStoreIndex:
     """Build or load the resume index."""
     cache_key = (user_id, "resume")
@@ -128,18 +293,23 @@ def build_resume_index(user_id: str, force_rebuild: bool = False) -> VectorStore
     _init_llama_settings()
     resume_path = settings.user_resume_path(user_id)
     cache_dir = settings.user_index_cache_path(user_id) / "resume"
+    collection = _kb_collection_name(user_id, "resume")
 
-    if cache_dir.exists() and not force_rebuild:
-        storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
-        index = load_index_from_storage(storage_context)
+    if _qdrant_kb_available():
+        try:
+            index = _build_or_load_qdrant_index(
+                collection, resume_path, force_rebuild, allow_empty=True,
+            )
+        except Exception as e:
+            logger.warning("Qdrant KB 不可用（resume/%s），降级本地索引：%s", user_id, e)
+            _mark_kb_unhealthy()
+            index = _build_or_load_local_index(
+                cache_dir, resume_path, force_rebuild, allow_empty=True,
+            )
     else:
-        docs = SimpleDirectoryReader(
-            input_dir=str(resume_path),
-            recursive=True,
-        ).load_data()
-        index = VectorStoreIndex(_build_nodes(docs))
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        index.storage_context.persist(persist_dir=str(cache_dir))
+        index = _build_or_load_local_index(
+            cache_dir, resume_path, force_rebuild, allow_empty=True,
+        )
 
     _cache_set(cache_key, index)
     return index
@@ -161,26 +331,24 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False) -> 
     dir_name = topic_map[topic]
     topic_dir = settings.user_knowledge_path(user_id) / dir_name
     cache_dir = settings.user_index_cache_path(user_id) / topic
+    exts = [".md", ".txt", ".py"]
 
-    if cache_dir.exists() and not force_rebuild:
-        storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
-        index = load_index_from_storage(storage_context)
+    if _qdrant_kb_available():
+        try:
+            index = _build_or_load_qdrant_index(
+                _kb_collection_name(user_id, topic), topic_dir, force_rebuild,
+                required_exts=exts,
+            )
+        except Exception as e:
+            logger.warning("Qdrant KB 不可用（%s/%s），降级本地索引：%s", topic, user_id, e)
+            _mark_kb_unhealthy()
+            index = _build_or_load_local_index(
+                cache_dir, topic_dir, force_rebuild, required_exts=exts,
+            )
     else:
-        if not topic_dir.exists():
-            raise FileNotFoundError(f"Knowledge directory not found: {topic_dir}")
-
-        docs = SimpleDirectoryReader(
-            input_dir=str(topic_dir),
-            recursive=True,
-            required_exts=[".md", ".txt", ".py"],
-        ).load_data()
-
-        if not docs:
-            raise ValueError(f"No documents found in {topic_dir}")
-
-        index = VectorStoreIndex(_build_nodes(docs))
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        index.storage_context.persist(persist_dir=str(cache_dir))
+        index = _build_or_load_local_index(
+            cache_dir, topic_dir, force_rebuild, required_exts=exts,
+        )
 
     _cache_set(cache_key, index)
     return index
@@ -211,6 +379,16 @@ def invalidate_topic_index(topic: str, user_id: str):
     """
     cache_key = (user_id, topic)
     _index_cache.pop(cache_key, None)
+    # 配置了 Qdrant 就尽力删掉对应 collection（即便当前降级到本地，也清掉残留）。
+    if _use_qdrant_kb():
+        try:
+            client = _get_qdrant_client()
+            collection = _kb_collection_name(user_id, topic)
+            if client.collection_exists(collection):
+                client.delete_collection(collection)
+        except Exception as e:
+            logger.warning("Failed to drop Qdrant kb collection %s/%s: %s", user_id, topic, e)
+    # 本地磁盘缓存也一并清掉（默认后端，或 Qdrant 降级期间落地的索引）。
     cache_dir = settings.user_index_cache_path(user_id) / topic
     if cache_dir.exists():
         import shutil
@@ -229,11 +407,13 @@ def incremental_insert_to_index(topic: str, user_id: str, new_text: str):
         index = build_topic_index(topic, user_id)
         # Create a Document from the new text and insert into existing index
         doc = Document(text=new_text, metadata={"source": "auto_evolution", "topic": topic})
-        index.insert(doc)
-        # Persist the updated index to disk cache
-        cache_dir = settings.user_index_cache_path(user_id) / topic
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        index.storage_context.persist(persist_dir=str(cache_dir))
+        index.insert(doc)  # qdrant-backed 时自动推送到 Qdrant，无需本地 persist
+        # 持久化判定按「实际是否 Qdrant 后端」而非「是否配置 Qdrant」：Qdrant 降级到
+        # 本地时，insert 后必须 persist 到磁盘，否则缓存淘汰后新内容丢失。
+        if not _qdrant_kb_available():
+            cache_dir = settings.user_index_cache_path(user_id) / topic
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            index.storage_context.persist(persist_dir=str(cache_dir))
         # Update in-memory cache
         _cache_set(cache_key, index)
         logger.info(f"Incremental insert to index: topic={topic}, user={user_id}, text_len={len(new_text)}")

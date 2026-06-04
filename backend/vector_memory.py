@@ -1,16 +1,27 @@
-"""向量记忆系统 — 语义检索 + 时间衰减 + 薄弱点语义去重。
-设计：- SQLite BLOB 存 float32 embedding
-- numpy cosine similarity 搜索（百级向量，sub-ms）- profile.json 仍是真相源，向量索引是加速层
+"""向量记忆系统（应用层）— embedding + 时间衰减 + 薄弱点语义匹配。
+
+底层向量存取委托给可插拔的 VectorStore 后端（numpy 默认 / qdrant 可选，
+见 backend/vector_store/）。本模块只负责：
+- 调 embedding（带超时/重试/断路器），算查询与内容向量；
+- 时间衰减（14 天半衰期）后处理，使两个后端的最终排序一致；
+- 薄弱点去重的列表内 cosine 匹配（profile.json 仍是真相源，向量库当 embedding 缓存）。
 """
 import asyncio
-import json
 import logging
 from datetime import datetime
 
 import numpy as np
 
 from backend.llm_provider import get_embedding
-from backend.storage.database import get_db
+from backend.vector_store import MemoryRecord, get_vector_store
+# 底层向量工具下沉到了 vector_store.base —— 在此 re-export，保持
+# graph.py / rag_retrieval.py 既有的 `from backend.vector_memory import ...` 不变。
+from backend.vector_store.base import (
+    MAX_VECTORS_PER_USER,
+    _cosine_similarity,
+    _deserialize,
+    _serialize,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -20,7 +31,7 @@ _EMBED_TIMEOUT_SECONDS = 30.0
 SIMILARITY_THRESHOLD = 0.75  # weak point dedup
 TIME_DECAY_HALF_LIFE = 14.0  # days
 TIME_DECAY_WEIGHT = 0.3      # max 30% score reduction from age
-MAX_VECTORS_PER_USER = 500   # auto-cleanup threshold
+# MAX_VECTORS_PER_USER 从 vector_store.base re-export（见顶部 import）
 
 
 # ── Embedding helpers ──
@@ -213,24 +224,6 @@ def index_session_memory_sync(
     ))
 
 
-def _serialize(vec: np.ndarray) -> bytes:
-    return vec.astype(np.float32).tobytes()
-
-
-def _deserialize(blob: bytes) -> np.ndarray:
-    return np.frombuffer(blob, dtype=np.float32)
-
-
-def _cosine_similarity(query_vec: np.ndarray, matrix: np.ndarray) -> np.ndarray:
-    """Vectorized cosine similarity. query_vec: (D,), matrix: (N, D) → (N,)."""
-    query_norm = np.linalg.norm(query_vec)
-    if query_norm < 1e-10:
-        return np.zeros(matrix.shape[0])
-    row_norms = np.linalg.norm(matrix, axis=1)
-    row_norms = np.clip(row_norms, 1e-10, None)
-    return (matrix @ query_vec) / (row_norms * query_norm)
-
-
 def _time_decay(created_at: str) -> float:
     """Exponential time decay. Returns multiplier in [0.5, 1.0] range."""
     try:
@@ -254,20 +247,19 @@ async def index_session_memory(
     insight_text: str = "",
 ):
     """Embed and store memory chunks for a completed session."""
-    conn = get_db()
-    chunks = []
+    chunks: list[tuple[str, str, str | None, str | None, dict]] = []
 
     if summary:
-        chunks.append(("session_summary", summary, topic, session_id, "{}"))
+        chunks.append(("session_summary", summary, topic, session_id, {}))
 
     for wp in weak_points:
         point = wp.get("point", wp) if isinstance(wp, dict) else str(wp)
         if point:
-            meta = json.dumps({"topic": wp.get("topic", topic) if isinstance(wp, dict) else topic})
-            chunks.append(("weak_point", point, wp.get("topic", topic) if isinstance(wp, dict) else topic, session_id, meta))
+            wp_topic = wp.get("topic", topic) if isinstance(wp, dict) else topic
+            chunks.append(("weak_point", point, wp_topic, session_id, {"topic": wp_topic}))
 
     if insight_text:
-        chunks.append(("insight", insight_text[:2000], topic, session_id, "{}"))
+        chunks.append(("insight", insight_text[:2000], topic, session_id, {}))
 
     if not chunks:
         return
@@ -277,38 +269,22 @@ async def index_session_memory(
     vectors = await _embed_batch(texts)
 
     now = datetime.now().isoformat()
-    for (chunk_type, content, t, sid, meta), vec in zip(chunks, vectors):
-        blob = _serialize(vec)
-        conn.execute(
-            "INSERT INTO memory_vectors (chunk_type, content, topic, session_id, metadata, embedding, user_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (chunk_type, content, t, sid, meta, blob, user_id, now),
+    records = [
+        MemoryRecord(
+            content=content, chunk_type=chunk_type, topic=t,
+            session_id=sid, embedding=vec, created_at=now, metadata=meta,
         )
+        for (chunk_type, content, t, sid, meta), vec in zip(chunks, vectors)
+    ]
 
-    conn.commit()
-    logger.info(f"Indexed {len(chunks)} memory chunks for session {session_id or 'unknown'}.")
+    # Backend write + cleanup are sync — wrap in to_thread so the event loop
+    # isn't blocked (the old inline conn.execute path did block).
+    store = get_vector_store()
+    await asyncio.to_thread(store.add, user_id, records)
+    logger.info(f"Indexed {len(records)} memory chunks for session {session_id or 'unknown'}.")
 
-    # Auto-cleanup
-    _cleanup_old_vectors(user_id)
-
-
-def _cleanup_old_vectors(user_id: str, max_count: int = MAX_VECTORS_PER_USER):
-    """Delete oldest vectors when a user exceeds the max count."""
-    conn = get_db()
-    count = conn.execute(
-        "SELECT COUNT(*) FROM memory_vectors WHERE user_id = ?", (user_id,)
-    ).fetchone()[0]
-    if count <= max_count:
-        return
-    # Delete the oldest entries beyond the limit
-    conn.execute(
-        "DELETE FROM memory_vectors WHERE user_id = ? AND id NOT IN ("
-        "  SELECT id FROM memory_vectors WHERE user_id = ? ORDER BY id DESC LIMIT ?"
-        ")",
-        (user_id, user_id, max_count),
-    )
-    conn.commit()
-    logger.info(f"Cleaned up vectors for user {user_id}: {count} → {max_count}")
+    # Auto-cleanup oldest beyond the per-user cap.
+    await asyncio.to_thread(store.cleanup_oldest, user_id, MAX_VECTORS_PER_USER)
 
 
 # ── Read ──
@@ -321,55 +297,35 @@ async def search_memory(
     top_k: int = 5,
 ) -> list[dict]:
     """Semantic search with time decay. Returns [{content, chunk_type, topic, score, created_at}]."""
-    # Build filter query (pure string assembly — cheap, stays on the loop)
-    where = ["user_id = ?"]
-    params: list = [user_id]
-    if chunk_types:
-        placeholders = ",".join("?" for _ in chunk_types)
-        where.append(f"chunk_type IN ({placeholders})")
-        params.extend(chunk_types)
-    if topic:
-        where.append("topic = ?")
-        params.append(topic)
-    where_clause = " WHERE " + " AND ".join(where)
-
-    # SQLite read (up to MAX_VECTORS_PER_USER BLOB rows) is sync — run it in a
-    # worker thread so the event loop isn't blocked. get_db() returns this
-    # thread's own connection (connections are thread-local).
-    def _query_db():
-        return get_db().execute(
-            f"SELECT id, chunk_type, content, topic, session_id, embedding, created_at FROM memory_vectors{where_clause}",
-            params,
-        ).fetchall()
-
-    rows = await asyncio.to_thread(_query_db)
-    if not rows:
-        return []
-
     # Embed query (async with timeout)
     query_vec = await _embed(query)
+    store = get_vector_store()
 
-    # Deserialize + stack + cosine + time-decay + sort are all CPU-bound over up
-    # to 500 rows — keep them off the event loop too.
-    def _rank() -> list[dict]:
-        embeddings = np.stack([_deserialize(r["embedding"]) for r in rows])
-        similarities = _cosine_similarity(query_vec, embeddings)
-        results = []
-        for i, row in enumerate(rows):
-            decay = _time_decay(row["created_at"])
-            score = float(similarities[i]) * decay
-            results.append({
-                "content": row["content"],
-                "chunk_type": row["chunk_type"],
-                "topic": row["topic"],
-                "session_id": row["session_id"],
-                "score": score,
-                "created_at": row["created_at"],
-            })
+    # Backend search returns raw cosine; we apply time decay + sort + top_k here
+    # so numpy and qdrant produce identical final ordering. Pull the full filtered
+    # set (limit=MAX_VECTORS_PER_USER) — decaying then truncating MUST happen after
+    # retrieval, not before. Deserialize/cosine/decay/sort are CPU-bound over ≤500
+    # rows → keep them off the event loop.
+    def _search_and_rank() -> list[dict]:
+        hits = store.search(
+            user_id, query_vec,
+            chunk_types=chunk_types, topic=topic, limit=MAX_VECTORS_PER_USER,
+        )
+        results = [
+            {
+                "content": h.content,
+                "chunk_type": h.chunk_type,
+                "topic": h.topic,
+                "session_id": h.session_id,
+                "score": h.score * _time_decay(h.created_at),
+                "created_at": h.created_at,
+            }
+            for h in hits
+        ]
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:top_k]
 
-    return await asyncio.to_thread(_rank)
+    return await asyncio.to_thread(_search_and_rank)
 
 
 async def find_similar_weak_point(
@@ -383,16 +339,10 @@ async def find_similar_weak_point(
     if not existing_points:
         return None
 
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT content, embedding FROM memory_vectors WHERE chunk_type = 'weak_point' AND user_id = ?",
-        (user_id,),
-    ).fetchall()
-
-    # Build lookup: content → embedding
-    cached = {}
-    for r in rows:
-        cached[r["content"]] = _deserialize(r["embedding"])
+    # Pull cached weak_point embeddings from the store (content → embedding).
+    # Sync backend call → to_thread so the event loop isn't blocked.
+    store = get_vector_store()
+    cached = await asyncio.to_thread(store.iter_embeddings, user_id, "weak_point")
 
     # Embed the new point (async with timeout)
     new_vec = await _embed(new_point)
@@ -410,7 +360,9 @@ async def find_similar_weak_point(
         if not point_text:
             continue
         indices.append(i)
-        if point_text in cached:
+        # 缓存命中还需维度一致：换过 embedding 模型后旧缓存维度与 new_vec 不符，
+        # 此时当作 miss 重嵌入 —— 既避免 np.stack 异维度崩溃，又顺带自愈缓存。
+        if point_text in cached and cached[point_text].shape == new_vec.shape:
             vectors.append(cached[point_text])
         else:
             missing_slots.append(len(vectors))
@@ -429,7 +381,18 @@ async def find_similar_weak_point(
     if not vectors:
         return None
 
-    sims = _cosine_similarity(new_vec, np.stack(vectors))
+    matrix = np.stack(vectors)
+    # 兜底守卫：极端情况下（new_vec embed 失败退化成 1536 零向量，而批量 embed 又
+    # 拿到另一维度）matrix 与 new_vec 仍可能维度不符 —— 此时无法比较，直接放弃去重
+    # （返回 None 表示「没有相似项」），绝不让维度不匹配把请求打挂。
+    if matrix.shape[1] != new_vec.shape[0]:
+        logger.warning(
+            "weak_point 去重维度不一致（%d vs %d），跳过本次匹配。",
+            matrix.shape[1], new_vec.shape[0],
+        )
+        return None
+
+    sims = _cosine_similarity(new_vec, matrix)
     best_pos = int(np.argmax(sims))
     if float(sims[best_pos]) >= threshold:
         return indices[best_pos]
@@ -442,32 +405,33 @@ def rebuild_index_from_profile(user_id: str):
     """Rebuild weak_point vectors from current profile.json."""
     from backend.memory import _load_profile
 
-    conn = get_db()
-    conn.execute("DELETE FROM memory_vectors WHERE chunk_type = 'weak_point' AND user_id = ?", (user_id,))
-    conn.commit()
+    store = get_vector_store()
+    store.delete_by_type(user_id, "weak_point")
 
     profile = _load_profile(user_id)
     weak_points = profile.get("weak_points", [])
-
     if not weak_points:
         return
 
-    embed_model = get_embedding()
     texts = [wp["point"] for wp in weak_points if wp.get("point")]
     if not texts:
         return
 
+    embed_model = get_embedding()
     vectors = embed_model.get_text_embedding_batch(texts)
     now = datetime.now().isoformat()
 
-    for text, vec, wp in zip(texts, vectors, weak_points):
-        blob = _serialize(np.array(vec, dtype=np.float32))
-        meta = json.dumps({"topic": wp.get("topic", ""), "times_seen": wp.get("times_seen", 1)})
-        conn.execute(
-            "INSERT INTO memory_vectors (chunk_type, content, topic, metadata, embedding, user_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("weak_point", text, wp.get("topic"), meta, blob, user_id, wp.get("first_seen", now)),
+    records = [
+        MemoryRecord(
+            content=text,
+            chunk_type="weak_point",
+            topic=wp.get("topic"),
+            session_id=None,
+            embedding=np.array(vec, dtype=np.float32),
+            created_at=wp.get("first_seen", now),
+            metadata={"topic": wp.get("topic", ""), "times_seen": wp.get("times_seen", 1)},
         )
-
-    conn.commit()
-    logger.info(f"Rebuilt {len(texts)} weak_point vectors for user {user_id}.")
+        for text, vec, wp in zip(texts, vectors, weak_points)
+    ]
+    store.add(user_id, records)
+    logger.info(f"Rebuilt {len(records)} weak_point vectors for user {user_id}.")
