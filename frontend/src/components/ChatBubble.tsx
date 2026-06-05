@@ -1,9 +1,42 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { cn } from "@/lib/utils";
+
+// 按需注册语法高亮：只把面试场景高频的几种语言打进包，而非 Prism 全量入口的 200+ 种。
+// 这是构建模块数 / 内存峰值的最大单一来源。未注册的语言会安全降级为纯文本（不报错、仅无配色）。
+import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
+import javascript from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
+import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
+import jsx from "react-syntax-highlighter/dist/esm/languages/prism/jsx";
+import tsx from "react-syntax-highlighter/dist/esm/languages/prism/tsx";
+import java from "react-syntax-highlighter/dist/esm/languages/prism/java";
+import go from "react-syntax-highlighter/dist/esm/languages/prism/go";
+import rust from "react-syntax-highlighter/dist/esm/languages/prism/rust";
+import cpp from "react-syntax-highlighter/dist/esm/languages/prism/cpp";
+import c from "react-syntax-highlighter/dist/esm/languages/prism/c";
+import csharp from "react-syntax-highlighter/dist/esm/languages/prism/csharp";
+import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
+import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
+import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
+import markdown from "react-syntax-highlighter/dist/esm/languages/prism/markdown";
+
+// 标准语言名 → 语法定义
+const SYNTAX: Record<string, any> = {
+  python, javascript, typescript, jsx, tsx, java, go, rust,
+  cpp, c, csharp, sql, bash, json, yaml, markdown,
+};
+// 常见 fenced-code 标记别名 → 标准名（LLM 输出里 ```py / ```sh / ```yml 很常见）
+const ALIASES: Record<string, string> = {
+  py: "python", js: "javascript", ts: "typescript",
+  sh: "bash", shell: "bash", zsh: "bash", console: "bash",
+  yml: "yaml", golang: "go", cs: "csharp", md: "markdown",
+};
+Object.entries(SYNTAX).forEach(([name, syntax]) => SyntaxHighlighter.registerLanguage(name, syntax));
+Object.entries(ALIASES).forEach(([alias, target]) => SyntaxHighlighter.registerLanguage(alias, SYNTAX[target]));
 
 interface ChatBubbleProps {
   role: "user" | "assistant";
