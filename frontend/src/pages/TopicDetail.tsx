@@ -73,14 +73,13 @@ export default function TopicDetail() {
         <ArrowLeft size={16} /> 返回画像
       </button>
 
-      <div className="flex items-center gap-3 md:gap-4 mb-8 animate-fade-in relative">
-        <div className="absolute -top-6 -left-4 w-[160px] h-[120px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
-        <div className="text-dim relative">{getTopicIcon(topicInfo?.icon, 36)}</div>
-        <div className="flex-1 relative">
-          <div className="text-2xl md:text-[28px] font-display font-bold">{topicInfo?.name || topic}</div>
-          <div className="text-sm text-dim mt-1">
+      <div className="flex items-center gap-3 md:gap-4 mb-8 animate-fade-in">
+        <div className="text-[color:var(--sig-accent)]">{getTopicIcon(topicInfo?.icon, 36)}</div>
+        <div className="flex-1">
+          <h1 className="sig-display text-2xl md:text-[28px]">{topicInfo?.name || topic}</h1>
+          <div className="sig-num text-sm text-dim mt-1.5">
             {sessions.length} 次训练记录
-            {mastery.last_assessed && ` | 上次评估: ${mastery.last_assessed.slice(0, 10)}`}
+            {mastery.last_assessed && ` · 上次评估 ${mastery.last_assessed.slice(0, 10)}`}
           </div>
         </div>
       </div>
@@ -89,14 +88,11 @@ export default function TopicDetail() {
         <Card className="mb-6 animate-fade-in-up">
           <CardContent className="p-4 md:p-5 flex items-center gap-3 md:gap-4">
             <div>
-              <span className="text-[32px] font-bold text-primary">{masteryScore}</span>
+              <span className="sig-stat text-[32px] text-[color:var(--sig-accent)]">{masteryScore}</span>
               <span className="text-base text-dim">/100</span>
             </div>
-            <div className="flex-1 h-2 rounded-full bg-border overflow-hidden">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-primary to-primary-hover transition-[width] duration-500 ease-in-out"
-                style={{ width: `${masteryScore}%` }}
-              />
+            <div className="sig-progress flex-1">
+              <div className="sig-progress-fill" style={{ width: `${masteryScore}%` }} />
             </div>
             {mastery.notes && <div className="text-[13px] text-dim ml-2 md:ml-4 max-w-[200px] hidden md:block">{mastery.notes}</div>}
           </CardContent>
@@ -151,7 +147,8 @@ export default function TopicDetail() {
               return (
                 <Card
                   key={s.session_id}
-                  className="cursor-pointer hover:border-primary/50 hover:-translate-y-px hover:shadow-sm transition-all"
+                  hoverLift
+                  className="cursor-pointer"
                   onClick={() => navigate(`/review/${s.session_id}`)}
                 >
                   <CardContent className="p-3.5 md:p-4 flex items-center justify-between">

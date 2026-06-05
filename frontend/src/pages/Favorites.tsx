@@ -28,7 +28,7 @@ function ScorePill({ score }: { score: number | null | undefined }) {
   const { color } = getScoreColor(score);
   return (
     <span
-      className="inline-flex items-center gap-0.5 text-sm font-bold px-2 py-0.5 rounded-full"
+      className="inline-flex items-center gap-0.5 text-sm font-bold px-2 py-0.5 rounded"
       style={{ color, background: `color-mix(in srgb, ${color} 12%, transparent)` }}
     >
       {score}<span className="text-xs font-normal opacity-60">/10</span>
@@ -130,16 +130,14 @@ export default function Favorites() {
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
-      <div className="mb-8 animate-fade-in relative">
-        <div className="absolute -top-6 -left-6 w-[180px] h-[120px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
-        <div className="relative">
-          <div className="flex items-center gap-2 mb-2">
-            <Star size={20} className="text-yellow-400 fill-yellow-400" />
-            <h1 className="text-2xl md:text-[28px] font-display font-bold aurora-text">收藏夹</h1>
-            <Badge variant="secondary" className="ml-2">{total} 题</Badge>
-          </div>
-          <p className="text-sm text-dim">收藏的面试题目，支持标签管理和导出</p>
+      <div className="mb-8 animate-fade-in">
+        <div className="sig-kicker mb-2">// 收藏夹 / FAVORITES</div>
+        <div className="flex items-center gap-2 mb-1">
+          <Star size={20} className="text-yellow-400 fill-yellow-400" />
+          <h1 className="sig-display text-2xl md:text-[28px]">宝藏夹<span className="sig-accent-c">.</span></h1>
+          <Badge variant="secondary" className="ml-2">{total} 题</Badge>
         </div>
+        <p className="text-sm text-dim">收藏的面试题目，支持标签管理和导出</p>
       </div>
 
       {/* Filters & Actions */}
@@ -149,7 +147,7 @@ export default function Favorites() {
         </div>
         <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
           <select
-            className="bg-card border border-border rounded-lg px-3 py-1.5 text-sm min-w-0"
+            className="sig-field w-auto py-1.5 text-sm min-w-0"
             value={topicFilter}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setTopicFilter(e.target.value)}
           >
@@ -157,7 +155,7 @@ export default function Favorites() {
             {topics.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
           <select
-            className="bg-card border border-border rounded-lg px-3 py-1.5 text-sm min-w-0"
+            className="sig-field w-auto py-1.5 text-sm min-w-0"
             value={tagFilter}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setTagFilter(e.target.value)}
           >
@@ -165,7 +163,7 @@ export default function Favorites() {
             {allTags.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
           <select
-            className="bg-card border border-border rounded-lg px-3 py-1.5 text-sm min-w-0"
+            className="sig-field w-auto py-1.5 text-sm min-w-0"
             value={sortBy}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setSortBy(e.target.value)}
           >
@@ -268,7 +266,7 @@ export default function Favorites() {
                     <Button variant="ghost" size="sm" className="h-7 px-2 text-dim" onClick={() => toggleExpand(item.id)}>
                       {expanded[item.id] ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                     </Button>
-                    <Button variant="ghost" size="sm" className="h-7 px-2 text-dim hover:text-red" onClick={() => handleDelete(item.id)}>
+                    <Button variant="ghost" size="sm" className="h-7 px-2 text-dim hover:text-[color:var(--sig-danger)]" onClick={() => handleDelete(item.id)}>
                       <Trash2 size={13} />
                     </Button>
                     <Button variant="ghost" size="sm" className="h-7 px-2 text-dim" onClick={() => handleExport("markdown", [item.id])}>

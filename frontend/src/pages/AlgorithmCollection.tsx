@@ -28,7 +28,7 @@ function DifficultyBadge({ difficulty }: { difficulty: string }) {
   if (!d) return null;
   return (
     <span
-      className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-full"
+      className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded"
       style={{ color: d.color, background: `color-mix(in srgb, ${d.color} 12%, transparent)` }}
     >
       {d.label}
@@ -145,21 +145,19 @@ export default function AlgorithmCollection() {
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
       {/* Header */}
-      <div className="mb-8 animate-fade-in relative">
-        <div className="absolute -top-6 -left-6 w-[180px] h-[120px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
-        <div className="relative">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <Library size={20} className="text-primary" />
-              <h1 className="text-2xl md:text-[28px] font-display font-bold aurora-text">算法收藏</h1>
-              <Badge variant="secondary" className="ml-2">{total} 题</Badge>
-            </div>
-            <Button variant="outline" size="sm" onClick={() => navigate("/algorithm")}>
-              <Code2 size={14} /> 去解题
-            </Button>
+      <div className="mb-8 animate-fade-in">
+        <div className="sig-kicker mb-2">// 算法收藏 / ALGORITHMS</div>
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-2">
+            <Library size={20} className="text-[color:var(--sig-accent)]" />
+            <h1 className="sig-display text-2xl md:text-[28px]">算法收藏<span className="sig-accent-c">.</span></h1>
+            <Badge variant="secondary" className="ml-2">{total} 题</Badge>
           </div>
-          <p className="text-sm text-dim">保存的算法题解答，方便复习回顾</p>
+          <Button variant="outline" size="sm" onClick={() => navigate("/algorithm")}>
+            <Code2 size={14} /> 去解题
+          </Button>
         </div>
+        <p className="text-sm text-dim">保存的算法题解答，方便复习回顾</p>
       </div>
 
       {/* Filters & Actions */}
@@ -168,7 +166,7 @@ export default function AlgorithmCollection() {
           <Filter size={14} />
         </div>
         <select
-          className="bg-card border border-border rounded-lg px-3 py-1.5 text-sm"
+          className="sig-field w-auto py-1.5 text-sm"
           value={difficultyFilter}
           onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setDifficultyFilter(e.target.value)}
         >
@@ -178,7 +176,7 @@ export default function AlgorithmCollection() {
           <option value="hard">Hard</option>
         </select>
         <select
-          className="bg-card border border-border rounded-lg px-3 py-1.5 text-sm"
+          className="sig-field w-auto py-1.5 text-sm"
           value={tagFilter}
           onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setTagFilter(e.target.value)}
         >
@@ -186,7 +184,7 @@ export default function AlgorithmCollection() {
           {allTags.map((t) => <option key={t} value={t}>{t}</option>)}
         </select>
         <select
-          className="bg-card border border-border rounded-lg px-3 py-1.5 text-sm"
+          className="sig-field w-auto py-1.5 text-sm"
           value={sortBy}
           onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setSortBy(e.target.value)}
         >
@@ -305,7 +303,7 @@ export default function AlgorithmCollection() {
                     <Button variant="ghost" size="sm" className="h-7 px-2 text-dim" onClick={() => toggleExpand(item.id)}>
                       {expanded[item.id] ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                     </Button>
-                    <Button variant="ghost" size="sm" className="h-7 px-2 text-dim hover:text-red" onClick={() => handleDelete(item.id)}>
+                    <Button variant="ghost" size="sm" className="h-7 px-2 text-dim hover:text-[color:var(--sig-danger)]" onClick={() => handleDelete(item.id)}>
                       <Trash2 size={13} />
                     </Button>
                     <Button variant="ghost" size="sm" className="h-7 px-2 text-dim" onClick={() => handleExport("markdown", [item.id])}>
