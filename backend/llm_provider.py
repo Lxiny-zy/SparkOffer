@@ -48,14 +48,29 @@ def _normalize_proxy_url(proxy: str) -> str:
     return urlunparse(parsed._replace(netloc=new_netloc))
 
 
+_http_client_cache: dict[tuple, tuple[httpx.Client, httpx.AsyncClient]] = {}
+
+
 def _build_http_clients(proxy: str = "", *, timeout: httpx.Timeout | None = _LLM_TIMEOUT):
-    """Return (sync_client, async_client) with optional proxy (http/https/socks5)."""
+    """Return a cached (sync_client, async_client) pair keyed by (proxy, timeout).
+
+    httpx clients are designed to be long-lived and connection-pooled. Building a
+    fresh pair on every invoke/ainvoke/astream call (the previous behaviour) and
+    never closing them leaked sockets/file descriptors under sustained load.
+    """
+    timeout_key = None if timeout is None else (timeout.connect, timeout.read, timeout.write, timeout.pool)
+    cache_key = (proxy or "", timeout_key)
+    cached = _http_client_cache.get(cache_key)
+    if cached is not None:
+        return cached
     kw: dict = {"headers": _CUSTOM_HEADERS, "follow_redirects": True}
     if timeout:
         kw["timeout"] = timeout
     if proxy:
         kw["proxy"] = _normalize_proxy_url(proxy)
-    return httpx.Client(**kw), httpx.AsyncClient(**kw)
+    pair = (httpx.Client(**kw), httpx.AsyncClient(**kw))
+    _http_client_cache[cache_key] = pair
+    return pair
 
 
 # Status codes that indicate a deterministic config/request error — failing over
@@ -179,21 +194,32 @@ class ResilientChatModel:
         tried: set[str] = set()
         channel = get_channel("llm", tier=self._tier)
         while channel:
+            # Phase 1 — fetch the first chunk. Safe to fail over: nothing has been
+            # yielded to the client yet.
             try:
                 llm = self._make_and_bind(channel)
                 aiter = llm.astream(messages, **kwargs).__aiter__()
                 first_chunk = await aiter.__anext__()
+            except StopAsyncIteration:
+                # Empty stream — treat as a successful (empty) response.
                 report_success("llm", channel["id"])
-                yield first_chunk
-                async for chunk in aiter:
-                    yield chunk
                 return
             except Exception as e:
                 _reraise_if_fatal(e, channel)
-                logger.warning("LLM channel '%s' astream failed: %s", channel["name"], e)
+                logger.warning("LLM channel '%s' astream failed before first chunk: %s", channel["name"], e)
                 report_error("llm", channel["id"])
                 tried.add(channel["id"])
                 channel = get_next_channel("llm", tried, tier=self._tier)
+                continue
+            # Phase 2 — stream is committed. Once the first chunk is out we must NOT
+            # fail over: replaying the prompt on another channel would concatenate a
+            # fresh full answer onto the partial one already sent. Let any mid-stream
+            # error propagate to the caller instead.
+            report_success("llm", channel["id"])
+            yield first_chunk
+            async for chunk in aiter:
+                yield chunk
+            return
         raise RuntimeError("All LLM channels exhausted")
 
 

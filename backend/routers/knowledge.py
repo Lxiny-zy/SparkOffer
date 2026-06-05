@@ -15,6 +15,19 @@ router = APIRouter(prefix="/api")
 KNOWLEDGE_EXTS = (".md", ".txt", ".py")
 
 
+def _validate_filename(filename: str) -> str:
+    """Reject path-traversal / separators in a user-supplied filename.
+
+    The file endpoints join `filename` under a per-user topic dir; without this
+    a value like '../../../ai_config.json' would escape the user's knowledge
+    root and let an authenticated user read/write/delete arbitrary files.
+    """
+    name = (filename or "").strip()
+    if not name or name in (".", "..") or name != Path(name).name:
+        raise HTTPException(400, f"Invalid filename: {filename}")
+    return name
+
+
 def _glob_knowledge_files(topic_dir: Path) -> list[Path]:
     """Return all knowledge files sorted by name, matching KNOWLEDGE_EXTS."""
     if not topic_dir.exists():
@@ -70,6 +83,7 @@ async def update_core_knowledge(topic: str, filename: str, body: dict,
     topics = load_topics(user_id)
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
+    filename = _validate_filename(filename)
     topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
     filepath = topic_dir / filename
     if not filepath.exists():
@@ -86,6 +100,7 @@ async def delete_core_knowledge(topic: str, filename: str,
     topics = load_topics(user_id)
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
+    filename = _validate_filename(filename)
     topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
     filepath = topic_dir / filename
     if not filepath.exists():
@@ -105,6 +120,7 @@ async def create_core_knowledge(topic: str, body: dict,
     filename = body.get("filename", "").strip()
     if not filename or not any(filename.endswith(ext) for ext in KNOWLEDGE_EXTS):
         raise HTTPException(400, f"Filename must end with one of {', '.join(KNOWLEDGE_EXTS)}")
+    filename = _validate_filename(filename)
     topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
     topic_dir.mkdir(parents=True, exist_ok=True)
     filepath = topic_dir / filename

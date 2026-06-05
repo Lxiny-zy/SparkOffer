@@ -353,7 +353,10 @@ async def _answer_relevancy(answer: str, question: str, sem: asyncio.Semaphore) 
     if q_emb is None:
         return 0.0
     sims = [_cos(q_emb, emb_map.get(gq)) for gq in gen_qs]
-    sims = [s for s in sims if s > 0.0]
+    # Clamp negatives to 0 instead of dropping them: a generated question that is
+    # unrelated/opposite to the original (cosine <= 0) is a *low* relevancy signal,
+    # not an absent one. Dropping it inflated the mean.
+    sims = [max(0.0, s) for s in sims]
     if not sims:
         return 0.0
     return max(0.0, min(1.0, float(np.mean(sims))))

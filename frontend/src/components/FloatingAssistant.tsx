@@ -88,6 +88,8 @@ export default function FloatingAssistant() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const rafRef = useRef<number | null>(null);
   const isStreamingRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
   const navigate = useNavigate();
 
   // Detect mobile
@@ -96,6 +98,12 @@ export default function FloatingAssistant() {
     check();
     window.addEventListener("resize", check);
     return () => window.removeEventListener("resize", check);
+  }, []);
+
+  // Abort any in-flight assistant stream on unmount and block setState afterwards.
+  useEffect(() => () => {
+    mountedRef.current = false;
+    abortRef.current?.abort();
   }, []);
 
   // Load chat history & welcome message on first open
@@ -280,6 +288,10 @@ export default function FloatingAssistant() {
     setIsStreaming(true);
     isStreamingRef.current = true;
 
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     let assistantContent = "";
     let pendingUpdate = false;
     setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
@@ -298,7 +310,7 @@ export default function FloatingAssistant() {
     };
 
     try {
-      for await (const event of streamAssistantChat(text)) {
+      for await (const event of streamAssistantChat(text, controller.signal)) {
         if (event.type === "token") {
           assistantContent += event.content;
           if (!pendingUpdate) {
@@ -312,19 +324,25 @@ export default function FloatingAssistant() {
         }
       }
     } catch (err: any) {
-      assistantContent = `出错了: ${err.message}`;
+      if (!controller.signal.aborted) {
+        assistantContent = `出错了: ${err.message}`;
+      }
     } finally {
       if (rafRef.current) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
       }
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated[updated.length - 1] = { role: "assistant", content: assistantContent };
-        return updated;
-      });
-      isStreamingRef.current = false;
-      setIsStreaming(false);
+      // Skip state updates if the component unmounted or this stream was aborted.
+      if (mountedRef.current && !controller.signal.aborted) {
+        setMessages((prev) => {
+          const updated = [...prev];
+          updated[updated.length - 1] = { role: "assistant", content: assistantContent };
+          return updated;
+        });
+        isStreamingRef.current = false;
+        setIsStreaming(false);
+      }
+      if (abortRef.current === controller) abortRef.current = null;
     }
   };
 

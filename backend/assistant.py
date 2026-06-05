@@ -328,10 +328,10 @@ TOOLS = [
 async def _execute_tool(name: str, args: dict, user_id: str) -> dict:
     """Execute a tool and return the result."""
     if name == "navigate":
-        return {"action": "navigate", "path": args["path"]}
+        return {"action": "navigate", "path": args.get("path", "/")}
 
     elif name == "start_interview":
-        mode = args["mode"]
+        mode = args.get("mode")
         if mode in ("job_prep", "recording"):
             path = "/job-prep" if mode == "job_prep" else "/recording"
             return {"action": "navigate", "path": path}
@@ -382,7 +382,7 @@ async def _execute_tool(name: str, args: dict, user_id: str) -> dict:
         return {"data": f"收藏了 {len(favs)} 条:\n" + "\n".join(lines)}
 
     elif name == "get_session_detail":
-        session = get_session(args["session_id"], user_id=user_id)
+        session = get_session(args.get("session_id"), user_id=user_id)
         if not session:
             return {"data": "未找到该面试记录。"}
         lines = [f"面试详情 — {session.get('mode', '?')} | {session.get('topic', '-')} | {session.get('created_at', '?')[:10]}"]
@@ -635,7 +635,7 @@ async def _execute_tool(name: str, args: dict, user_id: str) -> dict:
         return {"data": "\n".join(lines)}
 
     elif name == "get_session_transcript":
-        session = get_session(args["session_id"], user_id=user_id)
+        session = get_session(args.get("session_id"), user_id=user_id)
         if not session:
             return {"data": "未找到该面试记录。"}
         transcript = session.get("transcript", [])
@@ -822,9 +822,19 @@ async def stream_assistant_chat(
         # 本轮的多个 tool_call 并发执行：每个工具都是独立的 async DB/向量/索引
         # 读取，无共享可变状态，墙钟时间从"各延迟之和"降到"取最大值"。结果按
         # 原顺序消费，保证 action 事件顺序确定、tool 消息与 tool_call_id 对齐。
-        results = await asyncio.gather(
-            *(_execute_tool(tc["name"], tc["args"], user_id) for tc in tool_calls)
+        # return_exceptions=True：单个工具抛错（如 LLM 给的参数缺字段）不应整轮
+        # 中断 SSE 流，转成错误结果后继续，前端仍能收到 done。
+        raw_results = await asyncio.gather(
+            *(_execute_tool(tc["name"], tc["args"], user_id) for tc in tool_calls),
+            return_exceptions=True,
         )
+        results = []
+        for tc, r in zip(tool_calls, raw_results):
+            if isinstance(r, Exception):
+                logger.warning("Assistant tool '%s' failed: %s", tc.get("name"), r)
+                results.append({"data": f"工具 {tc.get('name')} 执行失败，已跳过。"})
+            else:
+                results.append(r)
 
         for tc, result in zip(tool_calls, results):
             # If it's a frontend action, emit it

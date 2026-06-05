@@ -67,7 +67,9 @@ class SemanticDuplicateValidator:
                     if float(sims.max()) >= DUP_THRESHOLD:
                         bad_ids.append(q.get("id"))
                         reasons[q.get("id")] = "本题与最近 20 道历史题重复（cosine ≥ 0.9）。请改一道明显不同的题。"
-                        kept_embs.append(emb)
+                        # A rejected duplicate must NOT become a reference vector —
+                        # otherwise a later question gets compared against a question
+                        # we already threw away, corrupting the dedup decision.
                         continue
                 # Check against earlier questions in the same batch.
                 if kept_embs:
@@ -75,7 +77,6 @@ class SemanticDuplicateValidator:
                     if float(sims.max()) >= DUP_THRESHOLD:
                         bad_ids.append(q.get("id"))
                         reasons[q.get("id")] = "本题与同批早一题重复。请改成考察不同角度。"
-                        kept_embs.append(emb)
                         continue
                 kept_embs.append(emb)
 

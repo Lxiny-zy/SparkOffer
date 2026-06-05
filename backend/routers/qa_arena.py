@@ -36,7 +36,8 @@ def rename_session(session_id: str, body: dict, user_id: str = Depends(get_curre
     title = body.get("title", "").strip()
     if not title:
         raise HTTPException(400, "标题不能为空")
-    store.update_session_title(session_id, user_id, title)
+    if not store.update_session_title(session_id, user_id, title):
+        raise HTTPException(404, "会话不存在")
     return {"ok": True}
 
 

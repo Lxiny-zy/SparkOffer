@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 import weakref
 from pathlib import Path
@@ -29,6 +30,12 @@ _INDEX_CACHE_MAX_SIZE = 50
 
 _index_cache: dict[tuple[str, str], tuple[float, "VectorStoreIndex"]] = {}  # key -> (expire_time, index)
 
+# _index_cache is read/written from asyncio.to_thread workers AND from
+# gather_topic_contexts' ThreadPoolExecutor, so it is genuinely shared across
+# threads. Guard every access — an unlocked eviction scan racing a pop() raised
+# "dict changed size during iteration" / KeyError mid-retrieval.
+_index_cache_lock = threading.Lock()
+
 # Background rebuild lock — prevent concurrent rebuilds for the same (user, topic).
 # WeakValueDictionary so idle locks (no in-flight rebuild holding a reference) are
 # GC'd instead of accumulating one entry per (user, topic) forever.
@@ -37,34 +44,34 @@ _rebuild_locks: "weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock]" = w
 
 def _cache_get(key: tuple[str, str]) -> "VectorStoreIndex | None":
     """Get index from cache, returning None if expired or missing."""
-    entry = _index_cache.get(key)
-    if entry is None:
-        return None
-    expire_time, index = entry
-    if time.time() > expire_time:
-        _index_cache.pop(key, None)
-        return None
-    # Refresh TTL on access so a frequently-used index isn't evicted as the
-    # "oldest" entry by _cache_set — makes TTL time-since-last-use (true LRU).
-    # Reassigning an existing key doesn't change dict size, so this stays safe
-    # against the unlocked eviction scan in _cache_set.
-    _index_cache[key] = (time.time() + _INDEX_CACHE_TTL, index)
-    return index
+    with _index_cache_lock:
+        entry = _index_cache.get(key)
+        if entry is None:
+            return None
+        expire_time, index = entry
+        if time.time() > expire_time:
+            _index_cache.pop(key, None)
+            return None
+        # Refresh TTL on access so a frequently-used index isn't evicted as the
+        # "oldest" entry by _cache_set — makes TTL time-since-last-use (true LRU).
+        _index_cache[key] = (time.time() + _INDEX_CACHE_TTL, index)
+        return index
 
 
 def _cache_set(key: tuple[str, str], index: "VectorStoreIndex"):
     """Set index in cache with TTL. Evicts oldest if over max size."""
-    _index_cache[key] = (time.time() + _INDEX_CACHE_TTL, index)
-    if len(_index_cache) > _INDEX_CACHE_MAX_SIZE:
-        # Evict expired first
-        now = time.time()
-        expired = [k for k, (exp, _) in _index_cache.items() if now > exp]
-        for k in expired:
-            del _index_cache[k]
-        # If still over, evict oldest
+    with _index_cache_lock:
+        _index_cache[key] = (time.time() + _INDEX_CACHE_TTL, index)
         if len(_index_cache) > _INDEX_CACHE_MAX_SIZE:
-            oldest = min(_index_cache, key=lambda k: _index_cache[k][0])
-            del _index_cache[oldest]
+            # Evict expired first
+            now = time.time()
+            expired = [k for k, (exp, _) in _index_cache.items() if now > exp]
+            for k in expired:
+                del _index_cache[k]
+            # If still over, evict oldest
+            if len(_index_cache) > _INDEX_CACHE_MAX_SIZE:
+                oldest = min(_index_cache, key=lambda k: _index_cache[k][0])
+                del _index_cache[oldest]
 
 
 def load_topics(user_id: str) -> dict:

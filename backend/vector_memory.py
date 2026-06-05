@@ -225,7 +225,10 @@ def index_session_memory_sync(
 
 
 def _time_decay(created_at: str) -> float:
-    """Exponential time decay. Returns multiplier in [0.5, 1.0] range."""
+    """Exponential time decay. Returns a multiplier in (0.7, 1.0].
+
+    Blended as TIME_DECAY_WEIGHT * decay + (1 - TIME_DECAY_WEIGHT); with weight
+    0.3 the oldest items retain ~70% weight (the design's max 30% reduction)."""
     try:
         age = (datetime.now() - datetime.fromisoformat(created_at)).total_seconds() / 86400
     except (ValueError, TypeError):

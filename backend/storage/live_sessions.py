@@ -17,19 +17,23 @@ def save_live_session(session_id: str, session_type: str, user_id: str, data: di
     conn.commit()
 
 
-def load_live_session(session_id: str) -> dict | None:
+def load_live_session(session_id: str, user_id: str) -> dict | None:
     conn = get_db()
     row = conn.execute(
-        "SELECT data FROM live_sessions WHERE session_id = ?", (session_id,)
+        "SELECT data FROM live_sessions WHERE session_id = ? AND user_id = ?",
+        (session_id, user_id),
     ).fetchone()
     if row:
         return json.loads(row["data"])
     return None
 
 
-def delete_live_session(session_id: str):
+def delete_live_session(session_id: str, user_id: str):
     conn = get_db()
-    conn.execute("DELETE FROM live_sessions WHERE session_id = ?", (session_id,))
+    conn.execute(
+        "DELETE FROM live_sessions WHERE session_id = ? AND user_id = ?",
+        (session_id, user_id),
+    )
     conn.commit()
 
 

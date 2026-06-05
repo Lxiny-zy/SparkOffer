@@ -46,15 +46,24 @@ export async function withSSETimeout<T>(
 export async function* withSSETimeoutGen<T>(
   fn: (signal: AbortSignal) => AsyncGenerator<T>,
   timeoutMs = SSE_TIMEOUT_MS,
+  externalSignal?: AbortSignal,
 ): AsyncGenerator<T> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  // Let a caller-supplied signal (e.g. component unmount) also abort the fetch
+  // so the stream/connection is released immediately rather than on next chunk.
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", onExternalAbort);
+  }
   try {
     yield* fn(controller.signal);
   } catch (error: any) {
     throw _timeoutError(error, timeoutMs);
   } finally {
     clearTimeout(timeoutId);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
   }
 }
 

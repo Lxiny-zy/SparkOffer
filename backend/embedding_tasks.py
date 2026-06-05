@@ -8,7 +8,9 @@ Design goals:
 - Graceful degradation: failures are logged but never crash the main process
 """
 import asyncio
+import hashlib
 import logging
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -47,52 +49,75 @@ class EmbeddingCircuitBreaker:
         self._success_count = 0
         self._last_failure_time = 0.0
         self._half_open_calls = 0
+        # Counters are mutated from the worker loop AND from embedding worker
+        # threads (asyncio.to_thread); guard every transition so updates aren't
+        # lost and the breaker trips deterministically.
+        self._lock = threading.Lock()
 
-    @property
-    def state(self) -> CircuitState:
+    def _maybe_recover_locked(self) -> None:
+        """Promote OPEN → HALF_OPEN once the recovery window elapses. Caller holds _lock."""
         if self._state == CircuitState.OPEN:
             if time.time() - self._last_failure_time >= self.recovery_timeout:
                 self._state = CircuitState.HALF_OPEN
                 self._half_open_calls = 0
+                self._success_count = 0
                 logger.info("Embedding circuit breaker: OPEN → HALF_OPEN")
-        return self._state
+
+    @property
+    def state(self) -> CircuitState:
+        with self._lock:
+            self._maybe_recover_locked()
+            return self._state
 
     def can_execute(self) -> bool:
-        state = self.state
-        if state == CircuitState.CLOSED:
-            return True
-        if state == CircuitState.HALF_OPEN:
-            return self._half_open_calls < self.half_open_max_calls
-        return False  # OPEN
+        with self._lock:
+            self._maybe_recover_locked()
+            if self._state == CircuitState.CLOSED:
+                return True
+            if self._state == CircuitState.HALF_OPEN:
+                # Admit at most half_open_max_calls probe calls. Previously
+                # _half_open_calls was never incremented, so this throttle never
+                # fired and every caller flooded a still-recovering service.
+                if self._half_open_calls < self.half_open_max_calls:
+                    self._half_open_calls += 1
+                    return True
+                return False
+            return False  # OPEN
 
     def record_success(self):
-        if self._state == CircuitState.HALF_OPEN:
-            self._success_count += 1
-            if self._success_count >= self.half_open_max_calls:
-                self._state = CircuitState.CLOSED
-                self._failure_count = 0
-                self._success_count = 0
-                logger.info("Embedding circuit breaker: HALF_OPEN → CLOSED (recovered)")
-        else:
-            self._failure_count = max(0, self._failure_count - 1)
+        with self._lock:
+            if self._state == CircuitState.HALF_OPEN:
+                self._success_count += 1
+                if self._success_count >= self.half_open_max_calls:
+                    self._state = CircuitState.CLOSED
+                    self._failure_count = 0
+                    self._success_count = 0
+                    self._half_open_calls = 0
+                    logger.info("Embedding circuit breaker: HALF_OPEN → CLOSED (recovered)")
+            else:
+                self._failure_count = max(0, self._failure_count - 1)
 
     def record_failure(self):
-        self._failure_count += 1
-        self._last_failure_time = time.time()
-        if self._state == CircuitState.HALF_OPEN:
-            self._state = CircuitState.OPEN
-            logger.warning("Embedding circuit breaker: HALF_OPEN → OPEN (still failing)")
-        elif self._failure_count >= self.failure_threshold:
-            self._state = CircuitState.OPEN
-            logger.warning(
-                f"Embedding circuit breaker: CLOSED → OPEN "
-                f"(failures={self._failure_count}, threshold={self.failure_threshold})"
-            )
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = time.time()
+            if self._state == CircuitState.HALF_OPEN:
+                self._state = CircuitState.OPEN
+                self._half_open_calls = 0
+                logger.warning("Embedding circuit breaker: HALF_OPEN → OPEN (still failing)")
+            elif self._failure_count >= self.failure_threshold:
+                self._state = CircuitState.OPEN
+                logger.warning(
+                    f"Embedding circuit breaker: CLOSED → OPEN "
+                    f"(failures={self._failure_count}, threshold={self.failure_threshold})"
+                )
 
     def reset(self):
-        self._state = CircuitState.CLOSED
-        self._failure_count = 0
-        self._success_count = 0
+        with self._lock:
+            self._state = CircuitState.CLOSED
+            self._failure_count = 0
+            self._success_count = 0
+            self._half_open_calls = 0
 
 
 # Global circuit breaker instance
@@ -378,8 +403,10 @@ class EmbeddingTaskQueue:
             if task.retry_count < task.max_retries:
                 task.retry_count += 1
                 self._stats["retried"] += 1
-                # Exponential backoff: 2^retry * 2 seconds (2s, 4s, 8s)
-                backoff = min(2 ** task.retry_count * 2, 30)
+                # Exponential backoff: 2s, 4s, 8s. Computed from retry_count-1
+                # because retry_count was just incremented above (so the first
+                # retry waits 2s, not 4s).
+                backoff = min(2 ** (task.retry_count - 1) * 2, 30)
                 logger.warning(
                     f"Embedding task {task.task_id} failed (attempt {task.retry_count}/{task.max_retries}), "
                     f"retrying in {backoff}s: {e}"
@@ -488,7 +515,11 @@ def schedule_index_rebuild(topic: str, user_id: str, file_count: int = 0,
 
 def schedule_incremental_insert(topic: str, user_id: str, text: str):
     """Schedule an incremental index insert in background."""
-    task_id = f"insert:{user_id}:{topic}:{hash(text) % 10000}"
+    # Hash the full text (not hash(text) % 10000): the modulo bucketed distinct
+    # fragments into 10k slots, so two different texts for the same (user, topic)
+    # could collide and the second was silently dropped as a "duplicate".
+    text_key = hashlib.md5(text.encode("utf-8")).hexdigest()[:16]
+    task_id = f"insert:{user_id}:{topic}:{text_key}"
     _task_queue.submit(
         task_id,
         _do_incremental_insert,

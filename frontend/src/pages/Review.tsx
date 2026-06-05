@@ -1,5 +1,5 @@
 import { useParams, useLocation, useNavigate } from "react-router-dom";
-import { useState, useEffect, ReactNode } from "react";
+import { useState, useEffect, useRef, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { markdownComponents, remarkPlugins } from "../components/ChatBubble";
 import { BookOpen, BriefcaseBusiness, Sparkles, RefreshCw, Star } from "lucide-react";
@@ -883,9 +883,15 @@ export default function Review() {
   const [refAnswersCache, setRefAnswersCache] = useState<Record<string, string>>({});
   const [ragEvalMetrics, setRagEvalMetrics] = useState<RAGEvalMetrics | null>(stateData.ragEvalMetrics || null);
   const [loading, setLoading] = useState(!review && !scores);
+  // Fetch the review at most once per session. The effect's deps include
+  // review/scores, so an empty backend response for an in-progress session would
+  // otherwise let it re-fire getReview on every subsequent render.
+  const fetchedRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!review && !scores) {
+      if (fetchedRef.current === sessionId) return;
+      fetchedRef.current = sessionId;
       setLoading(true);
       getReview(sessionId)
         .then((data: any) => {

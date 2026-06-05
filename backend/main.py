@@ -36,6 +36,15 @@ async def lifespan(app: FastAPI):
             "Anyone can forge authentication tokens with the default secret."
         )
 
+    # Security check: warn if the default account password is unchanged
+    if settings.default_password == "legend":
+        logger.warning(
+            "⚠️  DEFAULT_PASSWORD is using the default value 'legend'! "
+            "The default account (%s) is loginable — set DEFAULT_PASSWORD in .env "
+            "for any non-local deployment.",
+            settings.default_email,
+        )
+
     emb_backend = get_effective("embedding", "backend") or settings.embedding_backend_mode()
     emb_model = get_effective("embedding", "api_model") or settings.active_embedding_target()
     logger.info("Initializing embedding backend=%s target=%s", emb_backend, emb_model)

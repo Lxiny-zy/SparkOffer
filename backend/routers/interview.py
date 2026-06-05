@@ -157,6 +157,7 @@ async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
     graph.update_state(config, {"messages": [HumanMessage(content=req.message)]})
 
     async def _gen():
+        result = None
         async for kind, value in stream_blocking_sse(
             graph.invoke, None, config,
             progress_msg="面试官正在思考",
@@ -168,6 +169,13 @@ async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
 
         append_message(req.session_id, "user", req.message, user_id=user_id)
 
+        # stream_blocking_sse yields no ("result", ...) tuple when the graph step
+        # errors (it emits an error event and returns). Bail out instead of
+        # dereferencing an unbound `result` and crashing the generator.
+        if result is None:
+            yield sse_event({"type": "done"})
+            return
+
         is_finished = False
         if isinstance(result, dict):
             is_finished = result.get("is_finished", False)
@@ -176,7 +184,7 @@ async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
                 is_finished = True
 
         ai_message = ""
-        for msg in reversed(result["messages"]):
+        for msg in reversed(result.get("messages", [])):
             if isinstance(msg, AIMessage):
                 ai_message = msg.content
                 break
@@ -194,7 +202,7 @@ async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
 async def end_interview(session_id: str, body: EndDrillRequest = None,
                         user_id: str = Depends(get_current_user)):
     # -- Drill mode --
-    entry = get_live(drill_sessions, session_id, "drill")
+    entry = get_live(drill_sessions, session_id, "drill", user_id)
     if entry:
         if entry.get("user_id") != user_id:
             raise HTTPException(403, "Access denied.")
@@ -301,7 +309,7 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                     update_weak_point_sr(topic, wp, sc, user_id, difficulty=s.get("difficulty", 3))
 
             await _update_drill_profile(topic, overall, scores, len(questions), user_id)
-            del_live(drill_sessions, session_id)
+            del_live(drill_sessions, session_id, user_id)
 
             try:
                 from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
@@ -324,7 +332,7 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         return streaming_response(_stream_drill())
 
     # -- JD prep mode --
-    entry = get_live(job_prep_sessions, session_id, "job_prep")
+    entry = get_live(job_prep_sessions, session_id, "job_prep", user_id)
     if entry:
         if entry.get("user_id") != user_id:
             raise HTTPException(403, "Access denied.")
@@ -358,7 +366,7 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             save_review(session_id, review, scores, overall.get("new_weak_points", []), overall, user_id=user_id)
 
             await _update_job_prep_profile(overall, scores, len(questions), meta, user_id)
-            del_live(job_prep_sessions, session_id)
+            del_live(job_prep_sessions, session_id, user_id)
 
             try:
                 from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
@@ -439,7 +447,7 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             resume_overall["avg_score"] = extraction["avg_score"]
         save_review(session_id, review_text, scores, weak_points, overall=resume_overall, user_id=user_id)
 
-        del_live(graphs, session_id)
+        del_live(graphs, session_id, user_id)
 
         try:
             from backend.knowledge_evolution import extract_and_writeback, collect_high_freq

@@ -106,10 +106,10 @@ def save_live(store: dict, session_id: str, session_type: str, user_id: str, dat
     save_live_session(session_id, session_type, user_id, persist_data)
 
 
-def get_live(store: dict, session_id: str, session_type: str):
+def get_live(store: dict, session_id: str, session_type: str, user_id: str):
     if session_id in store:
         return store[session_id]
-    data = load_live_session(session_id)
+    data = load_live_session(session_id, user_id)
     if data is None:
         return None
     if session_type == "algorithm" and "messages" in data:
@@ -121,6 +121,6 @@ def get_live(store: dict, session_id: str, session_type: str):
     return data
 
 
-def del_live(store: dict, session_id: str):
+def del_live(store: dict, session_id: str, user_id: str):
     store.pop(session_id, None)
-    delete_live_session(session_id)
+    delete_live_session(session_id, user_id)

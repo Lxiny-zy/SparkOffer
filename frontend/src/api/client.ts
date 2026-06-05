@@ -69,19 +69,28 @@ export async function* iterSSEFrames(res: Response): AsyncGenerator<any> {
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      try {
-        yield JSON.parse(line.slice(6));
-      } catch {
-        // skip malformed SSE frame
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          yield JSON.parse(line.slice(6));
+        } catch {
+          // skip malformed SSE frame
+        }
       }
     }
+  } finally {
+    // A consumer that `break`s out of the for-await loop (e.g. on a `done` event)
+    // triggers the generator's .return(), running this finally. Cancel the reader
+    // so the underlying fetch connection is released immediately instead of
+    // lingering until the server closes it (the backend keeps it alive with 30s
+    // heartbeats), which otherwise accumulates dangling connections.
+    reader.cancel().catch(() => {});
   }
 }

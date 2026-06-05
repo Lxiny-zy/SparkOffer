@@ -55,7 +55,7 @@ def algorithm_solve(req: AlgorithmSolveRequest, user_id: str = Depends(get_curre
 
 @router.post("/algorithm/chat")
 def algorithm_chat(req: AlgorithmChatRequest, user_id: str = Depends(get_current_user)):
-    session = get_live(algorithm_sessions, req.session_id, "algorithm")
+    session = get_live(algorithm_sessions, req.session_id, "algorithm", user_id)
     if not session or session["user_id"] != user_id:
         raise HTTPException(404, "Algorithm session not found.")
 
@@ -82,7 +82,7 @@ def algorithm_chat(req: AlgorithmChatRequest, user_id: str = Depends(get_current
 
 @router.post("/algorithm/save")
 def algorithm_save(req: AlgorithmSaveRequest, user_id: str = Depends(get_current_user)):
-    session = get_live(algorithm_sessions, req.session_id, "algorithm")
+    session = get_live(algorithm_sessions, req.session_id, "algorithm", user_id)
     if not session or session["user_id"] != user_id:
         raise HTTPException(404, "Algorithm session not found.")
 

@@ -97,12 +97,16 @@ export default function QAArena() {
     if (activeId) inputRef.current?.focus();
   }, [activeId]);
 
+  const switchReqRef = useRef<string | null>(null);
   const switchSession = useCallback(async (id: string) => {
+    switchReqRef.current = id;
     setActiveId(id);
     setSummaryResult(null);
     setShowSummary(false);
     const msgs = await loadQAMessages(id);
-    setMessages(msgs);
+    // Guard against out-of-order responses: if the user switched again while this
+    // load was in flight, don't clobber the newer session's messages.
+    if (switchReqRef.current === id) setMessages(msgs);
   }, []);
 
   const handleNewSession = async () => {

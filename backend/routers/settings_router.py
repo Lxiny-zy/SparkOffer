@@ -8,19 +8,19 @@ from backend.models import (
     TestASRRequest, TestQiniuRequest,
     ChannelsConfig, TestChannelRequest,
 )
-from backend.auth import get_current_user
+from backend.auth import require_owner
 
 router = APIRouter(prefix="/api")
 
 
 @router.get("/settings/ai")
-def get_ai_settings(user_id: str = Depends(get_current_user)):
+def get_ai_settings(user_id: str = Depends(require_owner)):
     from backend.ai_config import get_all_effective
     return get_all_effective()
 
 
 @router.put("/settings/ai")
-def update_ai_settings(req: AIConfigUpdate, user_id: str = Depends(get_current_user)):
+def update_ai_settings(req: AIConfigUpdate, user_id: str = Depends(require_owner)):
     from backend.ai_config import save_ai_config
     from backend.llm_provider import invalidate_singletons
 
@@ -32,7 +32,7 @@ def update_ai_settings(req: AIConfigUpdate, user_id: str = Depends(get_current_u
 
 
 @router.post("/settings/ai/test/llm")
-async def test_llm_connection(req: TestLLMRequest, user_id: str = Depends(get_current_user)):
+async def test_llm_connection(req: TestLLMRequest, user_id: str = Depends(require_owner)):
     try:
         from langchain_openai import ChatOpenAI
         from backend.llm_provider import _resolve_reasoning_effort
@@ -58,7 +58,7 @@ async def test_llm_connection(req: TestLLMRequest, user_id: str = Depends(get_cu
 
 
 @router.post("/settings/ai/test/embedding")
-async def test_embedding_connection(req: TestEmbeddingRequest, user_id: str = Depends(get_current_user)):
+async def test_embedding_connection(req: TestEmbeddingRequest, user_id: str = Depends(require_owner)):
     try:
         if req.backend == "api":
             from llama_index.embeddings.openai import OpenAIEmbedding
@@ -79,7 +79,7 @@ async def test_embedding_connection(req: TestEmbeddingRequest, user_id: str = De
 
 
 @router.post("/settings/ai/test/asr")
-def test_asr_connection(req: TestASRRequest, user_id: str = Depends(get_current_user)):
+def test_asr_connection(req: TestASRRequest, user_id: str = Depends(require_owner)):
     import requests as _requests
     try:
         resp = _requests.get(
@@ -95,7 +95,7 @@ def test_asr_connection(req: TestASRRequest, user_id: str = Depends(get_current_
 
 
 @router.post("/settings/ai/test/qiniu")
-def test_qiniu_connection(req: TestQiniuRequest, user_id: str = Depends(get_current_user)):
+def test_qiniu_connection(req: TestQiniuRequest, user_id: str = Depends(require_owner)):
     try:
         from qiniu import Auth as QiniuAuth
         q = QiniuAuth(req.access_key, req.secret_key)
@@ -110,7 +110,7 @@ def test_qiniu_connection(req: TestQiniuRequest, user_id: str = Depends(get_curr
 # ── Multi-Channel Endpoints ──
 
 @router.get("/settings/ai/channels")
-def get_channels_config(user_id: str = Depends(get_current_user)):
+def get_channels_config(user_id: str = Depends(require_owner)):
     from backend.ai_config import get_channels
     from backend.channel_manager import get_health
 
@@ -123,7 +123,7 @@ def get_channels_config(user_id: str = Depends(get_current_user)):
 
 
 @router.put("/settings/ai/channels")
-def update_channels_config(req: ChannelsConfig, user_id: str = Depends(get_current_user)):
+def update_channels_config(req: ChannelsConfig, user_id: str = Depends(require_owner)):
     from backend.ai_config import save_channels
     from backend.llm_provider import invalidate_singletons
 
@@ -146,7 +146,7 @@ def update_channels_config(req: ChannelsConfig, user_id: str = Depends(get_curre
 
 
 @router.post("/settings/ai/channels/test")
-async def test_channel(req: TestChannelRequest, user_id: str = Depends(get_current_user)):
+async def test_channel(req: TestChannelRequest, user_id: str = Depends(require_owner)):
     ch = req.channel
     section = req.section
 
@@ -248,7 +248,7 @@ async def test_channel(req: TestChannelRequest, user_id: str = Depends(get_curre
 
 
 @router.get("/settings/ai/channels/health")
-def get_channels_health(user_id: str = Depends(get_current_user)):
+def get_channels_health(user_id: str = Depends(require_owner)):
     from backend.channel_manager import get_health
     return {
         "llm": get_health("llm"),

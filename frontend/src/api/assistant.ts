@@ -40,13 +40,13 @@ export async function fetchWelcomeMessage(): Promise<string | null> {
  * Stream assistant chat via SSE.
  * Yields parsed events: { type: "token"|"action"|"done", ... }
  */
-export function streamAssistantChat(message: string): AsyncGenerator<any> {
-  return withSSETimeoutGen(async function* (signal) {
+export function streamAssistantChat(message: string, signal?: AbortSignal): AsyncGenerator<any> {
+  return withSSETimeoutGen(async function* (innerSignal) {
     const res = await fetch(`${API_BASE}/assistant/chat`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ message }),
-      signal,
+      signal: innerSignal,
     });
 
     if (handleStreamUnauthorized(res)) {
@@ -58,5 +58,5 @@ export function streamAssistantChat(message: string): AsyncGenerator<any> {
     }
 
     yield* iterSSEFrames(res);
-  });
+  }, undefined, signal);
 }

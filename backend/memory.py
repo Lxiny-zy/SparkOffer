@@ -5,6 +5,7 @@
 - 两阶段提取（Mem0）：Extract → Update，不无脑追加
 - 向量召回（embedding）：语义搜索历史洞察
 """
+import copy
 import json
 import logging
 import os
@@ -163,7 +164,11 @@ def _load_profile(user_id: str) -> dict:
         path = _profile_path(user_id)
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
-        return DEFAULT_PROFILE.copy()
+        # deepcopy, not .copy(): a shallow copy shares DEFAULT_PROFILE's nested
+        # lists/dicts (weak_points, strong_points, topic_mastery, ...). Mutating a
+        # new user's profile would then leak into the global default and bleed
+        # into the next new user's "empty" profile.
+        return copy.deepcopy(DEFAULT_PROFILE)
 
 
 def _save_profile(profile: dict, user_id: str):
@@ -434,8 +439,11 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str):
     for op in ops.get("weak_point_ops", []):
         action = op.get("action", "NOOP")
         if action == "ADD":
+            point = op.get("point")
+            if not point:
+                continue
             weak_points.append({
-                "point": op["point"],
+                "point": point,
                 "topic": op.get("topic", topic or ""),
                 "first_seen": now, "last_seen": now,
                 "times_seen": 1, "improved": False,
@@ -752,14 +760,13 @@ async def update_profile_after_interview(
     ])
 
     try:
-        content = response.content.strip()
-        if "```" in content:
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-        extraction = json.loads(content)
-    except (json.JSONDecodeError, IndexError):
+        # Reuse the hardened parser (handles raw JSON, ```json fences, and
+        # leading prose) instead of a fragile split("```")[1] that breaks on
+        # unfenced output and silently discarded the whole session's signal.
+        extraction = _parse_json_safe(response.content)
+        if not isinstance(extraction, dict):
+            raise ValueError("extraction is not a JSON object")
+    except (json.JSONDecodeError, ValueError):
         extraction = {"session_summary": "提取失败", "weak_points": [], "strong_points": []}
 
     # ── Stage 2: LLM-based Update (Mem0 style) ──
