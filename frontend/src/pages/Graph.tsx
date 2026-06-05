@@ -114,7 +114,10 @@ export default function Graph() {
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
-      <h1 className="text-2xl md:text-[28px] font-display font-bold mb-6 animate-fade-in aurora-text">题目图谱</h1>
+      <div className="mb-6 animate-fade-in">
+        <div className="sig-kicker mb-2">// 能力星图 / KNOWLEDGE GRAPH</div>
+        <h1 className="sig-display text-2xl md:text-[28px]">能力星图<span className="sig-accent-c">.</span></h1>
+      </div>
 
       <div className="flex flex-wrap gap-2 mb-6 animate-fade-in-up">
         {topicEntries.map(([key, info]) => (
@@ -122,7 +125,7 @@ export default function Graph() {
             key={key}
             variant={selectedTopic === key ? "secondary" : "ghost"}
             size="sm"
-            className={selectedTopic === key ? "border-primary border" : ""}
+            style={selectedTopic === key ? { borderColor: "var(--sig-accent)", borderWidth: 1, borderStyle: "solid" } : undefined}
             onClick={() => handleSelectTopic(key)}
           >
             <span className="inline-flex align-middle mr-1">{getTopicIcon(info.icon, 14)}</span>{info.name}
@@ -211,13 +214,13 @@ export default function Graph() {
       {selectedTopic && graphData && graphData.nodes.length > 0 && (
         <div className="flex items-center gap-5 mt-4 text-[13px] text-dim animate-fade-in">
           {[
-            { color: "bg-green", label: "8+" },
-            { color: "bg-primary", label: "6-8" },
-            { color: "bg-orange", label: "4-6" },
-            { color: "bg-red", label: "<4" },
+            { color: "#22C55E", label: "8+" },
+            { color: "#FBBF24", label: "6-8" },
+            { color: "#FB923C", label: "4-6" },
+            { color: "#EF4444", label: "<4" },
           ].map((item) => (
             <div key={item.label} className="flex items-center gap-1.5">
-              <span className={cn("w-2.5 h-2.5 rounded-full inline-block", item.color)} />
+              <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: item.color }} />
               <span>{item.label}</span>
             </div>
           ))}

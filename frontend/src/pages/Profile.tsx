@@ -82,7 +82,7 @@ export default function Profile() {
   if (!hasData) {
     return (
       <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
-        <div className="text-2xl md:text-[28px] font-display font-bold mb-2 animate-fade-in">个人画像</div>
+        <h1 className="sig-display text-2xl md:text-[28px] mb-2 animate-fade-in">成长报告<span className="sig-accent-c">.</span></h1>
         <div className="text-center py-15 text-dim animate-fade-in-up">
           <p>还没有面试数据</p>
           <p className="mt-3 text-sm">开始面试后，系统会实时分析你的每个回答，自动构建你的能力画像</p>
@@ -100,9 +100,11 @@ export default function Profile() {
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
-      <div className="flex items-center justify-between mb-2 animate-fade-in relative">
-        <div className="absolute -top-8 -left-6 w-[200px] h-[140px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
-        <div className="text-2xl md:text-[32px] font-display font-bold aurora-text relative">成长报告</div>
+      <div className="flex items-center justify-between mb-2 animate-fade-in">
+        <div>
+          <div className="sig-kicker mb-2">// 成长报告 / PROFILE</div>
+          <h1 className="sig-display text-2xl md:text-[32px]">成长报告<span className="sig-accent-c">.</span></h1>
+        </div>
         <Button
           variant="outline"
           size="sm"
@@ -136,60 +138,60 @@ export default function Profile() {
           练习统计
         </div>
         <div className="grid grid-cols-2 gap-3 mb-3">
-          <Card className="stat-card-gradient card-hover-lift">
+          <Card hoverLift>
             <CardContent className="p-4 text-center">
-              <div className="text-[28px] font-bold text-primary score-emphasis">{stats.total_sessions}</div>
+              <div className="text-[28px] sig-stat text-primary">{stats.total_sessions}</div>
               <div className="text-xs text-dim mt-1">总练习次数</div>
             </CardContent>
           </Card>
-          <Card className="stat-card-gradient card-hover-lift">
+          <Card hoverLift>
             <CardContent className="p-4 text-center">
-              <div className="text-[32px] font-bold text-green score-emphasis">{stats.avg_score || "-"}</div>
+              <div className="text-[32px] sig-stat text-green">{stats.avg_score || "-"}</div>
               <div className="text-xs text-dim mt-1">综合平均分</div>
             </CardContent>
           </Card>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <Card className="border-l-[3px] border-l-primary card-hover-lift">
+          <Card hoverLift className="border-l-[3px] border-l-primary">
             <CardContent className="p-3.5">
               <div className="text-[13px] font-semibold text-primary mb-2.5">简历面试</div>
               <div className="flex gap-3">
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-primary score-emphasis">{stats.resume_sessions || 0}</div>
+                  <div className="text-[22px] sig-stat text-primary">{stats.resume_sessions || 0}</div>
                   <div className="text-[11px] text-dim mt-0.5">次数</div>
                 </div>
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-primary score-emphasis" style={{animationDelay: "0.1s"}}>{stats.resume_avg_score ?? "-"}</div>
+                  <div className="text-[22px] sig-stat text-primary">{stats.resume_avg_score ?? "-"}</div>
                   <div className="text-[11px] text-dim mt-0.5">平均分</div>
                 </div>
               </div>
             </CardContent>
           </Card>
-          <Card className="border-l-[3px] border-l-green card-hover-lift">
+          <Card hoverLift className="border-l-[3px] border-l-green">
             <CardContent className="p-3.5">
               <div className="text-[13px] font-semibold text-green mb-2.5">专项训练</div>
               <div className="flex gap-3">
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-green score-emphasis">{stats.drill_sessions || 0}</div>
+                  <div className="text-[22px] sig-stat text-green">{stats.drill_sessions || 0}</div>
                   <div className="text-[11px] text-dim mt-0.5">次数</div>
                 </div>
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-green score-emphasis" style={{animationDelay: "0.1s"}}>{stats.drill_avg_score ?? "-"}</div>
+                  <div className="text-[22px] sig-stat text-green">{stats.drill_avg_score ?? "-"}</div>
                   <div className="text-[11px] text-dim mt-0.5">平均分</div>
                 </div>
               </div>
             </CardContent>
           </Card>
-          <Card className="border-l-[3px] border-l-tertiary card-hover-lift">
+          <Card hoverLift className="border-l-[3px] border-l-tertiary">
             <CardContent className="p-3.5">
               <div className="text-[13px] font-semibold text-tertiary mb-2.5">JD 备面</div>
               <div className="flex gap-3">
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-tertiary score-emphasis">{stats.job_prep_sessions || 0}</div>
+                  <div className="text-[22px] sig-stat text-tertiary">{stats.job_prep_sessions || 0}</div>
                   <div className="text-[11px] text-dim mt-0.5">次数</div>
                 </div>
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] font-bold text-tertiary score-emphasis" style={{animationDelay: "0.1s"}}>{stats.job_prep_avg_score ?? "-"}</div>
+                  <div className="text-[22px] sig-stat text-tertiary">{stats.job_prep_avg_score ?? "-"}</div>
                   <div className="text-[11px] text-dim mt-0.5">平均分</div>
                 </div>
               </div>
@@ -274,17 +276,8 @@ export default function Profile() {
                       <span className="font-semibold text-primary">{data.score ?? (data.level ? data.level * 20 : 0)}</span>/100 <ChevronRight size={14} />
                     </span>
                   </div>
-                  <div className="h-2 rounded-full bg-border/50 overflow-hidden relative">
-                    <div
-                      className="h-full rounded-full transition-[width] duration-700 ease-[cubic-bezier(0.2,0,0,1)] relative overflow-hidden"
-                      style={{
-                        width: `${data.score ?? (data.level ? data.level * 20 : 0)}%`,
-                        background: "linear-gradient(90deg, var(--aurora-1), var(--aurora-2))",
-                        boxShadow: "0 0 8px var(--tech-glow)",
-                      }}
-                    >
-                      <div className="absolute inset-0 opacity-40" style={{ background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)", backgroundSize: "200% 100%", animation: "text-shimmer 3s ease-in-out infinite" }} />
-                    </div>
+                  <div className="sig-progress">
+                    <div className="sig-progress-fill" style={{ width: `${data.score ?? (data.level ? data.level * 20 : 0)}%` }} />
                   </div>
                   {data.notes && <div className="text-xs text-dim mt-1.5">{data.notes}</div>}
                 </CardContent>

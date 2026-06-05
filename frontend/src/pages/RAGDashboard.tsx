@@ -76,8 +76,8 @@ function GenTrendTooltip({ active, payload }: { active?: boolean; payload?: any[
       <div className="font-medium">{d.date}</div>
       <div className="text-dim">{d.topic}</div>
       <div className="mt-1 space-y-0.5">
-        {d.faithfulness != null && <div style={{ color: "#60a5fa" }}>忠实度: {fmtPct01(d.faithfulness)}</div>}
-        {d.answer_relevance != null && <div style={{ color: "#a78bfa" }}>切题度: {fmtPct01(d.answer_relevance)}</div>}
+        {d.faithfulness != null && <div style={{ color: "var(--sig-chart-2)" }}>忠实度: {fmtPct01(d.faithfulness)}</div>}
+        {d.answer_relevance != null && <div style={{ color: "var(--sig-chart-1)" }}>切题度: {fmtPct01(d.answer_relevance)}</div>}
         {d.correctness != null && <div style={{ color: "var(--primary)" }}>综合: {fmtPct01(d.correctness)}</div>}
       </div>
     </div>
@@ -271,7 +271,10 @@ export default function RAGDashboard() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <BarChart3 size={22} className="text-primary" />
-          <h1 className="text-2xl font-display font-bold">RAG 质量仪表盘</h1>
+          <div>
+            <div className="sig-kicker mb-1">// RAG 质量 / RAG QUALITY</div>
+            <h1 className="sig-display text-2xl">RAG 仪表盘<span className="sig-accent-c">.</span></h1>
+          </div>
         </div>
         <Button variant="outline" size="sm" onClick={loadData} className="gap-1.5">
           <RefreshCw size={14} /> 刷新
@@ -363,7 +366,7 @@ export default function RAGDashboard() {
           )}
 
           {evalError && (
-            <div className="flex items-start gap-2 text-xs text-red-500 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+            <div className="flex items-start gap-2 text-xs rounded-md px-3 py-2" style={{ color: "var(--sig-danger)", background: "color-mix(in srgb, var(--sig-danger) 10%, transparent)", border: "1px solid color-mix(in srgb, var(--sig-danger) 20%, transparent)" }}>
               <AlertTriangle size={14} className="shrink-0 mt-0.5" />
               <span>{evalError}</span>
             </div>
@@ -457,7 +460,7 @@ export default function RAGDashboard() {
                       <YAxis tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <Tooltip />
                       <Bar dataKey="excellent" stackId="a" fill="var(--green)" name="优秀 (>=70%)" radius={[0, 0, 0, 0]} />
-                      <Bar dataKey="good" stackId="a" fill="#60a5fa" name="良好 (50-70%)" />
+                      <Bar dataKey="good" stackId="a" fill="var(--sig-chart-2)" name="良好 (50-70%)" />
                       <Bar dataKey="fair" stackId="a" fill="var(--warning)" name="一般 (30-50%)" />
                       <Bar dataKey="poor" stackId="a" fill="var(--red)" name="差 (<30%)" radius={[4, 4, 0, 0]} />
                     </BarChart>
@@ -478,8 +481,8 @@ export default function RAGDashboard() {
                       <XAxis dataKey="date" tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <YAxis domain={[0, 1]} tickFormatter={(v: number) => `${Math.round(v * 100)}%`} tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <Tooltip content={<GenTrendTooltip />} />
-                      <Line type="monotone" dataKey="faithfulness" stroke="#60a5fa" strokeWidth={2} dot={false} name="忠实度" />
-                      <Line type="monotone" dataKey="answer_relevance" stroke="#a78bfa" strokeWidth={1.5} dot={false} name="切题度" />
+                      <Line type="monotone" dataKey="faithfulness" stroke="var(--sig-chart-2)" strokeWidth={2} dot={false} name="忠实度" />
+                      <Line type="monotone" dataKey="answer_relevance" stroke="var(--sig-chart-1)" strokeWidth={1.5} dot={false} name="切题度" />
                       <Line type="monotone" dataKey="correctness" stroke="var(--primary)" strokeWidth={1.5} dot={false} name="综合质量" />
                     </LineChart>
                   </ResponsiveContainer>

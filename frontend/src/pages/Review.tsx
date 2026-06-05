@@ -76,7 +76,7 @@ function HeroOverview({ eyebrow, title, subtitle, summary, avgScore, rightExtra,
   const accentVar = accent === "tertiary" ? "var(--tertiary)" : "var(--primary)";
 
   return (
-    <Card className="mb-6 stat-card-gradient relative overflow-hidden card-hover-lift animate-fade-in-up">
+    <Card className="mb-6 relative overflow-hidden animate-fade-in-up" hoverLift>
       {/* 装饰光斑 */}
       <div
         className="absolute -top-20 -right-20 w-[300px] h-[300px] rounded-full pointer-events-none opacity-30"
@@ -144,7 +144,7 @@ function StatStrip({ items }: StatStripProps) {
       {items.map((it, i) => (
         <div
           key={i}
-          className="rounded-2xl bg-card/60 border border-border/50 px-4 py-3 hover:border-primary/30 transition-colors animate-fade-in-up"
+          className="sig-card px-4 py-3 hover:border-[color:var(--sig-line-2)] transition-colors animate-fade-in-up"
           style={{ animationDelay: `${i * 0.05}s` }}
         >
           <div className="text-[10px] uppercase tracking-widest text-dim/70 mb-1">{it.label}</div>
@@ -202,7 +202,7 @@ function TimelineNode({ index, score, isSkipped, isLast, children }: TimelineNod
         <span className="text-[9px] font-mono text-dim/60 tracking-wider">Q{String(index).padStart(2, "0")}</span>
       </div>
       {/* 内容卡 */}
-      <div className={cn("rounded-2xl transition-colors", isSkipped ? "opacity-60" : "")}>
+      <div className={cn("rounded-lg transition-colors", isSkipped ? "opacity-60" : "")}>
         {children}
       </div>
     </div>
@@ -247,7 +247,7 @@ function DimensionScores({ dimensionScores, avgScore, labels }: DimensionScoresP
   if (!entries.length) return null;
 
   return (
-    <Card className="mb-6 card-hover-lift">
+    <Card className="mb-6" hoverLift>
       <CardContent className="p-5 md:p-7">
         <div className="text-lg font-semibold mb-4 heading-underline">
           维度评分
@@ -584,7 +584,7 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
                   </CardContent>
                 </Card>
               ) : (
-                <Card className="animate-fade-in card-hover-lift">
+                <Card className="animate-fade-in" hoverLift>
                   <CardContent className="p-4 md:p-5">
                     <QMetaRow parts={[q.focus_area, q.difficulty ? `难度 ${q.difficulty}/5` : null]} />
                     {/* L2 焦点：题目 */}
@@ -966,17 +966,14 @@ export default function Review() {
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
-      <div className="mb-8 animate-fade-in relative">
-        <div className="absolute -top-8 -left-8 w-[200px] h-[200px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(circle, var(--glow-accent), transparent 70%)" }} />
-        <div className="relative">
-          <div className="flex items-center gap-2 mb-2">
-            {isJobPrep && <BriefcaseBusiness size={18} className="text-tertiary" />}
-            {showDrill && !isJobPrep && !isRecording && <Sparkles size={18} className="text-primary" />}
-            {isRecording && <BookOpen size={18} className="text-primary" />}
-            <div className="text-2xl md:text-[28px] font-display font-bold">{title}</div>
-          </div>
-          <div className="text-sm text-dim">Session: {sessionId}</div>
+      <div className="mb-8 animate-fade-in">
+        <div className="flex items-center gap-2 mb-2">
+          {isJobPrep && <BriefcaseBusiness size={18} className="text-tertiary" />}
+          {showDrill && !isJobPrep && !isRecording && <Sparkles size={18} className="text-primary" />}
+          {isRecording && <BookOpen size={18} className="text-primary" />}
+          <h1 className="sig-display text-2xl md:text-[28px]">{title}<span className="sig-accent-c">.</span></h1>
         </div>
+        <div className="text-sm text-dim sig-num">Session: {sessionId}</div>
       </div>
 
       <div className="stagger-children">
