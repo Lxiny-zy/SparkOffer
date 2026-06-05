@@ -10,13 +10,13 @@ answer_relevancy / answer_correctness。
 safe_retrieve_*，嵌入走缓存批量 _embed_many，LLM 只用 .ainvoke。
 
 每题流程（k 默认 8）：
-  检索 top-k → gold 匹配定 rank（hit@k/mrr）→ context_precision →
-  context_recall(LLM) → 生成候选答案(LLM) → faithfulness(LLM) →
-  answer_relevancy(LLM+嵌入) → answer_correctness(嵌入)
+  检索 top-(k+margin) → gold 匹配定 rank（hit@k/mrr）→ 留一法泛化命中（剔源 chunk
+  后答案是否仍被覆盖）→ context_precision → context_recall(LLM) → 生成候选答案(LLM)
+  → faithfulness(LLM) → answer_relevancy(LLM+嵌入) → answer_correctness(LLM 对照参考答案)
 
 judge_mode:
-  "standard"  context_precision 用嵌入锚定（cosine vs 参考答案），其余生成侧 LLM 评判。~5 次 LLM/题。
-  "full"      context_precision 改为逐 chunk LLM 判定。~13 次 LLM/题。
+  "standard"  context_precision 用嵌入锚定（cosine vs 参考答案），其余生成侧 LLM 评判。~6 次 LLM/题。
+  "full"      context_precision 改为逐 chunk LLM 判定。~14 次 LLM/题。
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ import numpy as np
 from langchain_core.messages import HumanMessage
 
 from backend.vector_store.base import _cosine_similarity
-from backend.rag_metrics import _average_precision, _embed_unique, RELEVANCE_THRESHOLD
+from backend.rag_metrics import _average_precision, _embed_unique
 from backend.indexer import (
     safe_retrieve_topic_context_with_scores, get_topic_map, _build_nodes,
 )
@@ -39,6 +39,7 @@ from backend.llm_provider import get_langchain_llm
 from backend.prompts.rag_eval import (
     GOLDEN_SYNTH_PROMPT, CONTEXT_RECALL_PROMPT, FAITHFULNESS_PROMPT,
     ANSWER_RELEVANCY_PROMPT, CANDIDATE_ANSWER_PROMPT, CONTEXT_PRECISION_PROMPT,
+    ANSWER_CORRECTNESS_PROMPT,
 )
 from backend.prompts._common import JSON_OUTPUT_DISCIPLINE
 
@@ -49,6 +50,11 @@ _RELEVANCY_QUESTIONS = 3      # answer_relevancy 反向生成的问题数
 _GOLD_MATCH_COSINE = 0.90     # gold↔检索 chunk 的内容兜底匹配阈值
 _TRIVIAL_HIT_COSINE = 0.97    # 命中 chunk 与 gold 源文几乎相同 → 送分自命中
 _MIN_CHUNK_CHARS = 80         # 太短的 chunk 不适合合成问题
+_LOO_MARGIN = 3               # 检索 top-(k+margin)，留一法剔除源 chunk 后仍留 k 个候选
+_LOO_SUPPORT_FLOOR = 0.5      # 留一命中：非源片段与参考答案余弦 ≥ 此值即视为「仍覆盖」
+# context_precision(embedding 模式) 的相关阈值。旧版借用 relevance 的 0.5，对「短参考
+# 答案 vs 长 chunk」的余弦过严，AP 常塌底。0.35 更贴合该分布。
+PRECISION_REL_FLOOR = 0.35
 
 # faithfulness / context_recall 的支撑分档权重。旧版用 supported 布尔，把"沾边"
 # 也算满分，导致比率天然偏高。三档加权消除这种乐观偏差。
@@ -84,6 +90,7 @@ class QuestionResult:
     rank: int | None
     hit: int
     trivial_hit: bool
+    loo_hit: int            # leave-one-out 泛化命中：剔除源 chunk 后答案是否仍被覆盖
     context_precision: float
     context_recall: float | None
     faithfulness: float
@@ -102,6 +109,7 @@ class QuestionResult:
             "rank": self.rank,
             "hit": self.hit,
             "trivial_hit": self.trivial_hit,
+            "loo_hit": self.loo_hit,
             "context_precision": r(self.context_precision),
             "context_recall": r(self.context_recall),
             "faithfulness": r(self.faithfulness),
@@ -279,6 +287,39 @@ async def _match_gold(gold: GoldItem, retrieved: list) -> tuple[int | None, str,
     return None, "miss", False
 
 
+async def _leave_one_out_hit(gold: GoldItem, retrieved_ext: list, k: int) -> int:
+    """Leave-one-out 泛化命中（纯嵌入，无额外 LLM）。
+
+    把 gold 自己的源 chunk 从检索结果里剔除，取剩余前 k 个，判断参考答案是否仍被
+    某个「非源」片段覆盖（cosine ≥ _LOO_SUPPORT_FLOOR）。衡量冗余度 / 真泛化——
+    系统能否在不依赖那段原文的情况下仍召回答案。替代旧的「排除自命中」严格命中
+    （对 1:1 自合成 golden 集结构性恒为 0）。
+    """
+    if not retrieved_ext:
+        return 0
+    emb_map = await _embed_unique(
+        [gold.content, gold.reference_answer] + [c.content for c in retrieved_ext]
+    )
+    ref_emb = emb_map.get(gold.reference_answer)
+    if ref_emb is None:
+        return 0
+    gold_emb = emb_map.get(gold.content)
+
+    def _is_source(c) -> bool:
+        if gold.source_file and gold.header_path \
+           and c.source_file == gold.source_file and c.header_path == gold.header_path:
+            return True
+        if gold_emb is not None and _cos(gold_emb, emb_map.get(c.content)) >= _TRIVIAL_HIT_COSINE:
+            return True
+        return False
+
+    survivors = [c for c in retrieved_ext if not _is_source(c)][:k]
+    for c in survivors:
+        if _cos(ref_emb, emb_map.get(c.content)) >= _LOO_SUPPORT_FLOOR:
+            return 1
+    return 0
+
+
 async def _precision_embedding(gold: GoldItem, retrieved: list) -> float:
     if not retrieved:
         return 0.0
@@ -287,7 +328,7 @@ async def _precision_embedding(gold: GoldItem, retrieved: list) -> float:
     if ref_emb is None:
         return 0.0
     scores = [_cos(ref_emb, emb_map.get(c.content)) for c in retrieved]
-    return _average_precision(scores, RELEVANCE_THRESHOLD)
+    return _average_precision(scores, PRECISION_REL_FLOOR)
 
 
 async def _precision_llm(gold: GoldItem, retrieved: list, sem: asyncio.Semaphore) -> float:
@@ -391,19 +432,44 @@ async def _answer_relevancy(answer: str, question: str, sem: asyncio.Semaphore) 
     return max(0.0, min(1.0, float(np.mean(sims))))
 
 
-async def _answer_correctness(answer: str, reference: str) -> float:
+async def _answer_correctness(answer: str, reference: str, sem: asyncio.Semaphore) -> float:
+    """LLM 判定事实正确性：把生成答案拆成断言，逐条对照参考答案打 full/partial/none
+    加权（与 _faithfulness_llm / _recall_llm 同构）。取代旧的纯 cosine(answer, reference)
+    ——后者无事实核对、且两段中文余弦天然偏高，落在乐观带。"""
     if not answer or not reference:
         return 0.0
-    emb_map = await _embed_unique([answer, reference])
-    return max(0.0, min(1.0, _cos(emb_map.get(answer), emb_map.get(reference))))
+    llm = get_langchain_llm()
+    prompt = ANSWER_CORRECTNESS_PROMPT.format(
+        answer=answer, reference_answer=reference, json_discipline=JSON_OUTPUT_DISCIPLINE,
+    )
+    data = await _json_call(llm, prompt, sem)
+    if not data:
+        return 0.0
+    claims = data.get("claims")
+    if not isinstance(claims, list) or not claims:
+        return 0.0
+    total = 0
+    weighted = 0.0
+    for c in claims:
+        if not isinstance(c, dict):
+            continue
+        total += 1
+        weighted += _support_weight(c)
+    return weighted / total if total else 0.0
 
 
 async def evaluate_question(
     gold: GoldItem, topic: str, user_id: str, k: int, judge_mode: str, sem: asyncio.Semaphore,
 ) -> QuestionResult:
-    retrieved = await safe_retrieve_topic_context_with_scores(topic, gold.question, user_id, top_k=k)
+    # Retrieve a few extra so leave-one-out still has k candidates after dropping
+    # the gold's own source chunk. Standard metrics use the top-k slice.
+    retrieved_ext = await safe_retrieve_topic_context_with_scores(
+        topic, gold.question, user_id, top_k=k + _LOO_MARGIN
+    )
+    retrieved = retrieved_ext[:k]
     rank, match_method, trivial_hit = await _match_gold(gold, retrieved)
     hit = 1 if rank is not None else 0
+    loo_hit = await _leave_one_out_hit(gold, retrieved_ext, k)
 
     context_text = (
         "\n\n---\n\n".join((c.content or "") for c in retrieved) if retrieved else "（无检索结果）"
@@ -418,7 +484,7 @@ async def evaluate_question(
     a_gen = await _generate_answer(gold.question, context_text, sem)
     faith = await _faithfulness_llm(a_gen, context_text, sem)
     relevancy = await _answer_relevancy(a_gen, gold.question, sem)
-    correctness = await _answer_correctness(a_gen, gold.reference_answer)
+    correctness = await _answer_correctness(a_gen, gold.reference_answer, sem)
 
     gold_source = gold.source_file + (f" [{gold.header_path}]" if gold.header_path else "")
     return QuestionResult(
@@ -428,6 +494,7 @@ async def evaluate_question(
         rank=rank,
         hit=hit,
         trivial_hit=trivial_hit,
+        loo_hit=loo_hit,
         context_precision=precision,
         context_recall=recall,
         faithfulness=faith,
@@ -449,12 +516,11 @@ def _aggregate(results: list[QuestionResult], error_count: int) -> EvalSummary:
         return EvalSummary(0.0, 0.0, 0.0, 0.0, None, 0.0, 0.0, 0.0, 0, error_count)
 
     recalls = [r.context_recall for r in results if r.context_recall is not None]
-    # hit_at_k_strict: hit rate excluding trivial self-hits (gold question
-    # synthesized from the very chunk it retrieves). A miss counts as 0 in both.
-    nontrivial_hits = [(1 if (r.hit and not r.trivial_hit) else 0) for r in results]
+    # hit_at_k_strict = leave-one-out 泛化命中率：剔除 gold 自身源 chunk 后，答案是否
+    # 仍被其它片段覆盖。比裸 hit@k 更接近真实泛化检索（裸 hit@k 含自命中送分）。
     return EvalSummary(
         hit_at_k=_mean([r.hit for r in results]),
-        hit_at_k_strict=_mean(nontrivial_hits),
+        hit_at_k_strict=_mean([r.loo_hit for r in results]),
         mrr=_mean([(1.0 / r.rank if r.rank else 0.0) for r in results]),
         context_precision=_mean([r.context_precision for r in results]),
         context_recall=(float(np.mean(recalls)) if recalls else None),

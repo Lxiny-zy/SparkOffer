@@ -14,7 +14,7 @@ def save_rag_metrics(
     stage: str,
     *,
     relevance: float | None = None,
-    discrimination: float | None = None,
+    coverage: float | None = None,
     diversity: float | None = None,
     faithfulness: float | None = None,
     answer_relevance: float | None = None,
@@ -23,20 +23,20 @@ def save_rag_metrics(
     detail: dict | None = None,
 ) -> None:
     # question_gen writes relevance into the legacy context_relevance column (so
-    # historical trend charts stay continuous) plus the two new columns;
+    # historical trend charts stay continuous) plus coverage + diversity;
     # answer_eval writes the generation-side columns. Circular precision/recall
     # are no longer written.
     conn = get_db()
     conn.execute(
         """INSERT INTO rag_metrics
            (session_id, user_id, topic, stage,
-            context_relevance, discrimination, diversity,
+            context_relevance, coverage, diversity,
             faithfulness, answer_relevance, answer_correctness,
             chunk_count, detail_json)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             session_id, user_id, topic, stage,
-            relevance, discrimination, diversity,
+            relevance, coverage, diversity,
             faithfulness, answer_relevance, answer_correctness,
             chunk_count,
             json.dumps(detail or {}, ensure_ascii=False),
@@ -67,7 +67,7 @@ def get_rag_metrics_history(
     rows = conn.execute(
         f"""SELECT id, session_id, topic, stage,
                    context_relevance, context_precision, context_recall,
-                   discrimination, diversity,
+                   discrimination, coverage, diversity,
                    faithfulness, answer_relevance, answer_correctness,
                    chunk_count, detail_json, created_at
             FROM rag_metrics
@@ -87,7 +87,7 @@ def get_rag_metrics_for_session(
     rows = conn.execute(
         """SELECT id, session_id, topic, stage,
                   context_relevance, context_precision, context_recall,
-                  discrimination, diversity,
+                  discrimination, coverage, diversity,
                   faithfulness, answer_relevance, answer_correctness,
                   chunk_count, detail_json, created_at
            FROM rag_metrics

@@ -16,9 +16,12 @@ GOLDEN_SYNTH_PROMPT = """你是 RAG 评测集构造器。下面 <chunk> 标签�
 
 任务：基于且仅基于这段原文，生成一个高质量的测试问题，以及一个完全由这段原文支撑的参考答案。
 
-要求：
-- 问题要具体、可由这段原文独立回答；不要问"这段话讲了什么""作者想表达什么"这类元问题。
+**关键要求——必须用你自己的话提问，禁止照抄原文措辞：**
+- 问题要像真实用户/面试官会问的样子，**换一种表述**：不要直接复制原文里的整句、专有短语顺序或独特措辞。
+  原因：检索评测考察的是「语义召回」。若题面照抄原文，检索会因字面重合而恒命中，hit@k 失去意义。
+- 但问题必须仍可仅凭这段原文独立回答；不要问「这段话讲了什么」「作者想表达什么」这类元问题。
 - 参考答案必须严格基于原文事实，不引入原文之外的信息；简洁准确，2-4 句。
+  （参考答案不受「换措辞」限制，可如实复述原文要点。）
 - 问题与参考答案都用中文。
 
 <chunk>
@@ -133,4 +136,34 @@ CONTEXT_PRECISION_PROMPT = """你在做 RAG 的 context precision 评测。判�
 {{"relevant": true}}
 
 - relevant 为布尔：该上下文是否对回答问题有实质帮助。
+{json_discipline}"""
+
+
+# ── 7. answer correctness：生成答案拆断言 → 每条是否与参考答案一致 ──
+# 区别于 faithfulness（对照检索上下文，看「有没有依据」），correctness 对照
+# 参考答案（ground truth），看「说得对不对」。
+ANSWER_CORRECTNESS_PROMPT = """你在做 RAG 的 answer correctness（答案正确性）评测。
+
+模型生成的答案：
+<answer>
+{answer}
+</answer>
+
+参考答案（ground truth，事实基准）：
+<reference>
+{reference_answer}
+</reference>
+
+任务：把生成答案拆成若干条原子断言（claim），逐条判断它与参考答案在**事实上的一致程度**。只看与参考答案是否相符，不看措辞差异。
+
+support 三档：
+- "full"：该断言与参考答案完全一致，或是参考答案的正确子集。
+- "partial"：方向对但不完整，或有轻微偏差/含糊。
+- "none"：与参考答案矛盾，或参考答案完全未提及（无从判定为正确）。
+
+只返回如下 JSON：
+{{"claims": [{{"claim": "...", "support": "full"}}]}}
+
+- claims 至少 1 条；support 取值仅限 full/partial/none。
+- 若生成答案为空或无实质内容，返回 {{"claims": [{{"claim": "（空答案）", "support": "none"}}]}}。
 {json_discipline}"""

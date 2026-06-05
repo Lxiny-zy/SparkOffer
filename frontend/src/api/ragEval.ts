@@ -24,6 +24,7 @@ export interface RagEvalQuestionDetail {
   rank: number | null;
   hit: number;
   trivial_hit?: boolean;
+  loo_hit?: number;        // 留一法泛化命中（剔源 chunk 后答案是否仍被覆盖）
   context_precision: number | null;
   context_recall: number | null;
   faithfulness: number | null;

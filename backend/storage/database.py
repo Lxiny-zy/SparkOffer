@@ -264,9 +264,11 @@ def init_all_tables():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_metrics_topic ON rag_metrics(user_id, topic, created_at DESC)")
 
     # question_gen stage moved off circular precision/recall to non-circular
-    # relevance/discrimination/diversity. Old context_* columns kept for read-only
-    # history; new rows write the two new columns.
-    for col in ("discrimination", "diversity"):
+    # relevance/coverage/diversity. Old context_* + discrimination columns kept
+    # for read-only history; new rows write relevance + coverage + diversity.
+    # ("discrimination" survives for legacy rows written before the coverage
+    # rename; it is no longer written.)
+    for col in ("discrimination", "diversity", "coverage"):
         try:
             conn.execute(f"SELECT {col} FROM rag_metrics LIMIT 1")
         except sqlite3.OperationalError:

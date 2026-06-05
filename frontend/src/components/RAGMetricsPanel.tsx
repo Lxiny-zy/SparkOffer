@@ -9,15 +9,15 @@ interface RAGMetricsPanelProps {
   metrics: RAGRetrievalMetrics;
 }
 
-const METRIC_KEYS: (keyof Pick<RAGRetrievalMetrics, "relevance" | "discrimination" | "diversity">)[] = [
+const METRIC_KEYS: (keyof Pick<RAGRetrievalMetrics, "relevance" | "coverage" | "diversity">)[] = [
   "relevance",
-  "discrimination",
+  "coverage",
   "diversity",
 ];
 
 const METRIC_LABEL: Record<string, string> = {
   relevance: "相关度",
-  discrimination: "区分度",
+  coverage: "覆盖度",
   diversity: "多样性",
 };
 

@@ -257,9 +257,15 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                 if "answer_relevance_score" in s:
                     s["answer_relevance_score"] = clamp_score_0_10(s.get("answer_relevance_score"))
 
-            # Emit RAG generation quality metrics (extracted from LLM eval)
+            # Emit + persist RAG generation quality metrics (extracted from LLM eval).
+            # An answer_eval row is written for EVERY session with ≥1 answered
+            # question, so it always shows up in the dashboard — even when the model
+            # omitted faithfulness/relevance scores (gen_metrics is None → those
+            # columns persist as NULL, instead of the whole row silently vanishing).
             try:
                 from backend.rag_metrics import extract_generation_metrics
+                from backend.storage.rag_metrics_store import save_rag_metrics
+                answered_scores = [s for s in scores if not s.get("skipped")]
                 gen_metrics = extract_generation_metrics(scores)
                 if gen_metrics:
                     yield sse_event({
@@ -278,19 +284,19 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                             ],
                         },
                     })
-                    from backend.storage.rag_metrics_store import save_rag_metrics
+                if answered_scores:
                     save_rag_metrics(
                         session_id, user_id, topic, "answer_eval",
-                        faithfulness=gen_metrics.faithfulness,
-                        answer_relevance=gen_metrics.answer_relevance,
-                        answer_correctness=gen_metrics.answer_correctness,
-                        chunk_count=len(scores),
+                        faithfulness=(gen_metrics.faithfulness if gen_metrics else None),
+                        answer_relevance=(gen_metrics.answer_relevance if gen_metrics else None),
+                        answer_correctness=(gen_metrics.answer_correctness if gen_metrics else None),
+                        chunk_count=len(answered_scores),
                         detail={
                             "per_question": [
                                 {"qid": s.get("question_id"),
                                  "f": s.get("faithfulness_score"),
                                  "ar": s.get("answer_relevance_score")}
-                                for s in scores if not s.get("skipped")
+                                for s in answered_scores
                             ]
                         },
                     )

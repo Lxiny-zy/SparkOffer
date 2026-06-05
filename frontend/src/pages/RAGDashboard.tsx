@@ -63,7 +63,7 @@ function RetrievalTrendTooltip({ active, payload }: { active?: boolean; payload?
       <div className="text-dim">{d.topic}</div>
       <div className="mt-1 space-y-0.5">
         {d.relevance != null && <div style={{ color: "var(--primary)" }}>相关度: {fmtPct01(d.relevance)}</div>}
-        {d.discrimination != null && <div style={{ color: "var(--green)" }}>区分度: {fmtPct01(d.discrimination)}</div>}
+        {d.coverage != null && <div style={{ color: "var(--green)" }}>覆盖度: {fmtPct01(d.coverage)}</div>}
         {d.diversity != null && <div style={{ color: "var(--warning)" }}>多样性: {fmtPct01(d.diversity)}</div>}
       </div>
     </div>
@@ -188,7 +188,7 @@ export default function RAGDashboard() {
       date: r.created_at?.slice(0, 10) || "",
       topic: r.topic,
       relevance: r.relevance,
-      discrimination: r.discrimination,
+      coverage: r.coverage,
       diversity: r.diversity,
     })),
     [retrievalRecords],
@@ -416,7 +416,7 @@ export default function RAGDashboard() {
                       <YAxis domain={[0, 1]} tickFormatter={(v: number) => `${Math.round(v * 100)}%`} tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <Tooltip content={<RetrievalTrendTooltip />} />
                       <Line type="monotone" dataKey="relevance" stroke="var(--primary)" strokeWidth={2} dot={false} name="相关度" />
-                      <Line type="monotone" dataKey="discrimination" stroke="var(--green)" strokeWidth={1.5} dot={false} name="区分度" />
+                      <Line type="monotone" dataKey="coverage" stroke="var(--green)" strokeWidth={1.5} dot={false} name="覆盖度" />
                       <Line type="monotone" dataKey="diversity" stroke="var(--warning)" strokeWidth={1.5} dot={false} name="多样性" />
                     </LineChart>
                   </ResponsiveContainer>
@@ -511,7 +511,7 @@ export default function RAGDashboard() {
                         <th className="text-left py-2 px-2 font-medium">Session</th>
                         <th className="text-left py-2 px-2 font-medium">Topic</th>
                         <th className="text-center py-2 px-2 font-medium">相关度</th>
-                        <th className="text-center py-2 px-2 font-medium">区分</th>
+                        <th className="text-center py-2 px-2 font-medium">覆盖</th>
                         <th className="text-center py-2 px-2 font-medium">多样</th>
                         <th className="text-center py-2 px-2 font-medium">忠实</th>
                         <th className="text-center py-2 px-2 font-medium">切题</th>
@@ -528,7 +528,7 @@ export default function RAGDashboard() {
                             <MetricPill value={retrieval?.relevance} metricKey="relevance" />
                           </td>
                           <td className="py-2 px-2 text-center">
-                            <MetricPill value={retrieval?.discrimination} metricKey="discrimination" />
+                            <MetricPill value={retrieval?.coverage} metricKey="coverage" />
                           </td>
                           <td className="py-2 px-2 text-center">
                             <MetricPill value={retrieval?.diversity} metricKey="diversity" />
@@ -606,7 +606,7 @@ function EvalProgress({ status }: { status: RagEvalStatus }) {
 }
 
 const RESULT_METRICS: { key: keyof RagEvalSummary; label: string }[] = [
-  { key: "hit_at_k_strict", label: "Hit@K (严格)" },
+  { key: "hit_at_k_strict", label: "泛化命中(留一)" },
   { key: "mrr", label: "MRR" },
   { key: "context_precision", label: "Precision" },
   { key: "context_recall", label: "Recall" },
@@ -654,10 +654,11 @@ function RagEvalResultCard({ status, topicName }: { status: RagEvalStatus; topic
 
       <p className="text-[11px] text-muted-fg">
         注：评测基于<strong className="text-foreground">基础向量检索</strong>，不含线上出题链路的 RRF 融合 / 重排；
-        Hit@K、MRR 反映底层检索质量，非端到端出题效果。
-        <strong className="text-foreground">严格 Hit@K</strong> 已排除「检索到 gold 问题自身源文」的送分自命中，
-        比原始 Hit@K 更接近真实泛化检索表现。Faithfulness / Recall 采用 full/partial/none 三档加权，
-        避免「沾边即满分」的乐观偏差。
+        Hit@K、MRR 反映底层检索质量，非端到端出题效果。golden 集已要求<strong className="text-foreground">改写提问、不照抄原文</strong>，
+        故 Hit@K 考察的是语义检索而非字面匹配。<strong className="text-foreground">泛化命中(留一)</strong> 用留一法——
+        把 gold 自身源文从结果剔除后，看参考答案是否仍被其它片段覆盖——衡量冗余度 / 真泛化。
+        Faithfulness / Recall / Correctness 采用 full/partial/none 三档加权，避免「沾边即满分」的乐观偏差；
+        Correctness 由 LLM 逐断言对照参考答案判定。
       </p>
 
       {questions.length > 0 && (
@@ -690,7 +691,7 @@ function RagEvalResultCard({ status, topicName }: { status: RagEvalStatus; topic
                         <div className="text-[10px] text-muted-fg truncate" title={q.gold_source}>{q.gold_source || "—"}</div>
                       </td>
                       <td className="py-1.5 px-2 text-center font-mono tabular-nums">
-                        {q.rank ?? "—"}{q.trivial_hit ? <span title="送分自命中（检索到 gold 源文自身）" className="ml-0.5 text-[9px]" style={{ color: "var(--warning)" }}>*</span> : null}
+                        {q.rank ?? "—"}{q.trivial_hit ? <span title="题面与源文高度重合（词面泄漏），仅供参考" className="ml-0.5 text-[9px]" style={{ color: "var(--warning)" }}>*</span> : null}
                       </td>
                       <td className="py-1.5 px-2 text-center"><MetricPill value={q.context_precision} metricKey="context_precision" /></td>
                       <td className="py-1.5 px-2 text-center"><MetricPill value={q.context_recall} metricKey="context_recall" /></td>

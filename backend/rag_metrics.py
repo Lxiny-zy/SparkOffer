@@ -13,9 +13,12 @@ non-circular signals measured from the embeddings we already have:
 Retrieval metrics (zero extra LLM cost, no ground truth):
 - Relevance: mean over queries of max cosine(query, chunk). How well retrieved
   content fits the query. Naturally lands ~0.45-0.65 (short query vs long doc).
-- Discrimination: mean over queries of (top-1 cosine − top-2 cosine). Does
-  retrieval clearly single out a best chunk, or return a flat wash of near-ties?
-  Measures intra-result contrast, not query↔chunk circularity.
+- Coverage: fraction of queries whose best retrieved chunk clears COVERAGE_FLOOR
+  cosine. Measures *breadth* — did every weak_point get some on-topic material,
+  or did one go unserved? Replaced the old "discrimination = top1−top2 cosine",
+  which was inverted for this use case: returning several equally-relevant chunks
+  per query (exactly what question-gen wants) drove discrimination toward zero,
+  so a healthy spread retrieval scored "poor". Coverage rewards that spread.
 - Diversity: 1 − mean pairwise cosine across the final chunks. Catches retrieval
   collapse (a pile of near-duplicate passages). Reuses the chunk embeddings the
   dedup stage already computed — zero extra embedding cost.
@@ -41,6 +44,8 @@ from backend.vector_store.base import _cosine_similarity
 logger = logging.getLogger("uvicorn")
 
 RELEVANCE_THRESHOLD = 0.5
+COVERAGE_FLOOR = 0.5   # a query (weak_point) counts as "covered" when its best
+                       # retrieved chunk's cosine clears this floor
 
 
 def clamp_score_0_10(value) -> float | None:
@@ -50,8 +55,20 @@ def clamp_score_0_10(value) -> float | None:
     out-of-range values (a percentage, >10, negative) or a bare bool. Those
     must not leak through as >100% readings in the dashboard / Review badges.
     Returns None for unusable input so callers can drop it.
+
+    Numeric strings ("8", "8.0", " 7 ") are coerced to float: smaller/cheaper
+    models (the decoupled small tier) often emit scores as strings, and silently
+    dropping them used to None-out the generation gauges (faithfulness /
+    answer_relevance) and skip the whole answer_eval row for that session.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except (ValueError, AttributeError):
+            return None
+    if not isinstance(value, (int, float)):
         return None
     return max(0.0, min(10.0, float(value)))
 
@@ -59,14 +76,14 @@ def clamp_score_0_10(value) -> float | None:
 @dataclass
 class RetrievalMetrics:
     relevance: float = 0.0
-    discrimination: float = 0.0
+    coverage: float = 0.0
     diversity: float = 0.0
     chunk_details: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "relevance": round(self.relevance, 4),
-            "discrimination": round(self.discrimination, 4),
+            "coverage": round(self.coverage, 4),
             "diversity": round(self.diversity, 4),
             "chunk_details": self.chunk_details,
         }
@@ -123,22 +140,21 @@ async def compute_retrieval_metrics(
     if not valid_query_embs:
         return None
 
-    # Relevance: mean over queries of max cosine(query, chunk).
-    # Discrimination: mean over queries of (top-1 − top-2 cosine). A flat result
-    # set (everything near-tied) scores low; a clear winner scores high.
+    # Relevance: mean over queries of max cosine(query, chunk) — average fit.
+    # Coverage: fraction of queries whose best chunk clears COVERAGE_FLOOR —
+    # breadth, i.e. did every weak_point get some on-topic material. This is
+    # NOT circular: it asks "is there a chunk above an absolute bar", not
+    # "do these chunks beat the queries that retrieved them".
     relevance_scores: list[float] = []
-    discrimination_scores: list[float] = []
+    covered = 0
     for q_emb in valid_query_embs:
         sims = _cosine_similarity(q_emb, chunk_matrix)
-        relevance_scores.append(float(np.max(sims)))
-        if sims.shape[0] >= 2:
-            top2 = np.sort(sims)[-2:]
-            discrimination_scores.append(float(top2[1] - top2[0]))
-        else:
-            # Single chunk → no runner-up to beat; treat as fully discriminative.
-            discrimination_scores.append(1.0)
+        best = float(np.max(sims))
+        relevance_scores.append(best)
+        if best >= COVERAGE_FLOOR:
+            covered += 1
     relevance = float(np.mean(relevance_scores)) if relevance_scores else 0.0
-    discrimination = float(np.mean(discrimination_scores)) if discrimination_scores else 0.0
+    coverage = covered / len(valid_query_embs) if valid_query_embs else 0.0
 
     # Diversity: 1 − mean upper-triangle pairwise cosine across final chunks.
     # High = varied passages; low = retrieval collapsed onto near-duplicates.
@@ -161,7 +177,7 @@ async def compute_retrieval_metrics(
 
     return RetrievalMetrics(
         relevance=max(0.0, min(1.0, relevance)),
-        discrimination=max(0.0, min(1.0, discrimination)),
+        coverage=max(0.0, min(1.0, coverage)),
         diversity=max(0.0, min(1.0, diversity)),
         chunk_details=chunk_details,
     )

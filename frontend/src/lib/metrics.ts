@@ -27,12 +27,12 @@ export const METRIC_SPEC: Record<string, MetricSpec> = {
     normal: [0.45, 0.65],
     excellent: 0.7,
   },
-  discrimination: {
-    label: "区分度",
-    compares: "最佳片段 ↔ 次佳片段",
-    how: "每条查询的 (top1 − top2 余弦) 求平均；衡量检索是否真挑出了重点",
-    normal: [0.05, 0.15],
-    excellent: 0.2,
+  coverage: {
+    label: "覆盖度",
+    compares: "每条查询（薄弱点）↔ 是否有达标片段",
+    how: "最高余弦 ≥ 0.5 的查询占比；衡量是否每个薄弱点都召回到料（广度）",
+    normal: [0.6, 0.9],
+    excellent: 0.85,
   },
   diversity: {
     label: "多样性",
@@ -50,11 +50,11 @@ export const METRIC_SPEC: Record<string, MetricSpec> = {
     excellent: 0.85,
   },
   hit_at_k_strict: {
-    label: "Hit@K (严格)",
-    compares: "gold 源片段 ↔ top-K（排除自命中）",
-    how: "排除「检索到 gold 自身源文」的送分项后的命中率，更接近真实泛化检索",
-    normal: [0.45, 0.75],
-    excellent: 0.75,
+    label: "泛化命中(留一)",
+    compares: "剔除 gold 源片段后 ↔ 剩余 top-K",
+    how: "留一法：把 gold 自身源文从结果剔除后，参考答案是否仍被其它片段覆盖；衡量冗余度/真泛化",
+    normal: [0.4, 0.7],
+    excellent: 0.7,
   },
   mrr: {
     label: "MRR",
@@ -94,7 +94,7 @@ export const METRIC_SPEC: Record<string, MetricSpec> = {
   answer_correctness: {
     label: "Correctness",
     compares: "生成答案 ↔ 参考答案",
-    how: "答案与参考答案的语义余弦",
+    how: "答案拆原子断言后逐条对照参考答案的加权一致率（full/partial/none）",
     normal: [0.6, 0.85],
     excellent: 0.85,
   },

@@ -316,7 +316,7 @@ class DrillPipeline:
         return {
             "rag_metrics": {
                 "relevance": m.get("relevance"),
-                "discrimination": m.get("discrimination"),
+                "coverage": m.get("coverage"),
                 "diversity": m.get("diversity"),
                 "chunk_details": m.get("chunk_details", []),
             }
@@ -694,7 +694,7 @@ class DrillPipeline:
                 save_rag_metrics(
                     self.session_id, self.user_id, self.topic, "question_gen",
                     relevance=m.get("relevance"),
-                    discrimination=m.get("discrimination"),
+                    coverage=m.get("coverage"),
                     diversity=m.get("diversity"),
                     chunk_count=stats.final_chunks,
                     detail={"chunk_details": m.get("chunk_details", [])},
