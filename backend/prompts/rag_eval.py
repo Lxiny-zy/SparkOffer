@@ -44,12 +44,17 @@ CONTEXT_RECALL_PROMPT = """你在做 RAG 的 context recall 评测。
 {context}
 </context>
 
-任务：把参考答案拆成若干条原子陈述（每条只含一个事实点），再判断每条陈述能否由上述检索上下文支撑（该信息是否出现在上下文中）。只看"上下文是否包含该信息"，不看陈述本身对错。
+任务：把参考答案拆成若干条原子陈述（每条只含一个事实点），再判断每条陈述被上述检索上下文支撑的程度。只看"上下文是否包含该信息"，不看陈述本身对错。
+
+support 三档：
+- "full"：该陈述的事实点在上下文中有明确、完整的依据。
+- "partial"：上下文只沾边/部分相关/需要推断，未完整支撑。
+- "none"：上下文完全没有该信息。
 
 只返回如下 JSON：
-{{"statements": [{{"statement": "...", "supported": true}}]}}
+{{"statements": [{{"statement": "...", "support": "full"}}]}}
 
-- statements 至少 1 条；supported 为布尔。
+- statements 至少 1 条；support 取值仅限 full/partial/none。
 {json_discipline}"""
 
 
@@ -66,13 +71,18 @@ FAITHFULNESS_PROMPT = """你在做 RAG 的 faithfulness（忠实度）评测。
 {context}
 </context>
 
-任务：把生成答案拆成若干条原子断言（claim），判断每条 claim 能否由上述上下文推出/支撑。只看是否有上下文依据（忠实度），不看 claim 是否客观正确。
+任务：把生成答案拆成若干条原子断言（claim），判断每条 claim 被上述上下文支撑的程度。只看是否有上下文依据（忠实度），不看 claim 是否客观正确。
+
+support 三档：
+- "full"：该断言在上下文中有明确、完整的依据。
+- "partial"：上下文只沾边/部分相关/需要推断，未完整支撑。
+- "none"：上下文完全没有依据（含编造）。
 
 只返回如下 JSON：
-{{"claims": [{{"claim": "...", "supported": true}}]}}
+{{"claims": [{{"claim": "...", "support": "full"}}]}}
 
-- claims 至少 1 条；supported 为布尔。
-- 若答案为空或无实质内容，返回 {{"claims": [{{"claim": "（空答案）", "supported": false}}]}}。
+- claims 至少 1 条；support 取值仅限 full/partial/none。
+- 若答案为空或无实质内容，返回 {{"claims": [{{"claim": "（空答案）", "support": "none"}}]}}。
 {json_discipline}"""
 
 

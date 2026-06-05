@@ -21,6 +21,7 @@ def save_rag_eval_run(
     k: int,
     judge_mode: str,
     hit_at_k: float | None,
+    hit_at_k_strict: float | None = None,
     mrr: float | None,
     context_precision: float | None,
     context_recall: float | None,
@@ -35,13 +36,13 @@ def save_rag_eval_run(
     cur = conn.execute(
         """INSERT INTO rag_eval_runs
            (job_id, user_id, topic, scope, n_questions, k, judge_mode,
-            hit_at_k, mrr, context_precision, context_recall,
+            hit_at_k, hit_at_k_strict, mrr, context_precision, context_recall,
             faithfulness, answer_relevancy, answer_correctness,
             status, error, detail_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             job_id, user_id, topic, scope, n_questions, k, judge_mode,
-            hit_at_k, mrr, context_precision, context_recall,
+            hit_at_k, hit_at_k_strict, mrr, context_precision, context_recall,
             faithfulness, answer_relevancy, answer_correctness,
             status, error,
             json.dumps(detail or {}, ensure_ascii=False),
@@ -68,7 +69,7 @@ def list_rag_eval_runs(
 
     rows = conn.execute(
         f"""SELECT id, job_id, topic, scope, n_questions, k, judge_mode,
-                   hit_at_k, mrr, context_precision, context_recall,
+                   hit_at_k, hit_at_k_strict, mrr, context_precision, context_recall,
                    faithfulness, answer_relevancy, answer_correctness,
                    status, error, detail_json, created_at
             FROM rag_eval_runs
@@ -84,7 +85,7 @@ def get_rag_eval_run(run_id: int, user_id: str) -> dict[str, Any] | None:
     conn = get_db()
     row = conn.execute(
         """SELECT id, job_id, topic, scope, n_questions, k, judge_mode,
-                  hit_at_k, mrr, context_precision, context_recall,
+                  hit_at_k, hit_at_k_strict, mrr, context_precision, context_recall,
                   faithfulness, answer_relevancy, answer_correctness,
                   status, error, detail_json, created_at
            FROM rag_eval_runs

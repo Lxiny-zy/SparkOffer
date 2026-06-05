@@ -13,26 +13,30 @@ def save_rag_metrics(
     topic: str,
     stage: str,
     *,
-    context_relevance: float | None = None,
-    context_precision: float | None = None,
-    context_recall: float | None = None,
+    relevance: float | None = None,
+    discrimination: float | None = None,
+    diversity: float | None = None,
     faithfulness: float | None = None,
     answer_relevance: float | None = None,
     answer_correctness: float | None = None,
     chunk_count: int | None = None,
     detail: dict | None = None,
 ) -> None:
+    # question_gen writes relevance into the legacy context_relevance column (so
+    # historical trend charts stay continuous) plus the two new columns;
+    # answer_eval writes the generation-side columns. Circular precision/recall
+    # are no longer written.
     conn = get_db()
     conn.execute(
         """INSERT INTO rag_metrics
            (session_id, user_id, topic, stage,
-            context_relevance, context_precision, context_recall,
+            context_relevance, discrimination, diversity,
             faithfulness, answer_relevance, answer_correctness,
             chunk_count, detail_json)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             session_id, user_id, topic, stage,
-            context_relevance, context_precision, context_recall,
+            relevance, discrimination, diversity,
             faithfulness, answer_relevance, answer_correctness,
             chunk_count,
             json.dumps(detail or {}, ensure_ascii=False),
@@ -63,6 +67,7 @@ def get_rag_metrics_history(
     rows = conn.execute(
         f"""SELECT id, session_id, topic, stage,
                    context_relevance, context_precision, context_recall,
+                   discrimination, diversity,
                    faithfulness, answer_relevance, answer_correctness,
                    chunk_count, detail_json, created_at
             FROM rag_metrics
@@ -82,6 +87,7 @@ def get_rag_metrics_for_session(
     rows = conn.execute(
         """SELECT id, session_id, topic, stage,
                   context_relevance, context_precision, context_recall,
+                  discrimination, diversity,
                   faithfulness, answer_relevance, answer_correctness,
                   chunk_count, detail_json, created_at
            FROM rag_metrics
@@ -99,4 +105,8 @@ def _row_to_dict(row) -> dict[str, Any]:
         d["detail"] = json.loads(detail_raw) if detail_raw else {}
     except (json.JSONDecodeError, TypeError):
         d["detail"] = {}
+    # question_gen relevance lives in the legacy context_relevance column; expose
+    # it under the new name so the frontend reads a single `relevance` field
+    # regardless of when the row was written.
+    d["relevance"] = d.get("context_relevance")
     return d

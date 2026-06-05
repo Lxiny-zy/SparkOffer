@@ -2,17 +2,24 @@ import { useState } from "react";
 import { ChevronDown, ChevronUp, FileText } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fmtPct01, metricColorClass, metricBarClass } from "@/lib/metrics";
+import { MetricInfoTooltip } from "@/components/MetricInfoTooltip";
 import type { RAGRetrievalMetrics } from "@/api/interview";
 
 interface RAGMetricsPanelProps {
   metrics: RAGRetrievalMetrics;
 }
 
-const METRIC_LABELS: { key: keyof Pick<RAGRetrievalMetrics, "context_relevance" | "context_precision" | "context_recall">; label: string; tip: string }[] = [
-  { key: "context_relevance", label: "相关度", tip: "检索 chunk 与查询的语义相关性" },
-  { key: "context_precision", label: "排序质量", tip: "相关 chunk 是否排在前面" },
-  { key: "context_recall", label: "覆盖率", tip: "薄弱点被 chunk 覆盖的比例（无薄弱点时不适用）" },
+const METRIC_KEYS: (keyof Pick<RAGRetrievalMetrics, "relevance" | "discrimination" | "diversity">)[] = [
+  "relevance",
+  "discrimination",
+  "diversity",
 ];
+
+const METRIC_LABEL: Record<string, string> = {
+  relevance: "相关度",
+  discrimination: "区分度",
+  diversity: "多样性",
+};
 
 export function RAGMetricsPanel({ metrics }: RAGMetricsPanelProps) {
   const [expanded, setExpanded] = useState(false);
@@ -34,27 +41,25 @@ export function RAGMetricsPanel({ metrics }: RAGMetricsPanelProps) {
       </div>
 
       <div className="grid grid-cols-3 gap-2">
-        {METRIC_LABELS.map(({ key, label, tip }) => {
+        {METRIC_KEYS.map((key) => {
           const val = metrics[key];
           return (
-            <div
-              key={key}
-              className="rounded-lg bg-card/60 border border-border/40 px-3 py-2"
-              title={tip}
-            >
-              <div className="text-[11px] text-muted-fg mb-1">{label}</div>
-              <div className={cn("text-lg font-semibold font-mono tabular-nums", val != null ? metricColorClass(val) : "text-muted-fg")}>
-                {fmtPct01(val)}
+            <MetricInfoTooltip key={key} metricKey={key}>
+              <div className="rounded-lg bg-card/60 border border-border/40 px-3 py-2">
+                <div className="text-[11px] text-muted-fg mb-1">{METRIC_LABEL[key]}</div>
+                <div className={cn("text-lg font-semibold font-mono tabular-nums", val != null ? metricColorClass(val, key) : "text-muted-fg")}>
+                  {fmtPct01(val)}
+                </div>
+                <div className="mt-1 h-1 rounded-full bg-muted overflow-hidden">
+                  {val != null && (
+                    <div
+                      className={cn("h-full rounded-full transition-all duration-500", metricBarClass(val, key))}
+                      style={{ width: fmtPct01(val) }}
+                    />
+                  )}
+                </div>
               </div>
-              <div className="mt-1 h-1 rounded-full bg-muted overflow-hidden">
-                {val != null && (
-                  <div
-                    className={cn("h-full rounded-full transition-all duration-500", metricBarClass(val))}
-                    style={{ width: fmtPct01(val) }}
-                  />
-                )}
-              </div>
-            </div>
+            </MetricInfoTooltip>
           );
         })}
       </div>

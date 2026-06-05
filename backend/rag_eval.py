@@ -47,7 +47,22 @@ logger = logging.getLogger("uvicorn")
 _LLM_CONCURRENCY = 4          # 限制并发 ainvoke，避免打爆 channel
 _RELEVANCY_QUESTIONS = 3      # answer_relevancy 反向生成的问题数
 _GOLD_MATCH_COSINE = 0.90     # gold↔检索 chunk 的内容兜底匹配阈值
+_TRIVIAL_HIT_COSINE = 0.97    # 命中 chunk 与 gold 源文几乎相同 → 送分自命中
 _MIN_CHUNK_CHARS = 80         # 太短的 chunk 不适合合成问题
+
+# faithfulness / context_recall 的支撑分档权重。旧版用 supported 布尔，把"沾边"
+# 也算满分，导致比率天然偏高。三档加权消除这种乐观偏差。
+_SUPPORT_WEIGHTS = {"full": 1.0, "partial": 0.5, "none": 0.0}
+
+
+def _support_weight(item: dict) -> float:
+    """Read a statement/claim's support level → weight. Falls back to the legacy
+    boolean ``supported`` field so older cached responses still score."""
+    level = item.get("support")
+    if isinstance(level, str) and level.lower() in _SUPPORT_WEIGHTS:
+        return _SUPPORT_WEIGHTS[level.lower()]
+    # Legacy fallback: bool supported → full/none.
+    return 1.0 if bool(item.get("supported")) else 0.0
 
 
 # ── data shapes ──
@@ -68,6 +83,7 @@ class QuestionResult:
     generated_answer: str
     rank: int | None
     hit: int
+    trivial_hit: bool
     context_precision: float
     context_recall: float | None
     faithfulness: float
@@ -85,6 +101,7 @@ class QuestionResult:
             "generated_answer": self.generated_answer,
             "rank": self.rank,
             "hit": self.hit,
+            "trivial_hit": self.trivial_hit,
             "context_precision": r(self.context_precision),
             "context_recall": r(self.context_recall),
             "faithfulness": r(self.faithfulness),
@@ -98,6 +115,7 @@ class QuestionResult:
 @dataclass
 class EvalSummary:
     hit_at_k: float
+    hit_at_k_strict: float
     mrr: float
     context_precision: float
     context_recall: float | None
@@ -112,6 +130,7 @@ class EvalSummary:
             return round(v, 4) if isinstance(v, (int, float)) else v
         return {
             "hit_at_k": r(self.hit_at_k),
+            "hit_at_k_strict": r(self.hit_at_k_strict),
             "mrr": r(self.mrr),
             "context_precision": r(self.context_precision),
             "context_recall": r(self.context_recall),
@@ -228,26 +247,36 @@ async def synthesize_golden_set(
 
 # ── phase 2: per-question metrics ──
 
-async def _match_gold(gold: GoldItem, retrieved: list) -> tuple[int | None, str]:
-    """Locate gold chunk in the ranked retrieval → (1-based rank, method).
+async def _match_gold(gold: GoldItem, retrieved: list) -> tuple[int | None, str, bool]:
+    """Locate gold chunk in the ranked retrieval → (1-based rank, method, trivial).
 
     Identity match is only reliable for .md chunks (non-empty header_path);
     .txt/.py share an empty header within a file, so fall back to content cosine.
+
+    ``trivial`` flags a self-hit: the matched chunk is (near-)identical to the
+    very chunk the gold question was synthesized from. Finding your own source
+    text is expected and inflates hit@k — hit_at_k_strict excludes these.
     """
     if not retrieved:
-        return None, "miss"
+        return None, "miss", False
+    # Embed gold source + retrieved content once; reused for both cosine fallback
+    # match and trivial-hit detection.
+    emb_map = await _embed_unique([gold.content] + [c.content for c in retrieved])
+    gold_emb = emb_map.get(gold.content)
+
+    def _is_trivial(idx: int) -> bool:
+        return _cos(gold_emb, emb_map.get(retrieved[idx].content)) >= _TRIVIAL_HIT_COSINE
+
     if gold.source_file and gold.header_path:
         for i, c in enumerate(retrieved):
             if c.source_file == gold.source_file and c.header_path == gold.header_path:
-                return i + 1, "identity"
-    emb_map = await _embed_unique([gold.content] + [c.content for c in retrieved])
-    gold_emb = emb_map.get(gold.content)
+                return i + 1, "identity", _is_trivial(i)
     if gold_emb is None:
-        return None, "miss"
+        return None, "miss", False
     for i, c in enumerate(retrieved):
         if _cos(gold_emb, emb_map.get(c.content)) >= _GOLD_MATCH_COSINE:
-            return i + 1, "cosine"
-    return None, "miss"
+            return i + 1, "cosine", _is_trivial(i)
+    return None, "miss", False
 
 
 async def _precision_embedding(gold: GoldItem, retrieved: list) -> float:
@@ -290,14 +319,14 @@ async def _recall_llm(gold: GoldItem, context_text: str, sem: asyncio.Semaphore)
     stmts = data.get("statements")
     if not isinstance(stmts, list) or not stmts:
         return None
-    total = supported = 0
+    total = 0
+    weighted = 0.0
     for s in stmts:
         if not isinstance(s, dict):
             continue
         total += 1
-        if bool(s.get("supported")):
-            supported += 1
-    return supported / total if total else None
+        weighted += _support_weight(s)
+    return weighted / total if total else None
 
 
 async def _generate_answer(question: str, context_text: str, sem: asyncio.Semaphore) -> str:
@@ -325,14 +354,14 @@ async def _faithfulness_llm(answer: str, context_text: str, sem: asyncio.Semapho
     claims = data.get("claims")
     if not isinstance(claims, list) or not claims:
         return 0.0
-    total = supported = 0
+    total = 0
+    weighted = 0.0
     for c in claims:
         if not isinstance(c, dict):
             continue
         total += 1
-        if bool(c.get("supported")):
-            supported += 1
-    return supported / total if total else 0.0
+        weighted += _support_weight(c)
+    return weighted / total if total else 0.0
 
 
 async def _answer_relevancy(answer: str, question: str, sem: asyncio.Semaphore) -> float:
@@ -373,7 +402,7 @@ async def evaluate_question(
     gold: GoldItem, topic: str, user_id: str, k: int, judge_mode: str, sem: asyncio.Semaphore,
 ) -> QuestionResult:
     retrieved = await safe_retrieve_topic_context_with_scores(topic, gold.question, user_id, top_k=k)
-    rank, match_method = await _match_gold(gold, retrieved)
+    rank, match_method, trivial_hit = await _match_gold(gold, retrieved)
     hit = 1 if rank is not None else 0
 
     context_text = (
@@ -398,6 +427,7 @@ async def evaluate_question(
         generated_answer=a_gen,
         rank=rank,
         hit=hit,
+        trivial_hit=trivial_hit,
         context_precision=precision,
         context_recall=recall,
         faithfulness=faith,
@@ -416,11 +446,15 @@ def _aggregate(results: list[QuestionResult], error_count: int) -> EvalSummary:
         return float(np.mean(vals)) if vals else 0.0
 
     if not results:
-        return EvalSummary(0.0, 0.0, 0.0, None, 0.0, 0.0, 0.0, 0, error_count)
+        return EvalSummary(0.0, 0.0, 0.0, 0.0, None, 0.0, 0.0, 0.0, 0, error_count)
 
     recalls = [r.context_recall for r in results if r.context_recall is not None]
+    # hit_at_k_strict: hit rate excluding trivial self-hits (gold question
+    # synthesized from the very chunk it retrieves). A miss counts as 0 in both.
+    nontrivial_hits = [(1 if (r.hit and not r.trivial_hit) else 0) for r in results]
     return EvalSummary(
         hit_at_k=_mean([r.hit for r in results]),
+        hit_at_k_strict=_mean(nontrivial_hits),
         mrr=_mean([(1.0 / r.rank if r.rank else 0.0) for r in results]),
         context_precision=_mean([r.context_precision for r in results]),
         context_recall=(float(np.mean(recalls)) if recalls else None),
@@ -488,6 +522,7 @@ async def run_eval(job: dict, topic: str, user_id: str, n: int, k: int, judge_mo
             job_id=job["job_id"], user_id=user_id, topic=topic,
             scope=job.get("scope", "topic"), n_questions=len(gold), k=k, judge_mode=judge_mode,
             hit_at_k=summary.hit_at_k, mrr=summary.mrr,
+            hit_at_k_strict=summary.hit_at_k_strict,
             context_precision=summary.context_precision, context_recall=summary.context_recall,
             faithfulness=summary.faithfulness, answer_relevancy=summary.answer_relevancy,
             answer_correctness=summary.answer_correctness,

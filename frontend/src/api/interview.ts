@@ -80,9 +80,9 @@ interface StreamCallbacks {
 }
 
 export interface RAGRetrievalMetrics {
-  context_relevance: number;
-  context_precision: number;
-  context_recall: number | null;
+  relevance: number;
+  discrimination: number;
+  diversity: number;
   chunk_details: { score: number; source: string }[];
 }
 
@@ -624,9 +624,15 @@ export interface RAGMetricsRecord {
   session_id: string;
   topic: string;
   stage: string;
+  // question_gen stage (retrieval health gauges)
+  relevance: number | null;
+  discrimination: number | null;
+  diversity: number | null;
+  // legacy columns kept for historical rows (older question_gen records)
   context_relevance: number | null;
   context_precision: number | null;
   context_recall: number | null;
+  // answer_eval stage (generation-side, LLM-judged)
   faithfulness: number | null;
   answer_relevance: number | null;
   answer_correctness: number | null;

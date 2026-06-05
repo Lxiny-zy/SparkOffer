@@ -312,13 +312,12 @@ class DrillPipeline:
         if stats is None or stats.rag_metrics is None:
             return {}
         m = stats.rag_metrics
-        # m is already RetrievalMetrics.to_dict() (values rounded, context_recall
-        # may be None) — pass through verbatim, don't re-round (round(None) crashes).
+        # m is already RetrievalMetrics.to_dict() (values rounded) — pass through.
         return {
             "rag_metrics": {
-                "context_relevance": m.get("context_relevance"),
-                "context_precision": m.get("context_precision"),
-                "context_recall": m.get("context_recall"),
+                "relevance": m.get("relevance"),
+                "discrimination": m.get("discrimination"),
+                "diversity": m.get("diversity"),
                 "chunk_details": m.get("chunk_details", []),
             }
         }
@@ -694,9 +693,9 @@ class DrillPipeline:
                 m = stats.rag_metrics
                 save_rag_metrics(
                     self.session_id, self.user_id, self.topic, "question_gen",
-                    context_relevance=m.get("context_relevance"),
-                    context_precision=m.get("context_precision"),
-                    context_recall=m.get("context_recall"),
+                    relevance=m.get("relevance"),
+                    discrimination=m.get("discrimination"),
+                    diversity=m.get("diversity"),
                     chunk_count=stats.final_chunks,
                     detail={"chunk_details": m.get("chunk_details", [])},
                 )

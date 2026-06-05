@@ -6,6 +6,7 @@ import { BookOpen, BriefcaseBusiness, Sparkles, RefreshCw, Star } from "lucide-r
 import { getReview, getReferenceAnswer, addFavorite, getSessionRAGMetrics, type RAGEvalMetrics } from "../api/interview";
 import { cn } from "@/lib/utils";
 import { metricColorVar } from "@/lib/metrics";
+import { MetricInfoTooltip } from "@/components/MetricInfoTooltip";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -457,12 +458,11 @@ interface DrillReviewProps {
   ragEvalMetrics?: RAGEvalMetrics | null;
 }
 
-function RAGQualityBadge({ value, label }: { value: number | null | undefined; label: string }) {
+function RAGQualityBadge({ value, label, metricKey }: { value: number | null | undefined; label: string; metricKey?: string }) {
   if (value == null) return null;
   const pct = Math.round(value);
-  const color = metricColorVar(value / 100);
-  const bg = pct >= 70 ? "rgba(56,106,32,0.12)" : pct >= 40 ? "rgba(125,88,0,0.12)" : "rgba(179,38,30,0.12)";
-  return (
+  const color = metricColorVar(value / 100, metricKey);
+  const badge = (
     <div className="flex flex-col items-center gap-0.5 rounded-lg border border-border/40 bg-card/60 px-3 py-2 min-w-[80px]">
       <span className="text-[11px] text-muted-fg">{label}</span>
       <span className="text-lg font-semibold font-mono tabular-nums" style={{ color }}>{pct}%</span>
@@ -471,6 +471,7 @@ function RAGQualityBadge({ value, label }: { value: number | null | undefined; l
       </div>
     </div>
   );
+  return metricKey ? <MetricInfoTooltip metricKey={metricKey} label={label}>{badge}</MetricInfoTooltip> : badge;
 }
 
 function DrillReview({ scores, overall, questions, answers, topic, sessionId, cachedRefAnswers, ragEvalMetrics }: DrillReviewProps) {
@@ -552,9 +553,9 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
         <div className="mb-4 animate-fade-in">
           <div className="text-[11px] font-medium text-muted-fg tracking-wider mb-2">RAG 质量</div>
           <div className="grid grid-cols-3 gap-2">
-            <RAGQualityBadge label="忠实度" value={ragEvalMetrics.faithfulness} />
-            <RAGQualityBadge label="切题度" value={ragEvalMetrics.answer_relevance} />
-            <RAGQualityBadge label="综合质量" value={ragEvalMetrics.answer_correctness} />
+            <RAGQualityBadge label="忠实度" value={ragEvalMetrics.faithfulness} metricKey="faithfulness" />
+            <RAGQualityBadge label="切题度" value={ragEvalMetrics.answer_relevance} metricKey="answer_relevance" />
+            <RAGQualityBadge label="综合质量" value={ragEvalMetrics.answer_correctness} metricKey="answer_correctness" />
           </div>
         </div>
       )}

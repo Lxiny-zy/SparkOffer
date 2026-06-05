@@ -10,6 +10,7 @@ import { getRAGMetrics, getTopics, type RAGMetricsRecord } from "../api/intervie
 import { startRagEval, getRagEvalStatus, type RagEvalStatus, type RagEvalSummary, type RagEvalQuestionDetail } from "../api/ragEval";
 import { cn } from "@/lib/utils";
 import { fmtPct01, metricColorVar } from "@/lib/metrics";
+import { MetricInfoTooltip } from "@/components/MetricInfoTooltip";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,7 +30,7 @@ function halfMeanDelta(
   return mean(newer) - mean(older);
 }
 
-function MetricCard({ label, value, delta }: { label: string; value: number | null; delta?: number | null }) {
+function MetricCard({ label, value, delta, metricKey }: { label: string; value: number | null; delta?: number | null; metricKey?: string }) {
   if (value == null) return (
     <div className="rounded-xl border border-border/40 bg-card/60 px-4 py-3 text-center">
       <div className="text-[11px] text-muted-fg mb-1">{label}</div>
@@ -37,9 +38,9 @@ function MetricCard({ label, value, delta }: { label: string; value: number | nu
     </div>
   );
   const p = Math.round(value * 100);
-  const color = metricColorVar(value);
+  const color = metricColorVar(value, metricKey);
   const deltaPct = delta != null ? Math.round(delta * 100) : null;
-  return (
+  const card = (
     <div data-spotlight className="spotlight rounded-xl border border-border/40 bg-card/60 px-4 py-3 text-center transition-all duration-300 hover:-translate-y-0.5 hover:border-primary/40">
       <div className="text-[11px] text-muted-fg mb-1">{label}</div>
       <div className="text-2xl font-bold font-mono tabular-nums" style={{ color }}>{p}%</div>
@@ -50,6 +51,7 @@ function MetricCard({ label, value, delta }: { label: string; value: number | nu
       )}
     </div>
   );
+  return metricKey ? <MetricInfoTooltip metricKey={metricKey} label={label}>{card}</MetricInfoTooltip> : card;
 }
 
 function RetrievalTrendTooltip({ active, payload }: { active?: boolean; payload?: any[] }) {
@@ -61,8 +63,8 @@ function RetrievalTrendTooltip({ active, payload }: { active?: boolean; payload?
       <div className="text-dim">{d.topic}</div>
       <div className="mt-1 space-y-0.5">
         {d.relevance != null && <div style={{ color: "var(--primary)" }}>相关度: {fmtPct01(d.relevance)}</div>}
-        {d.precision != null && <div style={{ color: "var(--green)" }}>排序质量: {fmtPct01(d.precision)}</div>}
-        {d.recall != null && <div style={{ color: "var(--warning)" }}>覆盖率: {fmtPct01(d.recall)}</div>}
+        {d.discrimination != null && <div style={{ color: "var(--green)" }}>区分度: {fmtPct01(d.discrimination)}</div>}
+        {d.diversity != null && <div style={{ color: "var(--warning)" }}>多样性: {fmtPct01(d.diversity)}</div>}
       </div>
     </div>
   );
@@ -160,7 +162,7 @@ export default function RAGDashboard() {
   }, [records, selectedTopic]);
 
   const retrievalRecords = useMemo(() =>
-    filtered.filter((r) => r.stage === "question_gen" && r.context_relevance != null),
+    filtered.filter((r) => r.stage === "question_gen" && r.relevance != null),
     [filtered],
   );
 
@@ -171,12 +173,12 @@ export default function RAGDashboard() {
 
   // Summary cards — headline value is the overall average.
   const avgRelevance = retrievalRecords.length
-    ? retrievalRecords.reduce((s, r) => s + (r.context_relevance ?? 0), 0) / retrievalRecords.length : null;
+    ? retrievalRecords.reduce((s, r) => s + (r.relevance ?? 0), 0) / retrievalRecords.length : null;
   const avgFaithfulness = evalRecords.length
     ? evalRecords.reduce((s, r) => s + (r.faithfulness ?? 0), 0) / evalRecords.length : null;
 
   // Trend arrow: newer half mean − older half mean (records are DESC).
-  const relevanceDelta = halfMeanDelta(retrievalRecords, (r) => r.context_relevance);
+  const relevanceDelta = halfMeanDelta(retrievalRecords, (r) => r.relevance);
   const faithfulnessDelta = halfMeanDelta(evalRecords, (r) => r.faithfulness);
 
   // Retrieval trend data (chronological)
@@ -185,9 +187,9 @@ export default function RAGDashboard() {
       index: i,
       date: r.created_at?.slice(0, 10) || "",
       topic: r.topic,
-      relevance: r.context_relevance,
-      precision: r.context_precision,
-      recall: r.context_recall,
+      relevance: r.relevance,
+      discrimination: r.discrimination,
+      diversity: r.diversity,
     })),
     [retrievalRecords],
   );
@@ -210,7 +212,7 @@ export default function RAGDashboard() {
     const byTopic: Record<string, number[]> = {};
     for (const r of retrievalRecords) {
       if (!byTopic[r.topic]) byTopic[r.topic] = [];
-      if (r.context_relevance != null) byTopic[r.topic].push(r.context_relevance);
+      if (r.relevance != null) byTopic[r.topic].push(r.relevance);
     }
     return Object.entries(byTopic).map(([topic, vals]) => ({
       topic: topics[topic]?.name || topic,
@@ -223,7 +225,7 @@ export default function RAGDashboard() {
     const byTopic: Record<string, { excellent: number; good: number; fair: number; poor: number }> = {};
     for (const r of retrievalRecords) {
       if (!byTopic[r.topic]) byTopic[r.topic] = { excellent: 0, good: 0, fair: 0, poor: 0 };
-      const v = r.context_relevance ?? 0;
+      const v = r.relevance ?? 0;
       if (v >= 0.7) byTopic[r.topic].excellent++;
       else if (v >= 0.5) byTopic[r.topic].good++;
       else if (v >= 0.3) byTopic[r.topic].fair++;
@@ -414,8 +416,8 @@ export default function RAGDashboard() {
                       <YAxis domain={[0, 1]} tickFormatter={(v: number) => `${Math.round(v * 100)}%`} tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <Tooltip content={<RetrievalTrendTooltip />} />
                       <Line type="monotone" dataKey="relevance" stroke="var(--primary)" strokeWidth={2} dot={false} name="相关度" />
-                      <Line type="monotone" dataKey="precision" stroke="var(--green)" strokeWidth={1.5} dot={false} name="排序质量" />
-                      <Line type="monotone" dataKey="recall" stroke="var(--warning)" strokeWidth={1.5} dot={false} name="覆盖率" />
+                      <Line type="monotone" dataKey="discrimination" stroke="var(--green)" strokeWidth={1.5} dot={false} name="区分度" />
+                      <Line type="monotone" dataKey="diversity" stroke="var(--warning)" strokeWidth={1.5} dot={false} name="多样性" />
                     </LineChart>
                   </ResponsiveContainer>
                 ) : (
@@ -509,8 +511,8 @@ export default function RAGDashboard() {
                         <th className="text-left py-2 px-2 font-medium">Session</th>
                         <th className="text-left py-2 px-2 font-medium">Topic</th>
                         <th className="text-center py-2 px-2 font-medium">相关度</th>
-                        <th className="text-center py-2 px-2 font-medium">排序</th>
-                        <th className="text-center py-2 px-2 font-medium">覆盖</th>
+                        <th className="text-center py-2 px-2 font-medium">区分</th>
+                        <th className="text-center py-2 px-2 font-medium">多样</th>
                         <th className="text-center py-2 px-2 font-medium">忠实</th>
                         <th className="text-center py-2 px-2 font-medium">切题</th>
                         <th className="text-center py-2 px-2 font-medium">日期</th>
@@ -523,19 +525,19 @@ export default function RAGDashboard() {
                           <td className="py-2 px-2 font-mono text-[11px] text-muted-fg">{session_id.slice(0, 8)}</td>
                           <td className="py-2 px-2">{topics[retrieval?.topic || evalR?.topic || ""]?.name || retrieval?.topic || evalR?.topic || "--"}</td>
                           <td className="py-2 px-2 text-center">
-                            <MetricPill value={retrieval?.context_relevance} />
+                            <MetricPill value={retrieval?.relevance} metricKey="relevance" />
                           </td>
                           <td className="py-2 px-2 text-center">
-                            <MetricPill value={retrieval?.context_precision} />
+                            <MetricPill value={retrieval?.discrimination} metricKey="discrimination" />
                           </td>
                           <td className="py-2 px-2 text-center">
-                            <MetricPill value={retrieval?.context_recall} />
+                            <MetricPill value={retrieval?.diversity} metricKey="diversity" />
                           </td>
                           <td className="py-2 px-2 text-center">
-                            <MetricPill value={evalR?.faithfulness} />
+                            <MetricPill value={evalR?.faithfulness} metricKey="faithfulness" />
                           </td>
                           <td className="py-2 px-2 text-center">
-                            <MetricPill value={evalR?.answer_relevance} />
+                            <MetricPill value={evalR?.answer_relevance} metricKey="answer_relevance" />
                           </td>
                           <td className="py-2 px-2 text-center text-muted-fg">
                             {(retrieval?.created_at || evalR?.created_at || "").slice(0, 10)}
@@ -563,14 +565,15 @@ export default function RAGDashboard() {
   );
 }
 
-function MetricPill({ value }: { value: number | null | undefined }) {
+function MetricPill({ value, metricKey }: { value: number | null | undefined; metricKey?: string }) {
   if (value == null) return <span className="text-muted-fg">--</span>;
   const p = Math.round(value * 100);
-  return (
-    <span className="font-mono tabular-nums font-medium" style={{ color: metricColorVar(value) }}>
+  const pill = (
+    <span className="font-mono tabular-nums font-medium" style={{ color: metricColorVar(value, metricKey) }}>
       {p}%
     </span>
   );
+  return metricKey ? <MetricInfoTooltip metricKey={metricKey}>{pill}</MetricInfoTooltip> : pill;
 }
 
 const EVAL_PHASE_LABEL: Record<string, string> = {
@@ -603,7 +606,7 @@ function EvalProgress({ status }: { status: RagEvalStatus }) {
 }
 
 const RESULT_METRICS: { key: keyof RagEvalSummary; label: string }[] = [
-  { key: "hit_at_k", label: "Hit@K" },
+  { key: "hit_at_k_strict", label: "Hit@K (严格)" },
   { key: "mrr", label: "MRR" },
   { key: "context_precision", label: "Precision" },
   { key: "context_recall", label: "Recall" },
@@ -616,9 +619,14 @@ function RagEvalResultCard({ status, topicName }: { status: RagEvalStatus; topic
   const [showDetail, setShowDetail] = useState(false);
   const s = status.summary!;
   const questions: RagEvalQuestionDetail[] = status.detail?.questions ?? [];
+  // Older runs predate hit_at_k_strict — fall back to hit_at_k so they still render.
+  const metricValue = (key: keyof RagEvalSummary): number | null => {
+    if (key === "hit_at_k_strict" && s.hit_at_k_strict == null) return s.hit_at_k ?? null;
+    return (s[key] as number | null) ?? null;
+  };
   const radarData = RESULT_METRICS.map(({ key, label }) => ({
     metric: label,
-    value: s[key] == null ? 0 : Math.round((s[key] as number) * 100),
+    value: metricValue(key) == null ? 0 : Math.round((metricValue(key) as number) * 100),
   }));
   return (
     <div className="rounded-xl border border-border/50 bg-muted/20 p-4 space-y-4">
@@ -631,7 +639,7 @@ function RagEvalResultCard({ status, topicName }: { status: RagEvalStatus; topic
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
         {RESULT_METRICS.map(({ key, label }) => (
-          <MetricCard key={key} label={label} value={(s[key] as number | null) ?? null} />
+          <MetricCard key={key} label={label} value={metricValue(key)} metricKey={key} />
         ))}
       </div>
 
@@ -646,7 +654,10 @@ function RagEvalResultCard({ status, topicName }: { status: RagEvalStatus; topic
 
       <p className="text-[11px] text-muted-fg">
         注：评测基于<strong className="text-foreground">基础向量检索</strong>，不含线上出题链路的 RRF 融合 / 重排；
-        hit@k、MRR 反映底层检索质量，非端到端出题效果。
+        Hit@K、MRR 反映底层检索质量，非端到端出题效果。
+        <strong className="text-foreground">严格 Hit@K</strong> 已排除「检索到 gold 问题自身源文」的送分自命中，
+        比原始 Hit@K 更接近真实泛化检索表现。Faithfulness / Recall 采用 full/partial/none 三档加权，
+        避免「沾边即满分」的乐观偏差。
       </p>
 
       {questions.length > 0 && (
@@ -678,12 +689,14 @@ function RagEvalResultCard({ status, topicName }: { status: RagEvalStatus; topic
                         <div className="truncate" title={q.question}>{q.question}</div>
                         <div className="text-[10px] text-muted-fg truncate" title={q.gold_source}>{q.gold_source || "—"}</div>
                       </td>
-                      <td className="py-1.5 px-2 text-center font-mono tabular-nums">{q.rank ?? "—"}</td>
-                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.context_precision} /></td>
-                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.context_recall} /></td>
-                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.faithfulness} /></td>
-                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.answer_relevancy} /></td>
-                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.answer_correctness} /></td>
+                      <td className="py-1.5 px-2 text-center font-mono tabular-nums">
+                        {q.rank ?? "—"}{q.trivial_hit ? <span title="送分自命中（检索到 gold 源文自身）" className="ml-0.5 text-[9px]" style={{ color: "var(--warning)" }}>*</span> : null}
+                      </td>
+                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.context_precision} metricKey="context_precision" /></td>
+                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.context_recall} metricKey="context_recall" /></td>
+                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.faithfulness} metricKey="faithfulness" /></td>
+                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.answer_relevancy} metricKey="answer_relevancy" /></td>
+                      <td className="py-1.5 px-2 text-center"><MetricPill value={q.answer_correctness} metricKey="answer_correctness" /></td>
                     </tr>
                   ))}
                 </tbody>

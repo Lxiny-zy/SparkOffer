@@ -1,12 +1,24 @@
 """RAG quality metrics — embedding-based retrieval metrics + LLM-based generation metrics.
 
-Retrieval metrics (zero extra LLM cost):
-- Context Relevance: mean cosine(query_emb, chunk_emb)
-- Context Precision: Average Precision — are relevant chunks ranked higher?
-- Context Recall: fraction of weak_points covered by at least one chunk.
-  ``None`` when there are no weak_points to measure against — recall is
-  undefined without something to recall, and a fabricated number would
-  silently pollute the dashboard.
+These are the **online, zero-LLM-cost health gauges** computed on the question-gen
+hot path. They are NOT ground-truth precision/recall — for that, see the offline
+RAGAS benchmark in ``backend/rag_eval.py`` (synthesizes a golden set with known
+provenance). The two systems are different scales and are NOT comparable.
+
+Why the previous precision/recall were dropped: chunks are retrieved by cosine to
+the query set, so scoring those same chunks against those same queries is circular
+— Average Precision was pinned at ~1.0 and recall at ~100%. Replaced with three
+non-circular signals measured from the embeddings we already have:
+
+Retrieval metrics (zero extra LLM cost, no ground truth):
+- Relevance: mean over queries of max cosine(query, chunk). How well retrieved
+  content fits the query. Naturally lands ~0.45-0.65 (short query vs long doc).
+- Discrimination: mean over queries of (top-1 cosine − top-2 cosine). Does
+  retrieval clearly single out a best chunk, or return a flat wash of near-ties?
+  Measures intra-result contrast, not query↔chunk circularity.
+- Diversity: 1 − mean pairwise cosine across the final chunks. Catches retrieval
+  collapse (a pile of near-duplicate passages). Reuses the chunk embeddings the
+  dedup stage already computed — zero extra embedding cost.
 
 Generation metrics (extracted from existing LLM eval response):
 - Faithfulness: is the answer grounded in RAG context? (0-10)
@@ -46,18 +58,16 @@ def clamp_score_0_10(value) -> float | None:
 
 @dataclass
 class RetrievalMetrics:
-    context_relevance: float = 0.0
-    context_precision: float = 0.0
-    context_recall: float | None = None
+    relevance: float = 0.0
+    discrimination: float = 0.0
+    diversity: float = 0.0
     chunk_details: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
-            "context_relevance": round(self.context_relevance, 4),
-            "context_precision": round(self.context_precision, 4),
-            "context_recall": (
-                round(self.context_recall, 4) if self.context_recall is not None else None
-            ),
+            "relevance": round(self.relevance, 4),
+            "discrimination": round(self.discrimination, 4),
+            "diversity": round(self.diversity, 4),
             "chunk_details": self.chunk_details,
         }
 
@@ -81,9 +91,8 @@ async def compute_retrieval_metrics(
     chunks: list[str],
     chunk_embeddings: list[np.ndarray | None],
     chunk_sources: list[str],
-    weak_points: list[str],
 ) -> RetrievalMetrics | None:
-    """Compute retrieval quality metrics using embeddings only.
+    """Compute retrieval quality metrics using embeddings only (no ground truth).
 
     Returns ``None`` when metrics cannot be measured (no chunks, every chunk or
     query embedding missing, or a dimension mismatch from a stale embedding
@@ -108,25 +117,35 @@ async def compute_retrieval_metrics(
     chunk_dim = next(iter(chunk_dims))
     chunk_matrix = np.vstack(valid_chunk_embs)
 
-    # Embed queries + weak_points in ONE batch and reuse. weak_points are a
-    # subset of the queries that drove retrieval, so the previous code embedded
-    # them twice (relevance loop + recall) on the question-gen hot path.
-    emb_map = await _embed_unique([*query_texts, *(weak_points or [])])
-
+    emb_map = await _embed_unique(query_texts)
     query_embs = [emb_map.get(t) for t in query_texts]
     valid_query_embs = [e for e in query_embs if e is not None and e.shape[0] == chunk_dim]
     if not valid_query_embs:
         return None
-    all_query_matrix = np.vstack(valid_query_embs)
 
-    # Context Relevance: mean of max cosine(query, chunk) across queries
+    # Relevance: mean over queries of max cosine(query, chunk).
+    # Discrimination: mean over queries of (top-1 − top-2 cosine). A flat result
+    # set (everything near-tied) scores low; a clear winner scores high.
     relevance_scores: list[float] = []
+    discrimination_scores: list[float] = []
     for q_emb in valid_query_embs:
         sims = _cosine_similarity(q_emb, chunk_matrix)
         relevance_scores.append(float(np.max(sims)))
-    context_relevance = float(np.mean(relevance_scores)) if relevance_scores else 0.0
+        if sims.shape[0] >= 2:
+            top2 = np.sort(sims)[-2:]
+            discrimination_scores.append(float(top2[1] - top2[0]))
+        else:
+            # Single chunk → no runner-up to beat; treat as fully discriminative.
+            discrimination_scores.append(1.0)
+    relevance = float(np.mean(relevance_scores)) if relevance_scores else 0.0
+    discrimination = float(np.mean(discrimination_scores)) if discrimination_scores else 0.0
+
+    # Diversity: 1 − mean upper-triangle pairwise cosine across final chunks.
+    # High = varied passages; low = retrieval collapsed onto near-duplicates.
+    diversity = _compute_diversity(chunk_matrix)
 
     # Per-chunk scores (max cosine to any query) — aligned to `chunks` order.
+    all_query_matrix = np.vstack(valid_query_embs)
     per_chunk_scores: list[float] = []
     for emb in chunk_embeddings:
         if emb is not None and emb.shape[0] == chunk_dim:
@@ -135,22 +154,15 @@ async def compute_retrieval_metrics(
         else:
             per_chunk_scores.append(0.0)
 
-    # Context Precision: Average Precision — relevant chunks should rank higher
-    context_precision = _average_precision(per_chunk_scores, RELEVANCE_THRESHOLD)
-
-    # Context Recall: fraction of weak_points covered by at least one chunk.
-    wp_embs = [emb_map.get(wp) for wp in (weak_points or [])]
-    context_recall = _compute_recall(wp_embs, chunk_matrix, chunk_dim, weak_points or [])
-
     chunk_details = [
         {"score": round(s, 4), "source": src}
         for s, src in zip(per_chunk_scores, chunk_sources)
     ]
 
     return RetrievalMetrics(
-        context_relevance=max(0.0, min(1.0, context_relevance)),
-        context_precision=max(0.0, min(1.0, context_precision)),
-        context_recall=context_recall,
+        relevance=max(0.0, min(1.0, relevance)),
+        discrimination=max(0.0, min(1.0, discrimination)),
+        diversity=max(0.0, min(1.0, diversity)),
         chunk_details=chunk_details,
     )
 
@@ -218,29 +230,21 @@ async def _embed_unique(texts: list[str]) -> dict[str, np.ndarray]:
     return {t: e for t, e in zip(uniq, embeddings) if e is not None}
 
 
-def _compute_recall(
-    wp_embeddings: list[np.ndarray | None],
-    chunk_matrix: np.ndarray,
-    chunk_dim: int,
-    weak_points: list[str],
-) -> float | None:
-    """Fraction of weak_points whose best chunk cosine ≥ threshold.
+def _compute_diversity(chunk_matrix: np.ndarray) -> float:
+    """1 − mean upper-triangle pairwise cosine across the retrieved chunks.
 
-    Returns None when recall is unmeasurable — no weak_points to recall, or
-    none of them could be embedded. The rag_metrics.context_recall column is
-    nullable and the frontend renders None as "--".
+    High = varied passages; low = retrieval collapsed onto near-duplicates.
+    A single chunk has no pairs to compare → diversity is undefined; return 0.0
+    (one chunk is, by definition, not a diverse result set).
     """
-    if not weak_points:
-        return None
-    covered = 0
-    measured = 0
-    for emb in wp_embeddings:
-        if emb is None or emb.shape[0] != chunk_dim:
-            continue
-        measured += 1
-        sims = _cosine_similarity(emb, chunk_matrix)
-        if float(np.max(sims)) >= RELEVANCE_THRESHOLD:
-            covered += 1
-    if measured == 0:
-        return None
-    return covered / measured
+    n = chunk_matrix.shape[0]
+    if n < 2:
+        return 0.0
+    # Row-normalize, then the Gram matrix is all pairwise cosines.
+    norms = np.linalg.norm(chunk_matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    normed = chunk_matrix / norms
+    gram = normed @ normed.T
+    iu = np.triu_indices(n, k=1)
+    mean_sim = float(np.mean(gram[iu]))
+    return max(0.0, min(1.0, 1.0 - mean_sim))

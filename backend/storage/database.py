@@ -263,6 +263,15 @@ def init_all_tables():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_metrics_user ON rag_metrics(user_id, created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_metrics_topic ON rag_metrics(user_id, topic, created_at DESC)")
 
+    # question_gen stage moved off circular precision/recall to non-circular
+    # relevance/discrimination/diversity. Old context_* columns kept for read-only
+    # history; new rows write the two new columns.
+    for col in ("discrimination", "diversity"):
+        try:
+            conn.execute(f"SELECT {col} FROM rag_metrics LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute(f"ALTER TABLE rag_metrics ADD COLUMN {col} REAL")
+
     # ── rag_eval_runs ──
     # 离线 RAGAS 基准评测结果（每次评测一行）。与 rag_metrics（线上免费健康度仪表，
     # 按 session/stage 记录）刻意分表：本表是 run 级、带 gold 标注的基准指标
@@ -293,6 +302,13 @@ def init_all_tables():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_eval_runs_user ON rag_eval_runs(user_id, created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_eval_runs_topic ON rag_eval_runs(user_id, topic, created_at DESC)")
+
+    # hit_at_k_strict excludes trivial self-hits (gold synthesized from the same
+    # chunk it retrieves) — a less optimistic retrieval signal than hit_at_k.
+    try:
+        conn.execute("SELECT hit_at_k_strict FROM rag_eval_runs LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE rag_eval_runs ADD COLUMN hit_at_k_strict REAL")
 
     conn.commit()
     logger.info("All database tables and indexes initialized.")

@@ -6,6 +6,7 @@ import { API_BASE, authFetch } from "./client";
 
 export interface RagEvalSummary {
   hit_at_k: number | null;
+  hit_at_k_strict: number | null;
   mrr: number | null;
   context_precision: number | null;
   context_recall: number | null;
@@ -22,6 +23,7 @@ export interface RagEvalQuestionDetail {
   generated_answer: string;
   rank: number | null;
   hit: number;
+  trivial_hit?: boolean;
   context_precision: number | null;
   context_recall: number | null;
   faithfulness: number | null;
@@ -66,6 +68,7 @@ export interface RagEvalRun {
   k: number;
   judge_mode: string;
   hit_at_k: number | null;
+  hit_at_k_strict: number | null;
   mrr: number | null;
   context_precision: number | null;
   context_recall: number | null;

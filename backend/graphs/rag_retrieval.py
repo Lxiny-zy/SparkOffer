@@ -151,7 +151,6 @@ async def retrieve_for_drill(
             chunks=final,
             chunk_embeddings=final_embeddings,
             chunk_sources=final_sources,
-            weak_points=weak_points,
         )
         rag_metrics_dict = metrics.to_dict() if metrics is not None else None
     except Exception as exc:
