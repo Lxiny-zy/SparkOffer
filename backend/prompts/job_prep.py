@@ -9,6 +9,7 @@ from backend.prompts._common import (
     ANCHOR_EXAMPLES,
     LANGUAGE_TERMINOLOGY,
     JSON_OUTPUT_DISCIPLINE,
+    EVAL_FIELD_DISCIPLINE,
     injection_guard,
 )
 
@@ -232,13 +233,7 @@ JOB_PREP_EVAL_PROMPT = """你是负责 AI 后端 / LLM 应用方向招聘的技�
 
 """ + LANGUAGE_TERMINOLOGY + """
 
-## 字段写作规范（强约束）
-
-- `assessment`：60-150 字单段，先点对错关键再补具体观察
-- `improvement`：必须**动词开头**（"补充..."、"先用...再..."、"画一张...图"等）；禁止"建议加强"、"需要提升"
-- `understanding`：必须从 `["核心理解正确", "有偏差", "完全跑偏"]` 三选一
-- `weak_point`：仅当该题 score ≤ 5 时填具体短板；其余题填 `null`
-- `key_missing`：最多 3 项，带具体技术点
+""" + EVAL_FIELD_DISCIPLINE + """
 - `role_expectation`：1 句话，说明该题对应岗位在看候选人的什么能力
 - `interviewer_hotspots`：如果继续面试最可能被追问的点，3-5 条
 - `prep_priorities`：面试前必补的 3-5 个点，每条**动词开头**

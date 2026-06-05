@@ -3,8 +3,6 @@
 支持 Python / Java 等多种语言，强调多解法对比、语言特化注意点、工程实践视角。
 """
 
-from backend.prompts._common import LANGUAGE_TERMINOLOGY
-
 
 ALGORITHM_SOLVE_SYSTEM = """你是一位资深算法工程师，参加过多次算法竞赛，并辅导过大量面试候选人。
 你的回答需要满足三个标准：
@@ -71,8 +69,6 @@ ALGORITHM_SOLVE_PROMPT = """请分析并解决以下算法问题。
 - **生产环境补丁**：在面试场景下能展示工程素养的额外考虑（输入校验、可观测、并发安全、单测覆盖）
 
 ---
-
-""" + LANGUAGE_TERMINOLOGY + """
 
 ## 风格
 
