@@ -426,7 +426,7 @@ export default function Interview() {
   if (isBatchMode) {
     return (
       <div className="flex-1 flex flex-col h-full">
-        <div className="flex items-center justify-between px-3 py-2.5 md:px-6 md:py-3 border-b border-border/50 bg-card/70 backdrop-blur-sm flex-wrap gap-2">
+        <div className="flex items-center justify-between px-3 py-2.5 md:px-6 md:py-3 border-b border-border/50 flex-wrap gap-2" style={{ background: "var(--sig-bg)" }}>
           <div className="flex items-center gap-2 md:gap-3 flex-wrap min-w-0">
             <Badge variant={modeBadge.variant as any}>{modeBadge.text}</Badge>
             {isJobPrep
@@ -484,10 +484,10 @@ export default function Interview() {
           ) : currentQ ? (
             <>
               <div className="w-full max-w-[720px] flex items-center gap-3">
-                <div className="flex-1 h-1 rounded-full bg-border overflow-hidden">
-                  <div className="h-full rounded-full bg-primary transition-[width] duration-300 ease-in-out" style={{ width: `${(currentIndex / totalQ) * 100}%` }} />
+                <div className="sig-progress flex-1">
+                  <div className="sig-progress-fill" style={{ width: `${(currentIndex / totalQ) * 100}%` }} />
                 </div>
-                <span className="text-[12px] text-dim whitespace-nowrap font-mono">{currentIndex + 1} / {totalQ}</span>
+                <span className="text-[12px] text-dim whitespace-nowrap sig-num">{currentIndex + 1} / {totalQ}</span>
               </div>
 
               {/* L1 — 题号 + 分类侧边栏 */}
@@ -504,7 +504,7 @@ export default function Interview() {
                 </div>
 
                 {/* L2 — 题目主卡（站 C 位） */}
-                <Card className="flex-1 min-w-0 card-hover-lift question-hero">
+                <Card hoverLift className="flex-1 min-w-0 question-hero">
                   <CardContent className="p-5 md:p-8">
                     {/* 顶栏：标签 */}
                     <div className="flex items-center gap-2 flex-wrap mb-5 md:mb-6">
@@ -591,7 +591,7 @@ export default function Interview() {
                 <div className="flex-1 relative">
                   <textarea
                     ref={textareaRef}
-                    className="w-full min-h-[100px] md:min-h-[80px] max-h-[240px] px-4 py-3 rounded-xl border border-border bg-input text-text resize-none text-[15px] md:text-sm leading-relaxed pl-12 placeholder:text-dim/50 focus-visible:outline-none focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary/30"
+                    className="sig-textarea w-full min-h-[100px] md:min-h-[80px] max-h-[240px] pl-12 text-[15px] md:text-sm"
                     value={drillInput}
                     onChange={(e) => setDrillInput(e.target.value)}
                     onKeyDown={handleKeyDown}
@@ -630,7 +630,7 @@ export default function Interview() {
 
   return (
     <div className="flex-1 flex flex-col h-full">
-      <div className="flex items-center justify-between px-4 py-3 md:px-6 border-b border-border/50 bg-card/70 backdrop-blur-sm">
+      <div className="flex items-center justify-between px-4 py-3 md:px-6 border-b border-border/50" style={{ background: "var(--sig-bg)" }}>
         <div className="flex items-center gap-2 md:gap-3 flex-wrap">
           <Badge variant={modeBadge.variant as any}>{modeBadge.text}</Badge>
           {effectiveInit.topic && <span className="text-sm text-dim">{effectiveInit.topic}</span>}
@@ -661,11 +661,11 @@ export default function Interview() {
         <div ref={chatEndRef} />
       </div>
 
-        <div className="px-3 pt-3 pb-4 md:px-6 md:pt-4 md:pb-6 flex justify-center safe-area-bottom border-t border-border/50 backdrop-blur-sm bg-card/30">
+        <div className="px-3 pt-3 pb-4 md:px-6 md:pt-4 md:pb-6 flex justify-center safe-area-bottom border-t border-border/50" style={{ background: "var(--sig-bg)" }}>
           <div className="relative w-full max-w-3xl">
             <textarea
               ref={textareaRef}
-              className="w-full px-4 py-3.5 md:px-5 md:py-4 pl-12 min-h-[72px] md:min-h-[80px] max-h-[200px] md:max-h-[240px] rounded-2xl border border-border bg-bg/80 backdrop-blur-sm text-text resize-none text-[15px] leading-normal placeholder:text-dim/50 focus-visible:outline-none focus-visible:border-primary/40 focus-visible:ring-2 focus-visible:ring-primary/30 transition-all"
+              className="sig-textarea w-full pl-12 min-h-[72px] md:min-h-[80px] max-h-[200px] md:max-h-[240px] text-[15px]"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -682,7 +682,7 @@ export default function Interview() {
         </div>
     {/* End confirmation dialog */}
     {showEndConfirm && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+      <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "var(--sig-overlay)" }}>
         <Card className="w-full max-w-sm mx-4 animate-fade-in">
           <CardContent className="p-5 text-center space-y-4">
             <h3 className="text-lg font-semibold">

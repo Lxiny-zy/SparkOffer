@@ -134,20 +134,18 @@ export default function AlgorithmSolver() {
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
       {/* Header */}
-      <div className="mb-8 animate-fade-in relative">
-        <div className="absolute -top-6 -left-6 w-[180px] h-[120px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
-        <div className="relative">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2">
-              <Code2 size={20} className="text-primary" />
-              <h1 className="text-2xl md:text-[28px] font-display font-bold aurora-text">算法解题</h1>
-            </div>
-            <Button variant="outline" size="sm" onClick={() => navigate("/algorithm/collection")}>
-              <Library size={14} /> 算法收藏
-            </Button>
+      <div className="mb-8 animate-fade-in">
+        <div className="sig-kicker mb-2">// 算法解题 / ALGORITHM</div>
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-2">
+            <Code2 size={20} className="text-[color:var(--sig-accent)]" />
+            <h1 className="sig-display text-2xl md:text-[28px]">算法竞技场<span className="sig-accent-c">.</span></h1>
           </div>
-          <p className="text-sm text-dim">粘贴算法题目，AI 帮你分析解答，支持多轮对话修改</p>
+          <Button variant="outline" size="sm" onClick={() => navigate("/algorithm/collection")}>
+            <Library size={14} /> 算法收藏
+          </Button>
         </div>
+        <p className="text-sm text-dim">粘贴算法题目，AI 帮你分析解答，支持多轮对话修改</p>
       </div>
 
       {/* Input Section */}
@@ -170,7 +168,7 @@ export default function AlgorithmSolver() {
             />
             <div className="flex items-center gap-2">
               <select
-                className="bg-card border border-border rounded-lg px-3 py-2 sm:py-1.5 text-sm h-10 sm:h-9 flex-1 sm:flex-none"
+                className="sig-field w-auto px-3 py-2 sm:py-1.5 text-sm h-10 sm:h-9 flex-1 sm:flex-none"
                 value={language}
                 onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setLanguage(e.target.value)}
                 disabled={solving}
@@ -271,7 +269,7 @@ export default function AlgorithmSolver() {
 
       {/* Save Dialog */}
       {showSave && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "var(--sig-overlay)" }}>
           <Card className="w-full max-w-md mx-4 animate-fade-in">
             <CardContent className="p-5 space-y-4">
               <div className="flex items-center justify-between">
@@ -292,7 +290,7 @@ export default function AlgorithmSolver() {
                 <div>
                   <label className="text-sm font-medium text-dim mb-1 block">难度</label>
                   <select
-                    className="w-full bg-card border border-border rounded-lg px-3 py-2 text-sm"
+                    className="sig-field w-full px-3 py-2 text-sm"
                     value={saveDifficulty}
                     onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setSaveDifficulty(e.target.value)}
                   >

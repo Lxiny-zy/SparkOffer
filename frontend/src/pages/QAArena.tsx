@@ -253,7 +253,7 @@ export default function QAArena() {
   if (!loaded) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <Loader2 className="w-6 h-6 animate-spin text-primary" />
+        <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--sig-accent)" }} />
       </div>
     );
   }
@@ -386,7 +386,7 @@ export default function QAArena() {
               </div>
             </div>
           </aside>
-          <div className="flex-1 bg-black/50 backdrop-blur-sm" onClick={() => setSidebarOpen(false)} />
+          <div className="flex-1 bg-black/50" style={{ background: "var(--sig-overlay)" }} onClick={() => setSidebarOpen(false)} />
         </div>
       )}
 
@@ -470,11 +470,11 @@ export default function QAArena() {
 
         {/* Input */}
         {activeId && (
-          <div className="px-3 md:px-8 py-3 border-t border-border/50 safe-area-bottom backdrop-blur-sm bg-card/30">
+          <div className="px-3 md:px-8 py-3 border-t border-border/50 safe-area-bottom" style={{ background: "var(--sig-bg)" }}>
             <div className="max-w-3xl mx-auto flex items-end gap-2">
               <textarea
                 ref={inputRef}
-                className="flex-1 resize-none rounded-2xl border border-border bg-bg/80 backdrop-blur-sm px-4 py-3 text-[15px] md:text-sm outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/40 transition-all min-h-[44px]"
+                className="sig-textarea flex-1 text-[15px] md:text-sm min-h-[44px]"
                 rows={1}
                 placeholder="输入你的问题... (Enter 发送)"
                 value={input}
@@ -491,7 +491,7 @@ export default function QAArena() {
                 <Button
                   size="icon"
                   variant="destructive"
-                  className="rounded-xl h-11 w-11 md:h-10 md:w-10 shrink-0 shadow-md"
+                  className="h-11 w-11 md:h-10 md:w-10 shrink-0"
                   onClick={handleStop}
                   title="停止生成"
                 >
@@ -500,7 +500,7 @@ export default function QAArena() {
               ) : (
                 <Button
                   size="icon"
-                  className="rounded-xl h-11 w-11 md:h-10 md:w-10 shrink-0 shadow-md"
+                  className="h-11 w-11 md:h-10 md:w-10 shrink-0"
                   onClick={() => handleSend()}
                   disabled={!input.trim()}
                 >
@@ -514,9 +514,9 @@ export default function QAArena() {
 
       {/* ── Summary slide-over ── */}
       {showSummary && summaryResult && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={() => setShowSummary(false)}>
+        <div className="fixed inset-0 z-50 flex justify-end" style={{ background: "var(--sig-overlay)" }} onClick={() => setShowSummary(false)}>
           <div
-            className="w-full max-w-lg bg-bg h-full overflow-y-auto shadow-2xl animate-slide-in-right flex flex-col md:max-w-lg"
+            className="w-full max-w-lg bg-bg h-full overflow-y-auto shadow-2xl animate-slide-in-right flex flex-col md:max-w-lg border-l border-border"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-5 py-4 border-b border-border flex items-center justify-between sticky top-0 bg-bg z-10">
@@ -570,22 +570,18 @@ const ChatMessage = memo(function ChatMessage({ role, content }: { role: string;
 
 function EmptyWelcome({ onNewSession }: { onNewSession: () => void }) {
   return (
-    <div className="flex-1 flex flex-col items-center justify-center text-center py-20 relative">
-      <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-        <div className="w-[400px] h-[400px] rounded-full morph-blob opacity-30" style={{ background: "radial-gradient(circle, var(--glow-accent), transparent 70%)" }} />
+    <div className="flex-1 flex flex-col items-center justify-center text-center py-20">
+      <div className="w-16 h-16 rounded-lg flex items-center justify-center mb-4 mx-auto" style={{ background: "color-mix(in srgb, var(--sig-accent) 10%, transparent)" }}>
+        <MessageSquare className="w-8 h-8" style={{ color: "var(--sig-accent)" }} />
       </div>
-      <div className="relative">
-        <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 mx-auto hover-glow">
-          <MessageSquare className="w-8 h-8 text-primary" />
-        </div>
-        <h3 className="text-lg font-medium mb-2">问答演练场</h3>
-        <p className="text-dim text-sm mb-6 max-w-sm">
-          自由提问，深入学习技术知识。AI 导师会记住你之前的学习内容，帮你建立完整的知识体系。
-        </p>
-        <Button onClick={onNewSession} className="gap-1.5 cta-gradient rounded-xl px-5">
-          <Plus className="w-4 h-4" /> 开始新对话
-        </Button>
-      </div>
+      <div className="sig-kicker mb-2">// 问答演练场 / Q&A ARENA</div>
+      <h3 className="sig-display text-2xl mb-2">自由提问<span className="sig-accent-c">.</span></h3>
+      <p className="text-dim text-sm mb-6 max-w-sm">
+        自由提问，深入学习技术知识。AI 导师会记住你之前的学习内容，帮你建立完整的知识体系。
+      </p>
+      <Button onClick={onNewSession} variant="cta" className="gap-1.5 px-5">
+        <Plus className="w-4 h-4" /> 开始新对话
+      </Button>
     </div>
   );
 }
@@ -593,25 +589,22 @@ function EmptyWelcome({ onNewSession }: { onNewSession: () => void }) {
 function EmptyChat({ onSend }: { onSend: (q: string) => void }) {
   const questions = useMemo(() => pickRandomQuestions(ALL_SUGGESTED_QUESTIONS, SUGGESTED_COUNT), []);
   return (
-    <div className="max-w-3xl mx-auto flex flex-col items-center justify-center py-16 relative">
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[300px] h-[200px] rounded-full pointer-events-none opacity-25" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
-      <div className="relative">
-        <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 mx-auto">
-          <MessageSquare className="w-7 h-7 text-primary" />
-        </div>
-        <h3 className="text-base font-medium mb-1 text-center">有什么想问的？</h3>
-        <p className="text-dim text-sm mb-6 text-center">试试下面的问题，或者直接输入你的疑问</p>
-        <div className="grid gap-2 w-full max-w-md">
-          {questions.map((q, i) => (
-            <button
-              key={i}
-              className="text-left px-4 py-3 rounded-xl border border-border hover:bg-secondary/50 hover:border-primary/30 text-sm transition-all duration-200 hover:shadow-sm"
-              onClick={() => onSend(q)}
-            >
-              {q}
-            </button>
-          ))}
-        </div>
+    <div className="max-w-3xl mx-auto flex flex-col items-center justify-center py-16">
+      <div className="w-14 h-14 rounded-lg flex items-center justify-center mb-4 mx-auto" style={{ background: "color-mix(in srgb, var(--sig-accent) 10%, transparent)" }}>
+        <MessageSquare className="w-7 h-7" style={{ color: "var(--sig-accent)" }} />
+      </div>
+      <h3 className="text-base font-medium mb-1 text-center">有什么想问的？</h3>
+      <p className="text-dim text-sm mb-6 text-center">试试下面的问题，或者直接输入你的疑问</p>
+      <div className="grid gap-2 w-full max-w-md">
+        {questions.map((q, i) => (
+          <button
+            key={i}
+            className="sig-card sig-hover-lift text-left px-4 py-3 text-sm transition-all duration-200"
+            onClick={() => onSend(q)}
+          >
+            {q}
+          </button>
+        ))}
       </div>
     </div>
   );
