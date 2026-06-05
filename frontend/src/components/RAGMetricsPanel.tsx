@@ -19,7 +19,7 @@ export function RAGMetricsPanel({ metrics }: RAGMetricsPanelProps) {
   const chunks = metrics.chunk_details ?? [];
 
   return (
-    <div className="rounded-xl border border-border/60 bg-muted/30 backdrop-blur-sm p-3 space-y-2">
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
       <div className="flex items-center justify-between text-xs">
         <span className="font-medium text-muted-fg">RAG 检索质量</span>
         {chunks.length > 0 && (

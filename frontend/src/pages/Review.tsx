@@ -261,10 +261,10 @@ function DimensionScores({ dimensionScores, avgScore, labels }: DimensionScoresP
           return (
             <div key={key} className="flex items-center gap-3 mb-2.5" style={{ animationDelay: `${idx * 0.1}s` }}>
               <div className="w-[90px] md:w-[110px] text-[13px] text-dim text-right shrink-0">{label}</div>
-              <div className="flex-1 h-2.5 rounded-full bg-border overflow-hidden relative">
+              <div className="flex-1 h-2.5 bg-border overflow-hidden relative">
                 <div
-                  className="h-full rounded-full transition-[width] duration-700 ease-out progress-animated"
-                  style={{ width: `${score * 10}%`, background: `linear-gradient(90deg, ${color}, color-mix(in srgb, ${color} 70%, var(--aurora-2)))` }}
+                  className="h-full transition-[width] duration-700 ease-out"
+                  style={{ width: `${score * 10}%`, background: color }}
                 />
               </div>
               <div className="w-9 text-sm font-semibold text-right shrink-0 score-pop" style={{ color, animationDelay: `${idx * 0.15 + 0.3}s` }}>{score}</div>

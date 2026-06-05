@@ -79,7 +79,7 @@ export const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["com
           style={oneDark}
           customStyle={{
             margin: 0,
-            borderRadius: "12px",
+            borderRadius: "6px",
             fontSize: "13px",
             padding: "16px 18px",
           }}
@@ -107,7 +107,7 @@ export default function ChatBubble({ role, content }: ChatBubbleProps) {
   if (role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
-        <div className="max-w-[70%] px-4 py-2.5 rounded-3xl rounded-tr-lg bg-primary text-primary-foreground text-[15px] leading-[1.7] whitespace-pre-wrap shadow-sm">
+        <div className="max-w-[70%] px-4 py-2.5 rounded-lg rounded-tr-sm bg-primary text-primary-foreground text-[15px] leading-[1.7] whitespace-pre-wrap">
           {content}
         </div>
       </div>
