@@ -247,8 +247,8 @@ export default function FloatingAssistant() {
 
   // Mobile chat panel: push the interview input area down
   const chatPanelClass = isMobile
-    ? "bottom-0 right-0 left-0 sm:left-auto w-full sm:w-[400px] sm:max-w-[calc(100vw-2rem)] h-[100dvh] sm:h-[600px] sm:max-h-[calc(100vh-4rem)] sm:bottom-6 sm:right-6 rounded-t-3xl sm:rounded-3xl"
-    : "bottom-6 right-6 w-[400px] max-w-[calc(100vw-2rem)] h-[600px] max-h-[calc(100vh-4rem)] rounded-3xl";
+    ? "bottom-0 right-0 left-0 sm:left-auto w-full sm:w-[400px] sm:max-w-[calc(100vw-2rem)] h-[100dvh] sm:h-[600px] sm:max-h-[calc(100vh-4rem)] sm:bottom-6 sm:right-6 rounded-t-lg sm:rounded-lg"
+    : "bottom-6 right-6 w-[400px] max-w-[calc(100vw-2rem)] h-[600px] max-h-[calc(100vh-4rem)] rounded-lg";
 
   const handleClearHistory = useCallback(async () => {
     try {
@@ -359,12 +359,12 @@ export default function FloatingAssistant() {
       {isOpen && (
         <div
           className={cn(
-            "fixed z-50 bg-card shadow-2xl flex flex-col overflow-hidden animate-fade-in border border-border/50",
+            "sig-root sig-card fixed z-50 flex flex-col overflow-hidden animate-fade-in shadow-[0_12px_48px_rgba(0,0,0,0.22)]",
             chatPanelClass
           )}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border/50 bg-gradient-to-r from-tertiary/5 to-primary/5">
+          <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "var(--sig-line)" }}>
             <div className="flex items-center gap-2.5">
               <CatAvatar size={36} mood={isStreaming ? "thinking" : (isIdle ? "sleepy" : "happy")} />
               <div>
@@ -376,7 +376,7 @@ export default function FloatingAssistant() {
               {messages.length > 0 && (
                 <button
                   onClick={handleClearHistory}
-                  className="w-8 h-8 rounded-full flex items-center justify-center text-muted-fg hover:text-red-500 hover:bg-red-500/8 transition-all active:scale-[0.93]"
+                  className="w-8 h-8 rounded-md flex items-center justify-center text-muted-fg hover:text-[color:var(--sig-danger)] hover:bg-secondary transition-all active:scale-[0.93]"
                   title="清空对话"
                 >
                   <Trash2 size={14} />
@@ -384,7 +384,7 @@ export default function FloatingAssistant() {
               )}
               <button
                 onClick={() => setIsOpen(false)}
-                className="w-8 h-8 rounded-full flex items-center justify-center text-muted-fg hover:text-text hover:bg-primary/8 transition-all active:scale-[0.93]"
+                className="w-8 h-8 rounded-md flex items-center justify-center text-muted-fg hover:text-text hover:bg-secondary transition-all active:scale-[0.93]"
               >
                 <X size={16} />
               </button>
@@ -403,7 +403,7 @@ export default function FloatingAssistant() {
                     <button
                       key={q}
                       onClick={() => { setInput(q); }}
-                      className="px-4 py-2 rounded-full bg-secondary text-secondary-foreground text-sm hover:bg-secondary/80 transition-all active:scale-[0.97]"
+                      className="sig-btn justify-start text-left text-[13px]"
                     >
                       {q}
                     </button>
@@ -425,8 +425,8 @@ export default function FloatingAssistant() {
                   className={cn(
                     "max-w-[80%] px-4 py-2.5 text-sm leading-relaxed",
                     msg.role === "user"
-                      ? "rounded-3xl rounded-tr-lg bg-primary text-primary-foreground"
-                      : "rounded-3xl rounded-tl-lg bg-secondary text-secondary-foreground"
+                      ? "rounded-lg rounded-tr-sm bg-primary text-primary-foreground"
+                      : "rounded-lg rounded-tl-sm bg-secondary text-secondary-foreground"
                   )}
                 >
                   {msg.role === "assistant" ? (
@@ -456,7 +456,7 @@ export default function FloatingAssistant() {
           </div>
 
           {/* Input */}
-          <div className="px-4 py-3 border-t border-border/50">
+          <div className="px-4 py-3 border-t" style={{ borderColor: "var(--sig-line)" }}>
             <div className="flex items-end gap-2">
               <textarea
                 ref={inputRef}
@@ -465,12 +465,12 @@ export default function FloatingAssistant() {
                 onKeyDown={handleKeyDown}
                 placeholder="和小鱼聊聊吧～"
                 rows={1}
-                className="flex-1 resize-none rounded-2xl bg-muted px-4 py-2.5 text-sm text-text placeholder:text-muted-fg/50 focus:outline-none focus:ring-2 focus:ring-primary/30 max-h-[80px]"
+                className="sig-textarea flex-1 max-h-[80px]"
               />
               <button
                 onClick={handleSend}
                 disabled={!input.trim() || isStreaming}
-                className="w-10 h-10 rounded-full bg-primary text-primary-foreground flex items-center justify-center shrink-0 hover:bg-primary/90 transition-all active:scale-[0.93] disabled:opacity-40 disabled:cursor-not-allowed"
+                className="sig-btn sig-btn-accent w-10 h-10 p-0 shrink-0"
               >
                 <Send size={16} />
               </button>
@@ -503,7 +503,7 @@ export default function FloatingAssistant() {
               style={{ height: "72px" }}
             >
               {/* Background pill */}
-              <div className="absolute inset-0 bg-card rounded-l-2xl shadow-lg border border-border/50 flex items-center justify-center overflow-hidden">
+              <div className="absolute inset-0 bg-card rounded-l-lg border flex items-center justify-center overflow-hidden" style={{ borderColor: "var(--sig-line)", boxShadow: "0 6px 24px rgba(0,0,0,0.16)" }}>
                 {/* Sway wrapper: gentle peek-out motion when not hovered (looks like the cat
                     is actually peeking from behind the edge), settles on hover for stability. */}
                 <div className={isPeekHovered ? "" : "animate-cat-peek-sway"}>

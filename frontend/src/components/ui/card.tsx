@@ -13,16 +13,16 @@ interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
 const Card = React.forwardRef<HTMLDivElement, CardProps>(
   ({ className, variant, interactive = true, hoverLift = false, ...props }, ref) => {
     const variantClass =
-      variant === "tech"
-        ? "rounded-3xl glass-subtle tech-border text-text shadow-[0_4px_24px_rgba(0,0,0,0.06)] transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)]"
-        : variant === "glass"
-        ? "rounded-3xl glass-strong text-text transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)]"
-        : "rounded-3xl bg-card/80 backdrop-blur-sm text-text border border-border/50 shadow-[0_1px_3px_rgba(0,0,0,0.04),0_4px_12px_rgba(0,0,0,0.03)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.06),0_8px_32px_rgba(0,0,0,0.06)] hover:border-border/80 transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)]";
+      variant === "glass"
+        ? "sig-card text-text transition-all duration-200 ease-[cubic-bezier(0.2,0,0,1)]"
+        : variant === "tech"
+        ? "sig-card text-text transition-all duration-200 ease-[cubic-bezier(0.2,0,0,1)]"
+        : "sig-card text-text transition-all duration-200 ease-[cubic-bezier(0.2,0,0,1)]";
     return (
       <div
         ref={ref}
         data-spotlight={interactive ? "" : undefined}
-        className={cn(variantClass, interactive && "spotlight", hoverLift && "card-hover-lift", className)}
+        className={cn(variantClass, interactive && "spotlight", hoverLift && "sig-card-hover", className)}
         {...props}
       />
     );

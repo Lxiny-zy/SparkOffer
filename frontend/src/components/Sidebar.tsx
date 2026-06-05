@@ -87,20 +87,14 @@ export default function Sidebar() {
       <button
         onClick={() => navigate(path)}
         className={cn(
-          "flex items-center gap-3 w-full px-3 py-2.5 rounded-2xl text-[13px] font-medium transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] text-left group relative active:scale-[0.97]",
-          active
-            ? "glass-subtle text-text shadow-[0_2px_12px_var(--glow-primary)]"
-            : "text-muted-fg hover:text-text hover:bg-primary/8",
-          collapsed && "justify-center px-0 rounded-2xl"
+          "sig-navitem active:scale-[0.97]",
+          active && !collapsed && "sig-navitem-active",
+          collapsed && "justify-center px-0"
         )}
       >
-        {active && !collapsed && <span className="nav-active-indicator" />}
         <Icon
           size={18}
-          className={cn(
-            "shrink-0 transition-all duration-300",
-            active ? "text-primary scale-110 drop-shadow-[0_0_6px_var(--tech-glow)]" : "text-muted-fg group-hover:text-text"
-          )}
+          className={cn("shrink-0 transition-colors", active && "text-[color:var(--sig-accent)]")}
         />
         {!collapsed && <span className="truncate">{label}</span>}
       </button>
@@ -112,7 +106,7 @@ export default function Sidebar() {
           <TooltipTrigger asChild>
             <div className="flex flex-col items-center relative">
               {btn}
-              {active && <div className="w-6 h-0.5 rounded-full mt-1" style={{ background: "linear-gradient(90deg, var(--aurora-1), var(--aurora-2))" }} />}
+              {active && <div className="w-5 h-0.5 mt-1" style={{ background: "var(--sig-accent)" }} />}
             </div>
           </TooltipTrigger>
           <TooltipContent side="right" sideOffset={8}>{label}</TooltipContent>
@@ -123,11 +117,9 @@ export default function Sidebar() {
   };
 
   const renderGroup = (group: NavGroup) => (
-    <div key={group.label} className={cn("mb-1", !collapsed && "mb-3")}>
+    <div key={group.label} className={cn("mb-1", !collapsed && "mb-4")}>
       {!collapsed && (
-        <div className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-fg/60">
-          {group.label}
-        </div>
+        <div className="px-3 mb-2 sig-kicker">{group.label}</div>
       )}
       {collapsed && <div className="h-2" />}
       <div className="flex flex-col gap-0.5">
@@ -137,36 +129,39 @@ export default function Sidebar() {
   );
 
   const nav = (
-    <aside className={cn(
-      "flex flex-col h-full bg-sidebar relative transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] overflow-hidden",
-      collapsed ? "w-[72px]" : "w-[260px]"
-    )}>
-      {/* Subtle aurora glow at top */}
-      <div className="absolute top-0 left-0 right-0 h-32 pointer-events-none opacity-40" style={{ background: "radial-gradient(ellipse at top, var(--aurora-2), transparent 70%)" }} />
-
+    <aside
+      className={cn(
+        "flex flex-col h-full relative transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] overflow-hidden border-r",
+        collapsed ? "w-[72px]" : "w-[260px]"
+      )}
+      style={{ background: "var(--sig-bg)", borderColor: "var(--sig-line)" }}
+    >
       {/* Brand */}
       <div className={cn("flex items-center shrink-0 px-4 py-5 relative z-10", collapsed ? "justify-center" : "gap-2.5")}>
         <CatAvatar size={collapsed ? 28 : 32} mood="idle" className="shrink-0" />
         {!collapsed && (
-          <span className="text-lg font-display font-bold gradient-text-vivid">SparkOffer</span>
+          <span className="sig-display text-lg tracking-[-0.02em]">SparkOffer</span>
         )}
       </div>
 
-      <div className="divider-gradient mx-4" />
+      <div className="sig-hr" />
 
       <TooltipProvider delayDuration={0}>
         <nav className={cn("flex-1 flex flex-col overflow-y-auto py-3 relative z-10", collapsed ? "px-2" : "px-3")}>
           {NAV_GROUPS.map(renderGroup)}
         </nav>
 
-      <div className="divider-gradient mx-4" />
+        <div className="sig-hr" />
 
         {/* Bottom section */}
         <div className={cn("py-3 space-y-0.5 relative z-10", collapsed ? "px-2" : "px-3")}>
           {/* User card */}
           {user && !collapsed && (
-            <div className="mb-2 px-3 py-2.5 rounded-2xl glass-subtle flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold text-white shrink-0" style={{ background: "linear-gradient(135deg, var(--aurora-1), var(--aurora-2))" }}>
+            <div className="sig-card mb-2 px-3 py-2.5 flex items-center gap-2.5">
+              <div
+                className="w-8 h-8 rounded flex items-center justify-center text-xs font-semibold shrink-0"
+                style={{ background: "var(--sig-accent)", color: "var(--sig-accent-fg)" }}
+              >
                 {(user.name || user.email).slice(0, 1).toUpperCase()}
               </div>
               <div className="flex-1 min-w-0">
@@ -178,7 +173,7 @@ export default function Sidebar() {
               </div>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <button onClick={handleLogout} className="text-muted-fg hover:text-red transition-colors p-1 rounded-lg hover:bg-red/10">
+                  <button onClick={handleLogout} className="text-muted-fg hover:text-[color:var(--sig-danger)] transition-colors p-1 rounded">
                     <LogOut size={14} />
                   </button>
                 </TooltipTrigger>
@@ -189,7 +184,7 @@ export default function Sidebar() {
           {user && collapsed && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <button onClick={handleLogout} className="flex items-center justify-center w-full py-2.5 rounded-2xl text-muted-fg hover:text-red hover:bg-red/10 transition-all duration-300 active:scale-[0.97]">
+                <button onClick={handleLogout} className="sig-navitem justify-center px-0 hover:text-[color:var(--sig-danger)]">
                   <LogOut size={18} />
                 </button>
               </TooltipTrigger>
@@ -199,13 +194,7 @@ export default function Sidebar() {
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <button
-                onClick={toggleTheme}
-                className={cn(
-                  "flex items-center gap-3 w-full py-2.5 px-3 rounded-2xl text-[13px] font-medium text-muted-fg hover:text-text hover:bg-primary/8 transition-all duration-300 active:scale-[0.97]",
-                  collapsed && "justify-center px-0"
-                )}
-              >
+              <button onClick={toggleTheme} className={cn("sig-navitem", collapsed && "justify-center px-0")}>
                 {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
                 {!collapsed && (theme === "dark" ? "浅色模式" : "深色模式")}
               </button>
@@ -215,13 +204,7 @@ export default function Sidebar() {
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <button
-                onClick={() => setCollapsed((c: boolean) => !c)}
-                className={cn(
-                  "flex items-center gap-3 w-full py-2.5 px-3 rounded-2xl text-[13px] font-medium text-muted-fg hover:text-text hover:bg-primary/8 transition-all duration-300 active:scale-[0.97] group",
-                  collapsed && "justify-center px-0"
-                )}
-              >
+              <button onClick={() => setCollapsed((c: boolean) => !c)} className={cn("sig-navitem group", collapsed && "justify-center px-0")}>
                 <span className="transition-transform duration-300 group-hover:translate-x-0.5">
                   {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
                 </span>
@@ -237,10 +220,13 @@ export default function Sidebar() {
 
   return (
     <>
-      <div className="md:hidden flex items-center justify-between px-4 py-3 bg-card/80 backdrop-blur-md border-b border-border shrink-0">
+      <div
+        className="md:hidden flex items-center justify-between px-4 py-3 shrink-0 border-b"
+        style={{ background: "var(--sig-bg)", borderColor: "var(--sig-line)" }}
+      >
         <div className="flex items-center gap-2.5 cursor-pointer" onClick={() => navigate("/")}>
           <CatAvatar size={28} mood="static" />
-          <span className="text-base font-display font-bold aurora-text">SparkOffer</span>
+          <span className="sig-display text-base tracking-[-0.02em]">SparkOffer</span>
         </div>
         <Button variant="ghost" size="icon" onClick={() => setOpen((o: boolean) => !o)}>
           {open ? <X size={18} /> : <Menu size={18} />}
@@ -252,7 +238,7 @@ export default function Sidebar() {
       {open && (
         <div className="fixed inset-0 z-50 md:hidden flex">
           <div className="animate-fade-in">{nav}</div>
-          <div className="flex-1 bg-black/50 backdrop-blur-sm" onClick={() => setOpen(false)} />
+          <div className="flex-1" style={{ background: "var(--sig-overlay)" }} onClick={() => setOpen(false)} />
         </div>
       )}
     </>
