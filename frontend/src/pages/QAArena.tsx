@@ -551,7 +551,7 @@ const ChatMessage = memo(function ChatMessage({ role, content }: { role: string;
   if (role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
-        <div className="max-w-[75%] px-4 py-2.5 rounded-3xl rounded-tr-lg text-primary-foreground text-[15px] leading-[1.7] whitespace-pre-wrap shadow-md" style={{ background: "linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary) 80%, var(--aurora-2)))" }}>
+        <div className="max-w-[75%] px-4 py-2.5 rounded-lg rounded-tr-sm text-[15px] leading-[1.7] whitespace-pre-wrap" style={{ background: "var(--sig-accent)", color: "var(--sig-accent-fg)" }}>
           {content}
         </div>
       </div>
@@ -559,7 +559,7 @@ const ChatMessage = memo(function ChatMessage({ role, content }: { role: string;
   }
   return (
     <div className="flex flex-col animate-fade-in">
-      <div className="max-w-full leading-[1.8] text-[15px] text-text rounded-2xl rounded-tl-lg px-4 py-3 bg-card/60 backdrop-blur-sm border border-border/50 shadow-sm">
+      <div className="sig-card max-w-full leading-[1.8] text-[15px] text-text rounded-lg rounded-tl-sm px-4 py-3">
         <div className="md-content">
           <ReactMarkdown components={markdownComponents}>{content}</ReactMarkdown>
         </div>
