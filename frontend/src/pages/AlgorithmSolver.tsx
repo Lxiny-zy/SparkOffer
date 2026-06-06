@@ -186,7 +186,8 @@ export default function AlgorithmSolver() {
               disabled={solving}
             />
             <select
-              className="sig-field w-full sm:w-40 shrink-0 px-3 py-2 sm:py-1.5 text-sm h-10 sm:h-9"
+              className="h-10 sm:h-9 w-full sm:w-40 shrink-0 rounded border bg-transparent px-3 text-sm transition-colors focus:outline-none focus:border-[color:var(--sig-accent)]"
+              style={{ borderColor: "var(--sig-line-2)", color: "var(--sig-fg)" }}
               value={language}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setLanguage(e.target.value)}
               disabled={solving}
