@@ -1594,6 +1594,16 @@
 }
 .sig-field::placeholder { color: var(--sig-faint); }
 .sig-field:focus { outline: none; border-color: var(--sig-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--sig-accent) 18%, transparent); }
+
+/* 原生 <select> 展开的 option 列表由浏览器/系统渲染，暗色页面下默认白底、看不清。
+   color-scheme: dark 在个别浏览器对 <select> 弹层不生效，故再显式给 option 上暗色；
+   这里用具体色值而非 var()——原生弹层未必解析继承来的自定义属性。 */
+.dark select { color-scheme: dark; }
+.dark select option,
+.dark select optgroup {
+  background-color: #1c1a22;
+  color: #e6e0e9;
+}
 .sig-card { background: var(--sig-surface); border: 1px solid var(--sig-line); border-radius: 8px; }
 
 /* Line-mask reveal — the one signature entrance */
