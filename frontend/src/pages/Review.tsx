@@ -1,7 +1,6 @@
 import { useParams, useLocation, useNavigate } from "react-router-dom";
 import { useState, useEffect, useRef, ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
-import { markdownComponents, remarkPlugins } from "../components/ChatBubble";
+import { Markdown } from "../components/ChatBubble";
 import { BookOpen, BriefcaseBusiness, Sparkles, RefreshCw, Star } from "lucide-react";
 import { getReview, getReferenceAnswer, addFavorite, getSessionRAGMetrics, type RAGEvalMetrics } from "../api/interview";
 import { cn } from "@/lib/utils";
@@ -590,14 +589,14 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
                     <QMetaRow parts={[q.focus_area, q.difficulty ? `难度 ${q.difficulty}/5` : null]} />
                     {/* L2 焦点：题目 */}
                     <div className="md-content question-md text-[15px] md:text-base leading-relaxed mb-3">
-                      <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{q.question}</ReactMarkdown>
+                      <Markdown>{q.question}</Markdown>
                     </div>
 
                     {/* 你的回答 */}
                     <div className="bg-secondary/60 rounded-xl px-3.5 py-3 mb-3 border-l-2 border-primary/30">
                       <div className="text-[10px] uppercase tracking-widest text-dim/70 mb-1.5">YOUR ANSWER</div>
                       <div className="md-content text-sm leading-relaxed text-text/90">
-                        <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{answer}</ReactMarkdown>
+                        <Markdown>{answer}</Markdown>
                       </div>
                     </div>
 
@@ -699,7 +698,7 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
                           </Button>
                         </div>
                         <div className="md-content bg-secondary/60 rounded-xl px-3.5 py-3">
-                          <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{refAnswers[q.id]}</ReactMarkdown>
+                          <Markdown>{refAnswers[q.id]}</Markdown>
                         </div>
                       </div>
                     )}
@@ -802,7 +801,7 @@ function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepRev
                 </div>
 
                 <div className="text-[15px] font-medium leading-relaxed mb-3 md-content question-md">
-                  <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{q.question}</ReactMarkdown>
+                  <Markdown>{q.question}</Markdown>
                 </div>
 
                 {q.intent && (
@@ -818,7 +817,7 @@ function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepRev
                     <div className="bg-secondary rounded-lg px-3 py-3 md:px-4 mb-3">
                       <div className="text-xs font-semibold text-dim mb-1.5 opacity-70">你的回答</div>
                       <div className="md-content text-sm leading-relaxed">
-                        <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{answer}</ReactMarkdown>
+                        <Markdown>{answer}</Markdown>
                       </div>
                     </div>
 
@@ -994,7 +993,7 @@ export default function Review() {
             <Card className="mb-6">
               <CardContent className="p-5 md:p-8 leading-[1.8] text-[15px]">
                 <div className="md-content">
-                  <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{review || ""}</ReactMarkdown>
+                  <Markdown>{review || ""}</Markdown>
                 </div>
               </CardContent>
             </Card>

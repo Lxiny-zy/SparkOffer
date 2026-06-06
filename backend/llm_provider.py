@@ -19,7 +19,9 @@ _CUSTOM_HEADERS = {"User-Agent": "curl/7.88.1"}
 _LLM_TIMEOUT = httpx.Timeout(connect=15.0, read=240.0, write=30.0, pool=30.0)
 _EMBED_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)  # 与 vector_memory._EMBED_TIMEOUT_SECONDS 对齐
 
-_REASONING_EFFORTS = {"minimal", "low", "medium", "high"}
+# 上游可接受的 reasoning_effort 档位。当某 provider 新增档位（如 OpenAI gpt-5.x 的
+# "xhigh"）时在此集合补一项即可；集合外的取值会被 _resolve_reasoning_effort 丢成 None。
+_REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
 
 
 def _resolve_reasoning_effort(value) -> str | None:

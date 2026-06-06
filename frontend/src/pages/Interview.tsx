@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useLocation, useNavigate } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
-import { markdownComponents } from "../components/ChatBubble";
+import { Markdown } from "../components/ChatBubble";
 import { Check, Minus, Star, Lightbulb, Eye, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import ChatBubble from "../components/ChatBubble";
@@ -526,7 +525,7 @@ export default function Interview() {
                     {/* L3 — 题目正文（最大最醒目） */}
                     <h2 className="text-lg md:text-[22px] font-bold leading-[1.65] text-text tracking-tight mb-4">
                       <div className="md-content">
-                        <ReactMarkdown components={markdownComponents}>{currentQ.question}</ReactMarkdown>
+                        <Markdown>{currentQ.question}</Markdown>
                       </div>
                     </h2>
 
@@ -579,7 +578,7 @@ export default function Interview() {
                           )}
                         </div>
                         <div className="md-content">
-                          <ReactMarkdown components={markdownComponents}>{content}</ReactMarkdown>
+                          <Markdown>{content}</Markdown>
                         </div>
                       </div>
                     )}

@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
-import { markdownComponents } from "../components/ChatBubble";
+import { Markdown } from "../components/ChatBubble";
 import { ArrowLeft } from "lucide-react";
 import { getTopicIcon } from "../utils/topicIcons";
 import { getProfile, getTopics, getTopicRetrospective, getTopicHistory } from "../api/interview";
@@ -113,7 +112,7 @@ export default function TopicDetail() {
           <Card>
             <CardContent className="p-5 md:p-6 leading-[1.8] text-[15px]">
               <div className="md-content">
-                <ReactMarkdown components={markdownComponents}>{retrospective}</ReactMarkdown>
+                <Markdown>{retrospective}</Markdown>
               </div>
             </CardContent>
           </Card>

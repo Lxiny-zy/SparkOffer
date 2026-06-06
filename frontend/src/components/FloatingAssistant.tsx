@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback, KeyboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
-import { markdownComponents, remarkPlugins } from "./ChatBubble";
+import { Markdown } from "./ChatBubble";
 import { X, Send, Trash2 } from "lucide-react";
 import { streamAssistantChat, fetchAssistantHistory, clearAssistantHistory, fetchWelcomeMessage } from "../api/assistant";
 import { startInterview } from "../api/interview";
@@ -431,7 +430,7 @@ export default function FloatingAssistant() {
                 >
                   {msg.role === "assistant" ? (
                     <div className="md-content">
-                      <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{msg.content || "..."}</ReactMarkdown>
+                      <Markdown>{msg.content || "..."}</Markdown>
                     </div>
                   ) : (
                     msg.content

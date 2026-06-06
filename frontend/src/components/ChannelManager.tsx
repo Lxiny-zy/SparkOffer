@@ -376,6 +376,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                       <option value="low">Low — 浅度思考</option>
                       <option value="medium">Medium — 中度思考</option>
                       <option value="high">High — 深度思考</option>
+                      <option value="xhigh">XHigh — 极深思考</option>
                     </select>
                     <p className="text-[10px] text-dim mt-1">仅对支持 reasoning 的上游模型生效（如 gpt-5 / o-series / DeepSeek-R1）</p>
                   </div>

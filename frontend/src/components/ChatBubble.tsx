@@ -103,6 +103,19 @@ export const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["com
   },
 };
 
+/**
+ * 统一 Markdown 渲染组件：固定带上 remarkPlugins（GFM）+ markdownComponents。
+ * 各处一律用 <Markdown> 代替裸 <ReactMarkdown>，杜绝漏传 remarkPlugins 导致
+ * 表格 / 删除线 / 任务列表等 GFM 语法退化成纯文本（历史上有 7 处渲染点因此失效）。
+ */
+export function Markdown({ children }: { children?: string | null }) {
+  return (
+    <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>
+      {children}
+    </ReactMarkdown>
+  );
+}
+
 export default function ChatBubble({ role, content }: ChatBubbleProps) {
   if (role === "user") {
     return (
@@ -119,7 +132,7 @@ export default function ChatBubble({ role, content }: ChatBubbleProps) {
       <div className="h-px bg-border mb-6" />
       <div className="max-w-full md:max-w-[720px] leading-[1.8] text-[15px] text-text">
         <div className="md-content">
-          <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{content}</ReactMarkdown>
+          <Markdown>{content}</Markdown>
         </div>
       </div>
     </div>

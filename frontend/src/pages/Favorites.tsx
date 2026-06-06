@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
-import ReactMarkdown from "react-markdown";
-import { markdownComponents } from "../components/ChatBubble";
+import { Markdown } from "../components/ChatBubble";
 import {
   Star, Trash2, Download, Tag, ChevronDown, ChevronUp,
   Filter, SortAsc, X, Edit3, Check,
@@ -290,7 +289,7 @@ export default function Favorites() {
                       <div>
                         <div className="text-xs font-semibold text-dim mb-1">参考答案</div>
                         <div className="md-content bg-secondary rounded-lg px-3.5 py-3 text-sm leading-[1.8]">
-                          <ReactMarkdown components={markdownComponents}>{item.reference_answer}</ReactMarkdown>
+                          <Markdown>{item.reference_answer}</Markdown>
                         </div>
                       </div>
                     )}

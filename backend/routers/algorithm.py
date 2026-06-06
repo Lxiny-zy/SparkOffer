@@ -32,7 +32,7 @@ def algorithm_solve(req: AlgorithmSolveRequest, user_id: str = Depends(get_curre
 
     async def _gen():
         solution = ""
-        async for kind, value in stream_llm_sse(messages, progress_prefix="正在解题"):
+        async for kind, value in stream_llm_sse(messages, progress_prefix="正在解题", stream_content=True):
             if kind == "sse":
                 yield value
             else:
@@ -65,7 +65,7 @@ def algorithm_chat(req: AlgorithmChatRequest, user_id: str = Depends(get_current
 
     async def _gen():
         ai_reply = ""
-        async for kind, value in stream_llm_sse(call_messages, progress_prefix="正在思考"):
+        async for kind, value in stream_llm_sse(call_messages, progress_prefix="正在思考", stream_content=True):
             if kind == "sse":
                 yield value
             else:

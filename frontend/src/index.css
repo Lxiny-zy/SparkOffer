@@ -3,6 +3,7 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  color-scheme: light;
   --font-size: 16px;
   /* Surface hierarchy: background < surface-container (AppShell) < card (cards) */
   --background: #F3EDF7;
@@ -67,6 +68,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --background: #0B0A0F;
   --foreground: #E6E0E9;
   --card: #1C1A22;

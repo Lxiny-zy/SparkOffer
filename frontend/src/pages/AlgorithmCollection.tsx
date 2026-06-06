@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
-import { markdownComponents } from "../components/ChatBubble";
+import { Markdown } from "../components/ChatBubble";
 import {
   Library, Trash2, Download, Tag, ChevronDown, ChevronUp,
   Filter, X, Edit3, Check, Code2, ExternalLink, Search,
@@ -327,7 +326,7 @@ export default function AlgorithmCollection() {
                       <div>
                         <div className="text-xs font-semibold text-dim mb-1">解答</div>
                         <div className="md-content bg-secondary rounded-lg px-3.5 py-3 text-sm leading-[1.8]">
-                          <ReactMarkdown components={markdownComponents}>{item.solution}</ReactMarkdown>
+                          <Markdown>{item.solution}</Markdown>
                         </div>
                       </div>
                     )}

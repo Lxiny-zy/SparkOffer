@@ -1,4 +1,4 @@
-export type ReasoningEffort = "" | "minimal" | "low" | "medium" | "high";
+export type ReasoningEffort = "" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type ChannelTier = "small" | "large";
 
 export interface LLMChannel {

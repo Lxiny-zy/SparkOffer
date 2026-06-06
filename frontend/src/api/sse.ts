@@ -2,6 +2,8 @@ import { authHeaders, handleStreamUnauthorized, iterSSEFrames } from "./client";
 
 export interface SSECallbacks {
   onProgress?: (message: string) => void;
+  /** 真流式：后端以 stream_content 模式推送 content 事件时，每段增量回调一次。 */
+  onContent?: (delta: string) => void;
 }
 
 // SSE 请求超时时间（毫秒）
@@ -111,6 +113,9 @@ export async function fetchSSE<T>(
       switch (event.type) {
         case "progress":
           callbacks?.onProgress?.(event.message);
+          break;
+        case "content":
+          callbacks?.onContent?.(event.delta);
           break;
         case "error":
           throw new Error(event.message);

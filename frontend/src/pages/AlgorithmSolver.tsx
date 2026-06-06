@@ -1,7 +1,5 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
-import { markdownComponents } from "../components/ChatBubble";
 import {
   Code2, Send, Save, Play, Library, Loader2, X,
 } from "lucide-react";
@@ -11,7 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import ChatBubble from "@/components/ChatBubble";
+import ChatBubble, { Markdown } from "@/components/ChatBubble";
 import type { ChatMessage } from "../types/api";
 
 const LANGUAGES = [
@@ -78,6 +76,7 @@ export default function AlgorithmSolver() {
     try {
       const data = await solveAlgorithm(problemText.trim(), language, sourceUrl.trim(), {
         onProgress: (msg) => setSolveProgress(msg),
+        onContent: (delta) => setSolution((prev) => prev + delta),
       });
       setSessionId(data.session_id);
       setSolution(data.solution);
@@ -92,17 +91,37 @@ export default function AlgorithmSolver() {
     if (!chatInput.trim() || !sessionId) return;
     const userMsg = chatInput.trim();
     setChatInput("");
-    setChatMessages((prev) => [...prev, { role: "user", content: userMsg }]);
+    // 预置一个空的 assistant 气泡，随 content 增量逐字填充（真流式）
+    setChatMessages((prev) => [...prev, { role: "user", content: userMsg }, { role: "assistant", content: "" }]);
     setChatLoading(true);
     setChatProgress("");
+    const appendToLast = (delta: string) =>
+      setChatMessages((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last && last.role === "assistant") next[next.length - 1] = { ...last, content: last.content + delta };
+        return next;
+      });
     try {
       const data = await chatAlgorithm(sessionId, userMsg, {
         onProgress: (msg) => setChatProgress(msg),
+        onContent: appendToLast,
       });
-      setChatMessages((prev) => [...prev, { role: "assistant", content: data.message }]);
+      // 用 complete 事件的完整文本兜底校正（防止逐字增量在边界丢字）
+      setChatMessages((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last && last.role === "assistant") next[next.length - 1] = { role: "assistant", content: data.message };
+        return next;
+      });
     } catch (e) {
       console.error("对话失败:", e);
-      setChatMessages((prev) => [...prev, { role: "assistant", content: "请求失败，请重试。" }]);
+      setChatMessages((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last && last.role === "assistant") next[next.length - 1] = { role: "assistant", content: "请求失败，请重试。" };
+        return next;
+      });
     }
     setChatLoading(false);
   };
@@ -158,32 +177,30 @@ export default function AlgorithmSolver() {
             onChange={(e) => setProblemText(e.target.value)}
             disabled={solving}
           />
-          <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2 sm:gap-3">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
             <Input
               placeholder="题目链接 (可选)"
-              className="w-full sm:flex-1 sm:min-w-[200px] h-10 sm:h-9 text-sm"
+              className="w-full sm:flex-1 sm:min-w-0 h-10 sm:h-9 text-sm"
               value={sourceUrl}
               onChange={(e) => setSourceUrl(e.target.value)}
               disabled={solving}
             />
-            <div className="flex items-center gap-2">
-              <select
-                className="sig-field w-auto px-3 py-2 sm:py-1.5 text-sm h-10 sm:h-9 flex-1 sm:flex-none"
-                value={language}
-                onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setLanguage(e.target.value)}
-                disabled={solving}
-              >
-                {LANGUAGES.map((l) => (
-                  <option key={l.value} value={l.value}>{l.label}</option>
-                ))}
-              </select>
-              <Button onClick={handleSolve} disabled={!problemText.trim() || solving} className="h-10 sm:h-9 whitespace-nowrap">
-                {solving ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-                {solving ? "解题中..." : "开始解题"}
-              </Button>
-            </div>
+            <select
+              className="sig-field w-full sm:w-40 shrink-0 px-3 py-2 sm:py-1.5 text-sm h-10 sm:h-9"
+              value={language}
+              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setLanguage(e.target.value)}
+              disabled={solving}
+            >
+              {LANGUAGES.map((l) => (
+                <option key={l.value} value={l.value}>{l.label}</option>
+              ))}
+            </select>
+            <Button onClick={handleSolve} disabled={!problemText.trim() || solving} className="w-full sm:w-auto shrink-0 h-10 sm:h-9 whitespace-nowrap">
+              {solving ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+              {solving ? "解题中..." : "开始解题"}
+            </Button>
             {sessionId && (
-              <Button variant="ghost" size="sm" onClick={handleReset} className="self-start sm:self-center">
+              <Button variant="ghost" size="sm" onClick={handleReset} className="shrink-0 self-start sm:self-center">
                 <X size={14} /> 重新开始
               </Button>
             )}
@@ -215,7 +232,7 @@ export default function AlgorithmSolver() {
           </div>
 
           {/* Solution Content */}
-          {solving ? (
+          {solving && !solution ? (
             <Card>
               <CardContent className="p-6 flex items-center justify-center gap-3 text-dim">
                 <Loader2 size={20} className="animate-spin" />
@@ -226,7 +243,8 @@ export default function AlgorithmSolver() {
             <Card className="mb-6">
               <CardContent className="p-4 md:p-5">
                 <div className="md-content text-[15px] leading-[1.8]">
-                  <ReactMarkdown components={markdownComponents}>{solution}</ReactMarkdown>
+                  <Markdown>{solution}</Markdown>
+                  {solving && <span className="inline-block w-1.5 h-4 align-text-bottom bg-current opacity-50 animate-pulse" />}
                 </div>
               </CardContent>
             </Card>
@@ -238,7 +256,7 @@ export default function AlgorithmSolver() {
               {chatMessages.map((msg, i) => (
                 <ChatBubble key={i} role={msg.role} content={msg.content} />
               ))}
-              {chatLoading && (
+              {chatLoading && (chatMessages[chatMessages.length - 1]?.content ?? "") === "" && (
                 <div className="flex items-center gap-2 text-dim text-sm">
                   <Loader2 size={14} className="animate-spin" />
                   <span>{chatProgress || "AI 正在思考..."}</span>

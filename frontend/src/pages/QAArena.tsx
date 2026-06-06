@@ -3,8 +3,7 @@ import {
   Plus, Trash2, Send, Download, FileText, Loader2,
   MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import { markdownComponents } from "../components/ChatBubble";
+import { Markdown } from "../components/ChatBubble";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -537,7 +536,7 @@ export default function QAArena() {
             </div>
             <div className="px-5 py-4 flex-1">
               <div className="md-content text-sm leading-[1.8]">
-                <ReactMarkdown components={markdownComponents}>{summaryResult.content}</ReactMarkdown>
+                <Markdown>{summaryResult.content}</Markdown>
               </div>
             </div>
           </div>
@@ -561,7 +560,7 @@ const ChatMessage = memo(function ChatMessage({ role, content }: { role: string;
     <div className="flex flex-col animate-fade-in">
       <div className="sig-card max-w-full leading-[1.8] text-[15px] text-text rounded-lg rounded-tl-sm px-4 py-3">
         <div className="md-content">
-          <ReactMarkdown components={markdownComponents}>{content}</ReactMarkdown>
+          <Markdown>{content}</Markdown>
         </div>
       </div>
     </div>

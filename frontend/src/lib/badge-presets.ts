@@ -65,4 +65,5 @@ export const REASONING_EFFORT_HINT: Record<string, { label: string; latency: str
   low:       { label: "Low",     latency: "≈ +5s",    tone: "text-info" },
   medium:    { label: "Medium",  latency: "≈ +15s",   tone: "text-warning" },
   high:      { label: "High",    latency: "≈ +30s",   tone: "text-orange" },
+  xhigh:     { label: "XHigh",   latency: "≈ +60s",   tone: "text-orange" },
 };
