@@ -100,8 +100,10 @@ export async function* streamQAChat(sessionId: string, message: string, signal?:
 export async function generateQASummary(
   sessionId: string,
   onProgress?: (msg: string) => void,
+  effort?: string,
 ): Promise<QASummaryResult> {
-  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/summary`, {
+  const qs = effort ? `?effort=${encodeURIComponent(effort)}` : "";
+  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/summary${qs}`, {
     method: "POST",
     headers: authHeaders(),
   });

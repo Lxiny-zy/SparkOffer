@@ -59,6 +59,7 @@ export default function QAArena() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [summaryProgress, setSummaryProgress] = useState("");
+  const [summaryEffort, setSummaryEffort] = useState("");
   const [summaryResult, setSummaryResult] = useState<QASummaryResult | null>(null);
   const [showSummary, setShowSummary] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -229,7 +230,7 @@ export default function QAArena() {
     setIsSummarizing(true);
     setSummaryProgress("正在分析对话内容...");
     try {
-      const result = await generateQASummary(activeId, (msg) => setSummaryProgress(msg));
+      const result = await generateQASummary(activeId, (msg) => setSummaryProgress(msg), summaryEffort);
       setSummaryResult(result);
       setShowSummary(true);
     } catch (err: any) {
@@ -420,6 +421,20 @@ export default function QAArena() {
               >
                 <Eraser className="w-4 h-4" />
               </Button>
+              <select
+                className="h-8 shrink-0 rounded border bg-transparent px-2 text-xs transition-colors focus:outline-none focus:border-[color:var(--sig-accent)] hidden sm:inline-flex"
+                style={{ borderColor: "var(--sig-line-2)", color: "var(--sig-fg)" }}
+                value={summaryEffort}
+                onChange={(e) => setSummaryEffort(e.target.value)}
+                disabled={isStreaming || isSummarizing}
+                title="知识卡片思考强度：低档更快，高档更精炼（简单对话用低档即可）"
+              >
+                <option value="" style={{ color: "#000" }}>思考档·默认</option>
+                <option value="minimal" style={{ color: "#000" }}>minimal·最快</option>
+                <option value="low" style={{ color: "#000" }}>low·快</option>
+                <option value="medium" style={{ color: "#000" }}>medium·均衡</option>
+                <option value="high" style={{ color: "#000" }}>high·最精</option>
+              </select>
               <Button
                 variant="outline"
                 size="sm"
