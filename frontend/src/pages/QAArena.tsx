@@ -515,7 +515,7 @@ export default function QAArena() {
       {showSummary && summaryResult && (
         <div className="fixed inset-0 z-50 flex justify-end" style={{ background: "var(--sig-overlay)" }} onClick={() => setShowSummary(false)}>
           <div
-            className="w-full max-w-lg bg-bg h-full overflow-y-auto shadow-2xl animate-slide-in-right flex flex-col md:max-w-lg border-l border-border"
+            className="w-full max-w-2xl bg-bg h-full overflow-y-auto shadow-2xl animate-slide-in-right flex flex-col md:max-w-2xl border-l border-border"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-5 py-4 border-b border-border flex items-center justify-between sticky top-0 bg-bg z-10">

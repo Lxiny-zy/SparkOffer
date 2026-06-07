@@ -65,9 +65,16 @@ QA_ARENA_SYSTEM = """# 角色设定
 5. 问题模糊时先用一句澄清再答（"你是想问 XX 还是 YY？"），不要预设错的方向回答
 6. 不要在每次回复末尾加"总结一下"或"还有其他问题吗？"这类客套话"""
 
-SUMMARY_SYSTEM = "你是一位技术知识整理专家。请根据对话内容，提取和整理关键知识点，生成结构化的学习笔记。"
+SUMMARY_SYSTEM = """你是一位忠实、全面的技术笔记整理专家。你的任务是把一段技术问答对话整理成一张高质量、可直接用于复习的知识卡片。
 
-SUMMARY_USER_TEMPLATE = """请根据以下问答对话，生成一份结构化的知识总结卡片。
+核心原则：
+1. **忠实不编造**：只整理对话中真实讨论过的内容，绝不补充对话之外的知识；记不清/没讨论的不写。
+2. **表格优先**：凡是横向对比、方案选型、概念辨析，一律用 Markdown 表格呈现，禁止降级成并列的 bullet 列表。
+3. **保留原始表格与代码**：对话中已经出现的表格必须完整保留并补全表头/列；关键代码片段用带语言标注的代码块原样保留，不要改写成散文。
+4. **全面覆盖**：对话讨论过的每一个知识点都要落到卡片里，不要只挑一两个；宁可多分几个小节，也不要漏。
+5. **按内容裁剪小节**：给定的小节是"可选菜单"，对话没涉及的小节直接整节省略，绝不为凑结构写空话或占位句。"""
+
+SUMMARY_USER_TEMPLATE = """请根据以下问答对话，生成一份结构化、可用于复习的知识卡片。
 
 ## 对话内容
 
@@ -75,35 +82,64 @@ SUMMARY_USER_TEMPLATE = """请根据以下问答对话，生成一份结构化�
 
 ## 输出要求
 
-请严格按照以下 Markdown 格式输出（不要用代码块包裹整个输出）：
+严格输出 Markdown（不要用代码块包裹整份输出）。按下面的小节组织，**对话未涉及的小节整节省略**：
 
 # {{自动识别的主题名称}}
 > {date} 问答演练总结
 
+## 速览
+（2-4 句话概括这次对话覆盖了哪些问题、得到的核心结论）
+
 ## 核心知识点
 ### 1. {{知识点名称}}
 - **定义**: 用一两句话精确定义
-- **关键要点**: 列出 2-4 个关键要点
+- **原理 / 关键要点**: 列出关键要点，可展开多条（原理、步骤、适用场景等）
 - **易错点**: 常见误解或容易混淆的地方
 
-### 2. {{知识点名称}}
-- **定义**: ...
-- **关键要点**: ...
-- **易错点**: ...
+（对话讨论到的**每个**知识点都要列出，不要遗漏）
 
-（根据对话实际内容，列出所有讨论到的知识点）
+## 横向对比 / 选型
+（对话中出现的任何 A vs B、多方案对比、概念辨析，**必须用 Markdown 表格还原**；
+ 若对话本身已用表格，保留并补全表头与列。没有对比内容则**省略本节**。）
+
+| 维度 | 方案 A | 方案 B |
+|------|--------|--------|
+| ...  | ...    | ...    |
+
+## 关键代码 / 实现要点
+（保留对话中出现的核心代码片段，用带语言标注的代码块；没有代码则**省略本节**）
+
+## 系统设计与权衡
+（针对设计/架构类讨论：需求拆解 → 方案选型 → 权衡取舍 → 潜在坑点。没有则**省略本节**）
 
 ## 高频追问
-- Q: {{对话中出现的或可能被追问的问题}}?
-- A: {{简洁的回答}}
+- Q: {{对话中出现的或可延伸的面试常考问题}}?
+- A: {{简洁回答}}
 
-（列出 3-5 个高频追问）
+（列出 3-6 个）
+
+## 待巩固 / 薄弱点
+（基于对话中用户暴露的困惑或回答薄弱处，列出需要重点复习的点；没有明显薄弱点则**省略本节**）
 
 注意：
 1. 主题名称要准确反映对话讨论的核心内容
-2. 知识点要从对话中提取，不要编造对话中没有讨论的内容
-3. 易错点要基于对话中用户的实际困惑或常见误区
-4. 高频追问可以包含对话中出现的以及延伸的面试常考问题"""
+2. 所有内容均来自对话，不要编造对话中没有讨论的内容
+3. 对比类内容用**表格**、代码类内容用**代码块**，不要降级成普通文字
+4. 易错点/薄弱点要基于对话中用户的实际困惑或常见误区"""
+
+MAP_PROMPT = """以下是一段较长技术问答对话的第 {idx}/{total} 段。请抽取本段中**真实讨论到**的内容，输出结构化的笔记片段，供后续汇总成知识卡片使用。
+
+要求：
+- 列出本段涉及的知识点（定义 / 关键要点 / 易错点）
+- 本段出现的任何横向对比 / 选型 / 概念辨析，**用 Markdown 表格原样保留**；对话已有的表格必须完整保留，不要丢任何一张表
+- 本段出现的关键代码，用带语言标注的代码块原样保留
+- 本段出现的高频追问（Q/A）
+- 只整理本段真实出现的内容，不编造、不补充对话外知识
+- 直接输出片段内容，不要写"本段总结如下"之类的开场白
+
+## 本段对话
+
+{conversation}"""
 
 
 async def _build_memory_context(user_message: str, user_id: str) -> str:
@@ -126,13 +162,39 @@ async def _build_memory_context(user_message: str, user_id: str) -> str:
     )
 
 
-def _format_conversation(messages: list[dict]) -> str:
-    lines = []
-    for m in messages:
-        role = "用户" if m["role"] == "user" else "AI"
-        content = m["content"][:1000]
-        lines.append(f"[{role}] {content}")
-    return "\n\n".join(lines)
+# Per-message caps when feeding the conversation to the summarizer.
+# User turns are short questions; AI turns carry the substance (tables/code/design),
+# so they get a much larger budget. The old flat 1000-char cut destroyed long answers
+# and sliced Markdown tables mid-row.
+QA_USER_CAP = 2000
+QA_ASSISTANT_CAP = 16000
+
+
+def _truncate_on_boundary(text: str, cap: int) -> str:
+    """Truncate to <= cap chars without cutting through a line (table row / code line).
+
+    Snaps back to the last newline before the cap so we never emit a half-row of a
+    Markdown table. Rarely fires given the generous caps above.
+    """
+    if len(text) <= cap:
+        return text
+    head = text[:cap]
+    nl = head.rfind("\n")
+    if nl > cap * 0.6:  # only snap back if it doesn't discard too much
+        head = head[:nl]
+    return head.rstrip() + "\n\n…(本段过长，已节选)"
+
+
+def _format_message(m: dict, user_cap: int = QA_USER_CAP, assistant_cap: int = QA_ASSISTANT_CAP) -> str:
+    role = "用户" if m["role"] == "user" else "AI"
+    cap = user_cap if m["role"] == "user" else assistant_cap
+    return f"[{role}] {_truncate_on_boundary(m['content'], cap)}"
+
+
+def _format_conversation(
+    messages: list[dict], user_cap: int = QA_USER_CAP, assistant_cap: int = QA_ASSISTANT_CAP
+) -> str:
+    return "\n\n".join(_format_message(m, user_cap, assistant_cap) for m in messages)
 
 
 def _sanitize_filename(name: str) -> str:
@@ -153,7 +215,7 @@ COMPRESSION_THRESHOLD = 20
 KEEP_RECENT = 10
 SUMMARY_REGEN_INTERVAL = 10
 IDLE_HEARTBEAT_SECONDS = 30
-MAX_RESPONSE_STORE_LENGTH = 8000
+MAX_RESPONSE_STORE_LENGTH = 16000
 
 COMPRESS_PROMPT = (
     "请将以下对话内容压缩为一段简要摘要（200字以内），保留关键技术概念、"
@@ -171,7 +233,8 @@ async def _get_or_create_summary(
         if total_count - summary_count < SUMMARY_REGEN_INTERVAL:
             return summary_text
 
-    conversation = _format_conversation(old_messages)
+    # Compression target is ~200 chars, so modest per-message caps keep token cost low.
+    conversation = _format_conversation(old_messages, user_cap=800, assistant_cap=1500)
     llm = get_langchain_llm()
     try:
         resp = await llm.ainvoke([
@@ -259,7 +322,47 @@ async def stream_qa_chat(
         pass  # Non-critical, don't break the chat flow
 
 
-MAX_SUMMARY_CONVERSATION_LENGTH = 15000
+SINGLE_PASS_BUDGET = 40000  # formatted-conversation chars that still fit one summary call
+CHUNK_SIZE = 12000          # per-chunk size for the map phase on longer conversations
+
+
+def _chunk_conversation(messages: list[dict], chunk_size: int = CHUNK_SIZE) -> list[str]:
+    """Split the formatted conversation into chunks on message boundaries (never mid-message)."""
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for m in messages:
+        block = _format_message(m)
+        if current and current_len + len(block) > chunk_size:
+            chunks.append("\n\n".join(current))
+            current = []
+            current_len = 0
+        current.append(block)
+        current_len += len(block)
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+async def _map_chunk_to_notes(chunk: str, idx: int, total: int) -> str:
+    """Map phase: summarize one conversation chunk into structured note fragments.
+
+    On failure, keep a raw excerpt of the chunk rather than dropping it, so no part of
+    the session is silently lost.
+    """
+    llm = get_langchain_llm()
+    prompt = MAP_PROMPT.format(idx=idx, total=total, conversation=chunk)
+    try:
+        resp = await llm.ainvoke([
+            {"role": "system", "content": SUMMARY_SYSTEM},
+            {"role": "user", "content": prompt},
+        ])
+        text = (resp.content or "").strip()
+        if text:
+            return text
+    except Exception as e:
+        logger.warning("Map-phase summary failed for chunk %d/%d: %s", idx, total, e)
+    return f"（第 {idx} 段自动整理失败，保留原文节选）\n{chunk[:4000]}"
 
 
 async def stream_generate_summary(
@@ -271,14 +374,22 @@ async def stream_generate_summary(
         yield f"data: {json.dumps({'type': 'error', 'message': '对话内容太少，无法生成总结'}, ensure_ascii=False)}\n\n"
         return
 
-    conversation = _format_conversation(messages)
-    if len(conversation) > MAX_SUMMARY_CONVERSATION_LENGTH:
-        conversation = conversation[:MAX_SUMMARY_CONVERSATION_LENGTH] + "\n\n...(对话过长，已截断)"
-
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    prompt_text = SUMMARY_USER_TEMPLATE.format(conversation=conversation, date=today)
-
     yield f"data: {json.dumps({'type': 'progress', 'message': '正在分析对话内容...'}, ensure_ascii=False)}\n\n"
+
+    conversation = _format_conversation(messages)
+
+    # Long conversations: map-reduce so no part of the session is silently dropped.
+    if len(conversation) > SINGLE_PASS_BUDGET:
+        chunks = _chunk_conversation(messages)
+        notes: list[str] = []
+        for i, chunk in enumerate(chunks, 1):
+            yield f"data: {json.dumps({'type': 'progress', 'message': f'正在整理第 {i}/{len(chunks)} 段...'}, ensure_ascii=False)}\n\n"
+            notes.append(await _map_chunk_to_notes(chunk, i, len(chunks)))
+        conversation = "\n\n---\n\n".join(notes)
+        yield f"data: {json.dumps({'type': 'progress', 'message': '正在汇总知识卡片...'}, ensure_ascii=False)}\n\n"
+
+    prompt_text = SUMMARY_USER_TEMPLATE.format(conversation=conversation, date=today)
 
     content = ""
     try:
@@ -323,8 +434,8 @@ async def stream_generate_summary(
     try:
         from backend.embedding_tasks import schedule_session_memory_index
         schedule_session_memory_index(
-            session_id=session_id, topic=topic, summary=content[:2000],
-            weak_points=[], user_id=user_id, insight_text=content[:2000],
+            session_id=session_id, topic=topic, summary=content[:4000],
+            weak_points=[], user_id=user_id, insight_text=content[:4000],
         )
     except Exception as e:
         logger.warning("Failed to schedule QA summary indexing: %s", e)

@@ -781,6 +781,11 @@
 .md-content tr:nth-child(even) td {
   background: var(--md-table-row-alt-bg);
 }
+/* 宽表（多列横向对比）在窄容器内横向滚动，避免列被挤压或溢出裁剪 */
+.md-content .md-table-wrapper {
+  overflow-x: auto;
+  max-width:  100%;
+}
 
 /* ── Premium utility classes ───────────────────────── */
 
