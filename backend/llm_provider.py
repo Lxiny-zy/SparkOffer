@@ -122,14 +122,18 @@ def _reraise_if_fatal(exc: Exception, channel: dict) -> None:
 class ResilientChatModel:
     """Drop-in replacement for ChatOpenAI with multi-channel auto-failover."""
 
-    def __init__(self, tier: str | None = None):
+    def __init__(self, tier: str | None = None, effort_override: str | None = None):
         self._bind_args: tuple = ()
         self._bind_kwargs: dict = {}
         self._tier = tier
+        # Per-call reasoning_effort override. Takes precedence over the channel's own
+        # setting, letting one code path (e.g. summary generation) use a lower effort
+        # without touching the global/chat config.
+        self._effort_override = effort_override
 
     def bind_tools(self, tools, **kwargs):
         """Return a new ResilientChatModel that binds tools on each underlying LLM."""
-        bound = ResilientChatModel(tier=self._tier)
+        bound = ResilientChatModel(tier=self._tier, effort_override=self._effort_override)
         bound._bind_args = (tools,)
         bound._bind_kwargs = kwargs
         return bound
@@ -140,10 +144,9 @@ class ResilientChatModel:
             return llm.bind_tools(*self._bind_args, **self._bind_kwargs)
         return llm
 
-    @staticmethod
-    def _make_llm(channel: dict) -> ChatOpenAI:
+    def _make_llm(self, channel: dict) -> ChatOpenAI:
         sync_c, async_c = _build_http_clients(channel.get("proxy", ""))
-        effort = _resolve_reasoning_effort(channel.get("reasoning_effort"))
+        effort = _resolve_reasoning_effort(self._effort_override or channel.get("reasoning_effort"))
         model_kwargs = {"extra_body": {"reasoning_effort": effort}} if effort else {}
         return ChatOpenAI(
             model=channel.get("model", ""),
@@ -227,19 +230,22 @@ class ResilientChatModel:
 
 # ── Public API (unchanged signatures) ──
 
-def get_langchain_llm(tier: str | None = None):
+def get_langchain_llm(tier: str | None = None, reasoning_effort: str | None = None):
     """LangChain ChatModel for LangGraph nodes. Uses multi-channel if configured.
 
     Args:
         tier: "small" | "large" | None. When set, only channels tagged with the matching
               tier are used. Falls back to any-tier with a warning if the requested tier
               has no available channels (handled inside channel_manager).
+        reasoning_effort: per-call override for the model's reasoning effort. Overrides the
+              channel/global setting for this LLM only — e.g. summary generation can request
+              "low" without lowering the chat path's effort. None/"" keeps the configured value.
     """
     from backend.channel_manager import has_channels
     if has_channels("llm"):
-        return ResilientChatModel(tier=tier)
+        return ResilientChatModel(tier=tier, effort_override=reasoning_effort or None)
     sync_c, async_c = _build_http_clients()
-    effort = _resolve_reasoning_effort(get_effective("llm", "reasoning_effort"))
+    effort = _resolve_reasoning_effort(reasoning_effort or get_effective("llm", "reasoning_effort"))
     model_kwargs = {"extra_body": {"reasoning_effort": effort}} if effort else {}
     if tier is not None:
         logger.warning(

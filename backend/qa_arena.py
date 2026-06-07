@@ -265,21 +265,27 @@ async def stream_qa_chat(
         store.update_session_title(session_id, user_id, title)
 
     memory_ctx = await _build_memory_context(message, user_id)
-    system_prompt = QA_ARENA_SYSTEM + memory_ctx
+
+    # Keep QA_ARENA_SYSTEM as a STABLE prefix so the channel's automatic prompt-prefix
+    # cache can hit across turns. Dynamic content (retrieved memory, rolling summary)
+    # must NOT be concatenated onto the system message — that would change the prefix
+    # every turn and defeat caching. They go in as separate messages after the prefix.
+    lc_messages: list[dict] = [{"role": "system", "content": QA_ARENA_SYSTEM}]
 
     # Context compression for long conversations
     if len(history) > COMPRESSION_THRESHOLD:
         old_messages = history[:-KEEP_RECENT]
         recent_messages = history[-KEEP_RECENT:]
         summary = await _get_or_create_summary(session_id, user_id, old_messages, len(history))
-        system_prompt += f"\n\n## 之前的对话摘要\n{summary}\n\n（以下是最近的对话记录）"
-        lc_messages = [{"role": "system", "content": system_prompt}]
+        lc_messages.append({"role": "system", "content": f"## 之前的对话摘要\n{summary}\n\n（以下是最近的对话记录）"})
         for m in recent_messages:
             lc_messages.append({"role": m["role"], "content": m["content"]})
     else:
-        lc_messages = [{"role": "system", "content": system_prompt}]
         for m in history:
             lc_messages.append({"role": m["role"], "content": m["content"]})
+
+    if memory_ctx:
+        lc_messages.append({"role": "system", "content": memory_ctx})
 
     lc_messages.append({"role": "user", "content": message})
 
@@ -344,13 +350,13 @@ def _chunk_conversation(messages: list[dict], chunk_size: int = CHUNK_SIZE) -> l
     return chunks
 
 
-async def _map_chunk_to_notes(chunk: str, idx: int, total: int) -> str:
+async def _map_chunk_to_notes(chunk: str, idx: int, total: int, reasoning_effort: str | None = None) -> str:
     """Map phase: summarize one conversation chunk into structured note fragments.
 
     On failure, keep a raw excerpt of the chunk rather than dropping it, so no part of
     the session is silently lost.
     """
-    llm = get_langchain_llm()
+    llm = get_langchain_llm(reasoning_effort=reasoning_effort)
     prompt = MAP_PROMPT.format(idx=idx, total=total, conversation=chunk)
     try:
         resp = await llm.ainvoke([
@@ -366,9 +372,14 @@ async def _map_chunk_to_notes(chunk: str, idx: int, total: int) -> str:
 
 
 async def stream_generate_summary(
-    session_id: str, user_id: str,
+    session_id: str, user_id: str, reasoning_effort: str | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Stream SSE events for knowledge card generation."""
+    """Stream SSE events for knowledge card generation.
+
+    reasoning_effort: per-call override (minimal/low/medium/high). Summary is an
+    extract-and-reorganize task, not deep reasoning, so a lower effort cuts latency
+    sharply with little quality loss. None/"" keeps the configured default.
+    """
     messages = store.load_messages(session_id, user_id, limit=200)
     if len(messages) < 2:
         yield f"data: {json.dumps({'type': 'error', 'message': '对话内容太少，无法生成总结'}, ensure_ascii=False)}\n\n"
@@ -385,7 +396,7 @@ async def stream_generate_summary(
         notes: list[str] = []
         for i, chunk in enumerate(chunks, 1):
             yield f"data: {json.dumps({'type': 'progress', 'message': f'正在整理第 {i}/{len(chunks)} 段...'}, ensure_ascii=False)}\n\n"
-            notes.append(await _map_chunk_to_notes(chunk, i, len(chunks)))
+            notes.append(await _map_chunk_to_notes(chunk, i, len(chunks), reasoning_effort=reasoning_effort))
         conversation = "\n\n---\n\n".join(notes)
         yield f"data: {json.dumps({'type': 'progress', 'message': '正在汇总知识卡片...'}, ensure_ascii=False)}\n\n"
 
@@ -393,7 +404,7 @@ async def stream_generate_summary(
 
     content = ""
     try:
-        llm = get_langchain_llm()
+        llm = get_langchain_llm(reasoning_effort=reasoning_effort)
         aiter = llm.astream([
             {"role": "system", "content": SUMMARY_SYSTEM},
             {"role": "user", "content": prompt_text},
@@ -422,6 +433,13 @@ async def stream_generate_summary(
     if content.startswith("```"):
         content = re.sub(r"^```\w*\n?", "", content)
         content = re.sub(r"\n?```\s*$", "", content)
+
+    # Model occasionally returns an empty completion (transient channel cooldown/failover)
+    # without raising — don't persist a blank card or send an empty "complete"; surface a retry.
+    if not content:
+        logger.warning("Summary generation produced empty content for session %s", session_id)
+        yield f"data: {json.dumps({'type': 'error', 'message': '生成结果为空，请重试（模型可能临时无响应）'}, ensure_ascii=False)}\n\n"
+        return
 
     topic = _extract_topic(content)
     safe_topic = _sanitize_filename(topic)

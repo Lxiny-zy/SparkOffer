@@ -70,13 +70,13 @@ def chat(session_id: str, body: dict, user_id: str = Depends(get_current_user)):
 
 
 @router.post("/sessions/{session_id}/summary")
-def summary(session_id: str, user_id: str = Depends(get_current_user)):
+def summary(session_id: str, effort: str = "", user_id: str = Depends(get_current_user)):
     if not store.get_session(session_id, user_id):
         raise HTTPException(404, "会话不存在")
 
     from backend.qa_arena import stream_generate_summary
     return StreamingResponse(
-        stream_generate_summary(session_id, user_id),
+        stream_generate_summary(session_id, user_id, reasoning_effort=effort or None),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
