@@ -23,7 +23,7 @@ interface ChannelManagerProps {
 }
 
 const SECTION_DEFAULTS: Record<string, () => ChannelData> = {
-  llm: () => ({ id: "", name: "", api_base: "", keys: [""], model: "", temperature: 0.7, reasoning_effort: "", tier: "large", priority: 1, enabled: true, proxy: "" }),
+  llm: () => ({ id: "", name: "", api_base: "", keys: [""], model: "", temperature: 0.7, reasoning_effort: "", max_tokens: 16384, timeout: 0, tier: "large", priority: 1, enabled: true, proxy: "" }),
   embedding: () => ({ id: "", name: "", backend: "api", api_base: "", keys: [""], api_model: "", local_model: "", local_path: "", priority: 1, enabled: true, proxy: "" }),
   asr: () => ({ id: "", name: "", keys: [""], model: "qwen3-asr-flash-filetrans", priority: 1, enabled: true, proxy: "" }),
   reranker: () => ({ id: "", name: "", api_base: "", keys: [""], api_model: "", priority: 1, enabled: true, proxy: "" }),
@@ -354,6 +354,21 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                     </div>
                   )}
                 </div>
+
+                {section === "llm" && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label className="text-xs">Max Tokens</Label>
+                      <Input type="number" min={256} step={256} value={ch.max_tokens ?? 16384} onChange={(e) => updateChannel(idx, { max_tokens: parseInt(e.target.value) || 16384 })} className="h-8 text-sm" />
+                      <p className="text-[10px] text-dim mt-1">单次回复上限（非上下文窗口）；推理模型含思考 token，建议 ≥8192</p>
+                    </div>
+                    <div>
+                      <Label className="text-xs">Timeout (秒)</Label>
+                      <Input type="number" min={0} step={10} value={ch.timeout ?? 0} placeholder="默认 240" onChange={(e) => updateChannel(idx, { timeout: parseInt(e.target.value) || 0 })} className="h-8 text-sm" />
+                      <p className="text-[10px] text-dim mt-1">读取超时；0 = 默认 240s</p>
+                    </div>
+                  </div>
+                )}
 
                 {section === "llm" && (
                   <div>

@@ -75,6 +75,16 @@ def _build_http_clients(proxy: str = "", *, timeout: httpx.Timeout | None = _LLM
     return pair
 
 
+def _channel_timeout(channel: dict) -> httpx.Timeout:
+    """Per-channel read timeout. ``channel['timeout']`` (seconds) overrides the
+    read leg only; 0/absent falls back to the global ``_LLM_TIMEOUT``. The
+    connect/write/pool legs keep the global values."""
+    t = channel.get("timeout")
+    if not t:
+        return _LLM_TIMEOUT
+    return httpx.Timeout(connect=15.0, read=float(t), write=30.0, pool=30.0)
+
+
 # Status codes that indicate a deterministic config/request error — failing over
 # to another channel won't help and would needlessly trip every channel's
 # cooldown. 429 (rate limit) is intentionally excluded: it IS worth failing over.
@@ -145,7 +155,7 @@ class ResilientChatModel:
         return llm
 
     def _make_llm(self, channel: dict) -> ChatOpenAI:
-        sync_c, async_c = _build_http_clients(channel.get("proxy", ""))
+        sync_c, async_c = _build_http_clients(channel.get("proxy", ""), timeout=_channel_timeout(channel))
         effort = _resolve_reasoning_effort(self._effort_override or channel.get("reasoning_effort"))
         model_kwargs = {"extra_body": {"reasoning_effort": effort}} if effort else {}
         return ChatOpenAI(
@@ -153,7 +163,7 @@ class ResilientChatModel:
             api_key=channel.get("api_key", ""),
             base_url=channel.get("api_base", ""),
             temperature=float(channel.get("temperature", 0.7)),
-            max_tokens=4096,
+            max_tokens=int(channel.get("max_tokens") or 16384),
             http_client=sync_c,
             http_async_client=async_c,
             default_headers=_CUSTOM_HEADERS,
@@ -257,7 +267,7 @@ def get_langchain_llm(tier: str | None = None, reasoning_effort: str | None = No
         api_key=get_effective("llm", "api_key"),
         base_url=get_effective("llm", "api_base"),
         temperature=float(get_effective("llm", "temperature") or 0.7),
-        max_tokens=4096,
+        max_tokens=16384,
         http_client=sync_c,
         http_async_client=async_c,
         default_headers=_CUSTOM_HEADERS,
@@ -281,6 +291,8 @@ def get_llama_llm():
                 _llama_llm_instance = OpenAILike(
                     model=ch["model"], api_key=ch["api_key"], api_base=ch["api_base"],
                     temperature=float(ch.get("temperature", 0.7)),
+                    max_tokens=int(ch.get("max_tokens") or 16384),
+                    timeout=float(ch.get("timeout")) if ch.get("timeout") else 240.0,
                     is_chat_model=True,
                     additional_kwargs=add_kw,
                 )
@@ -295,6 +307,8 @@ def get_llama_llm():
             api_key=get_effective("llm", "api_key"),
             api_base=get_effective("llm", "api_base"),
             temperature=float(get_effective("llm", "temperature") or 0.7),
+            max_tokens=16384,
+            timeout=240.0,
             is_chat_model=True,
             additional_kwargs=add_kw,
         )

@@ -9,6 +9,8 @@ export interface LLMChannel {
   model: string;
   temperature: number;
   reasoning_effort?: ReasoningEffort;
+  max_tokens?: number;
+  timeout?: number;
   tier?: ChannelTier;
   priority: number;
   enabled: boolean;
