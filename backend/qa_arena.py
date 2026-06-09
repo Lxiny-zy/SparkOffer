@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
 from backend.storage import qa_sessions as store
+from backend.utils.sse_helpers import chunk_text as _chunk_text, chunk_reasoning as _chunk_reasoning
 
 logger = logging.getLogger("uvicorn")
 
@@ -250,33 +251,9 @@ async def _get_or_create_summary(
     return summary
 
 
-def _chunk_text(chunk) -> str:
-    """Extract visible answer text from a streamed LangChain chunk, robust to provider quirks.
-
-    ``chunk.content`` is not always a plain string: OpenAI-compatible / reasoning gateways
-    stream it as a list of content blocks (``[{"type": "text", "text": ...}]`` or bare
-    strings), or as an empty list while the real answer is carried elsewhere. The old
-    ``chunk.content if hasattr(...)`` extraction returned the list verbatim — ``content += list``
-    then raised ``TypeError`` (swallowed by the outer handler) or, for empty lists, silently
-    appended nothing → blank reply. Reasoning-only deltas (answer in ``additional_kwargs``)
-    yield "" here by design; the visible answer is what we render. Never raises.
-    """
-    content = getattr(chunk, "content", None)
-    if not content:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict):
-                t = block.get("text") or block.get("content") or ""
-                if isinstance(t, str):
-                    parts.append(t)
-        return "".join(parts)
-    return ""
+def _sse(payload: dict) -> str:
+    """Serialize one SSE ``data:`` frame (ensure_ascii=False + trailing blank line)."""
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 async def _stream_chat_answer(
@@ -290,7 +267,14 @@ async def _stream_chat_answer(
       - non-empty content, clean finish     → save assistant + ``done``
       - non-empty content, mid-stream error → save partial  + ``error`` (no ``done``)
       - empty content (any reason)          → persist nothing + ``error``
+
+    Emits ``stage`` events (memory → thinking → answering) and ``reasoning`` deltas so the
+    front end can show progress and the SSE stream never goes byte-silent during a long
+    reasoning phase (which a proxy would otherwise time out → blank reply).
     """
+    # Stage 1 — memory retrieval. Emit the marker first so the UI shows progress while the
+    # (possibly slow) vector search runs, instead of a frozen spinner.
+    yield _sse({"type": "stage", "stage": "memory", "message": "正在检索相关记忆…"})
     memory_ctx = await _build_memory_context(prompt, user_id)
 
     # Keep QA_ARENA_SYSTEM as a STABLE prefix so the channel's automatic prompt-prefix
@@ -316,7 +300,14 @@ async def _stream_chat_answer(
 
     lc_messages.append({"role": "user", "content": prompt})
 
+    # Stage 2 — model call. A reasoning model can "think" for a long time before any visible
+    # answer token; we stream that thinking (see _chunk_reasoning) to keep the SSE connection
+    # alive past proxy idle timeouts AND to show the user progress.
+    yield _sse({"type": "stage", "stage": "thinking", "message": "正在思考…"})
+
     content = ""
+    had_reasoning = False
+    answering = False
     stream_error = False
     try:
         llm = get_langchain_llm()
@@ -324,12 +315,22 @@ async def _stream_chat_answer(
         while True:
             try:
                 chunk = await asyncio.wait_for(aiter.__anext__(), timeout=IDLE_HEARTBEAT_SECONDS)
+                reasoning = _chunk_reasoning(chunk)
+                if reasoning:
+                    had_reasoning = True
+                    yield _sse({"type": "reasoning", "content": reasoning})
                 token = _chunk_text(chunk)
                 if token:
+                    if not answering:
+                        answering = True
+                        yield _sse({"type": "stage", "stage": "answering", "message": "正在作答…"})
                     content += token
-                    yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+                    yield _sse({"type": "token", "content": token})
             except asyncio.TimeoutError:
-                yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+                # No chunk at all for IDLE_HEARTBEAT_SECONDS — upstream is genuinely silent
+                # (deep reasoning with no streamed trace, or a stalled relay). Ping to keep
+                # the proxy from closing the idle connection.
+                yield _sse({"type": "ping"})
             except StopAsyncIteration:
                 break
     except Exception as e:
@@ -347,8 +348,16 @@ async def _stream_chat_answer(
     # retry so the user can regenerate — a fresh attempt / channel often succeeds. Mirrors
     # the guard already on the summary path.
     if not content:
-        logger.warning("QA arena produced empty content for session %s", session_id)
-        yield f"data: {json.dumps({'type': 'error', 'message': '模型暂时无响应，请点击重新生成'}, ensure_ascii=False)}\n\n"
+        logger.warning(
+            "QA arena produced empty content for session %s (had_reasoning=%s, stream_error=%s)",
+            session_id, had_reasoning, stream_error,
+        )
+        msg = (
+            "模型只输出了思考过程、没有给出正文，请点击重新生成"
+            if had_reasoning
+            else "模型暂时无响应，请点击重新生成"
+        )
+        yield _sse({"type": "error", "message": msg})
         return
 
     # Persist whatever we got (full or partial) so a reload shows it and regenerate can
@@ -356,9 +365,9 @@ async def _stream_chat_answer(
     store.save_message(session_id, user_id, "assistant", content[:MAX_RESPONSE_STORE_LENGTH])
 
     if stream_error:
-        yield f"data: {json.dumps({'type': 'error', 'message': '回复被中断，可能不完整，请点击重新生成'}, ensure_ascii=False)}\n\n"
+        yield _sse({"type": "error", "message": "回复被中断，可能不完整，请点击重新生成"})
     else:
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        yield _sse({"type": "done"})
 
     # Lightweight profile evolution: track QA activity for learning insights.
     # Runs after the stream so it never blocks the response.

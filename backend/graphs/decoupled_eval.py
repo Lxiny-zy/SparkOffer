@@ -33,6 +33,11 @@ from backend.prompts.interviewer import (
 
 logger = logging.getLogger("uvicorn")
 
+# 单题评分一次性 fan-out 最多 10 路 small-tier ainvoke。无限流会打爆上游
+# 并发额度（见 commit 5ce4d7b 的 DashScope 429）。沿用 rag_eval._LLM_CONCURRENCY
+# 的做法：semaphore 在调用 gather 的协程内创建（事件循环内），避免跨事件循环绑定。
+_SCORE_CONCURRENCY = 4
+
 
 def has_small_tier() -> bool:
     """True when at least one enabled LLM channel is marked tier=small."""
@@ -80,6 +85,9 @@ async def evaluate_decoupled(
         }
 
     small_llm = get_langchain_llm(tier="small")
+    # Bound the per-Q LLM concurrency. Created here (inside the running loop) and
+    # captured by the _score_one closure so it's bound to the correct event loop.
+    score_sem = asyncio.Semaphore(_SCORE_CONCURRENCY)
 
     async def _score_one(q: dict) -> dict:
         qid = q["id"]
@@ -97,10 +105,11 @@ async def evaluate_decoupled(
             question_id=qid,
         )
         try:
-            resp = await small_llm.ainvoke([
-                SystemMessage(content="你是单题评分引擎，只返回 JSON 对象。"),
-                HumanMessage(content=prompt),
-            ])
+            async with score_sem:
+                resp = await small_llm.ainvoke([
+                    SystemMessage(content="你是单题评分引擎，只返回 JSON 对象。"),
+                    HumanMessage(content=prompt),
+                ])
             raw = resp.content if hasattr(resp, "content") else str(resp)
             parsed = _parse_json_response(raw)
             if not isinstance(parsed, dict):

@@ -304,26 +304,38 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                 import logging
                 logging.getLogger("uvicorn").warning("RAG eval metrics failed: %s", exc)
 
-            review = format_drill_review(questions, answers, scores, overall)
-            save_review(session_id, review, scores, overall.get("new_weak_points", []), overall, user_id=user_id)
+            # Persist the evaluation outcome. Shielded so a client disconnect during/after
+            # the (possibly minutes-long) eval doesn't leave the session evaluated-but-unsaved:
+            # answers were saved before streaming; this saves review + SR + profile + knowledge.
+            async def _persist_drill():
+                try:
+                    review_ = format_drill_review(questions, answers, scores, overall)
+                    save_review(session_id, review_, scores, overall.get("new_weak_points", []), overall, user_id=user_id)
 
-            from backend.spaced_repetition import update_weak_point_sr
-            for s in scores:
-                wp = s.get("weak_point")
-                sc = s.get("score")
-                if wp and isinstance(sc, (int, float)):
-                    update_weak_point_sr(topic, wp, sc, user_id, difficulty=s.get("difficulty", 3))
+                    from backend.spaced_repetition import update_weak_point_sr
+                    for s in scores:
+                        wp = s.get("weak_point")
+                        sc = s.get("score")
+                        if wp and isinstance(sc, (int, float)):
+                            update_weak_point_sr(topic, wp, sc, user_id, difficulty=s.get("difficulty", 3))
 
-            await _update_drill_profile(topic, overall, scores, len(questions), user_id)
-            del_live(drill_sessions, session_id, user_id)
+                    await _update_drill_profile(topic, overall, scores, len(questions), user_id)
+                    del_live(drill_sessions, session_id, user_id)
 
-            try:
-                from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
-                await extract_and_writeback(topic, questions, answers, scores, user_id)
-                await collect_high_freq(topic, questions, scores, user_id)
-            except Exception as e:
-                import logging
-                logging.getLogger("uvicorn").warning(f"Knowledge evolution failed: {e}")
+                    try:
+                        from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+                        await extract_and_writeback(topic, questions, answers, scores, user_id)
+                        await collect_high_freq(topic, questions, scores, user_id)
+                    except Exception as e:
+                        import logging
+                        logging.getLogger("uvicorn").warning(f"Knowledge evolution failed: {e}")
+                    return review_
+                except Exception as e:
+                    import logging
+                    logging.getLogger("uvicorn").error(f"Drill result persistence failed: {e}")
+                    return format_drill_review(questions, answers, scores, overall)
+
+            review = await asyncio.shield(_persist_drill())
 
             result = {
                 "session_id": session_id,
@@ -368,21 +380,31 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             for s in scores:
                 s.setdefault("difficulty", q_diff.get(s.get("question_id"), 3))
 
-            review = format_job_prep_review(questions, answers, scores, overall, meta)
-            save_review(session_id, review, scores, overall.get("new_weak_points", []), overall, user_id=user_id)
+            # Shielded persistence — see _persist_drill. Survives a client disconnect.
+            async def _persist_job_prep():
+                try:
+                    review_ = format_job_prep_review(questions, answers, scores, overall, meta)
+                    save_review(session_id, review_, scores, overall.get("new_weak_points", []), overall, user_id=user_id)
 
-            await _update_job_prep_profile(overall, scores, len(questions), meta, user_id)
-            del_live(job_prep_sessions, session_id, user_id)
+                    await _update_job_prep_profile(overall, scores, len(questions), meta, user_id)
+                    del_live(job_prep_sessions, session_id, user_id)
 
-            try:
-                from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
-                jd_topics = _match_jd_to_topics(meta, user_id)
-                for t in jd_topics:
-                    await extract_and_writeback(t, questions, answers, scores, user_id)
-                    await collect_high_freq(t, questions, scores, user_id)
-            except Exception as e:
-                import logging
-                logging.getLogger("uvicorn").warning(f"JD prep knowledge evolution failed: {e}")
+                    try:
+                        from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+                        jd_topics = _match_jd_to_topics(meta, user_id)
+                        for t in jd_topics:
+                            await extract_and_writeback(t, questions, answers, scores, user_id)
+                            await collect_high_freq(t, questions, scores, user_id)
+                    except Exception as e:
+                        import logging
+                        logging.getLogger("uvicorn").warning(f"JD prep knowledge evolution failed: {e}")
+                    return review_
+                except Exception as e:
+                    import logging
+                    logging.getLogger("uvicorn").error(f"JD prep persistence failed: {e}")
+                    return format_job_prep_review(questions, answers, scores, overall, meta)
+
+            review = await asyncio.shield(_persist_job_prep())
 
             result = {
                 "session_id": session_id,
@@ -438,36 +460,47 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                 except (json.JSONDecodeError, KeyError):
                     pass
 
-        extraction = await update_profile_after_interview(
-            mode=entry["mode"].value,
-            topic=entry.get("topic"),
-            messages=messages,
-            user_id=user_id,
-            scores=scores,
-        )
+        # Shielded persistence — see _persist_drill. The profile extraction (an LLM call)
+        # plus review/knowledge writeback complete even if the client disconnects mid-review.
+        async def _persist_resume():
+            try:
+                extraction_ = await update_profile_after_interview(
+                    mode=entry["mode"].value,
+                    topic=entry.get("topic"),
+                    messages=messages,
+                    user_id=user_id,
+                    scores=scores,
+                )
 
-        resume_overall = {}
-        if extraction.get("dimension_scores"):
-            resume_overall["dimension_scores"] = extraction["dimension_scores"]
-        if extraction.get("avg_score"):
-            resume_overall["avg_score"] = extraction["avg_score"]
-        save_review(session_id, review_text, scores, weak_points, overall=resume_overall, user_id=user_id)
+                resume_overall = {}
+                if extraction_.get("dimension_scores"):
+                    resume_overall["dimension_scores"] = extraction_["dimension_scores"]
+                if extraction_.get("avg_score"):
+                    resume_overall["avg_score"] = extraction_["avg_score"]
+                save_review(session_id, review_text, scores, weak_points, overall=resume_overall, user_id=user_id)
 
-        del_live(graphs, session_id, user_id)
+                del_live(graphs, session_id, user_id)
 
-        try:
-            from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
-            resume_topics = _match_resume_to_topics(messages, user_id)
-            if resume_topics and eval_history:
-                resume_qs = [{"question": e.get("question", "")} for e in eval_history if e.get("question")]
-                resume_scores = [{"score": e.get("score", 5), "assessment": e.get("assessment", "")} for e in eval_history]
-                resume_answers = [e.get("answer", "") for e in eval_history]
-                for t in resume_topics:
-                    await extract_and_writeback(t, resume_qs, resume_answers, resume_scores, user_id)
-                    await collect_high_freq(t, resume_qs, resume_scores, user_id)
-        except Exception as e:
-            import logging
-            logging.getLogger("uvicorn").warning(f"Resume knowledge evolution failed: {e}")
+                try:
+                    from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+                    resume_topics = _match_resume_to_topics(messages, user_id)
+                    if resume_topics and eval_history:
+                        resume_qs = [{"question": e.get("question", "")} for e in eval_history if e.get("question")]
+                        resume_scores = [{"score": e.get("score", 5), "assessment": e.get("assessment", "")} for e in eval_history]
+                        resume_answers = [e.get("answer", "") for e in eval_history]
+                        for t in resume_topics:
+                            await extract_and_writeback(t, resume_qs, resume_answers, resume_scores, user_id)
+                            await collect_high_freq(t, resume_qs, resume_scores, user_id)
+                except Exception as e:
+                    import logging
+                    logging.getLogger("uvicorn").warning(f"Resume knowledge evolution failed: {e}")
+                return extraction_
+            except Exception as e:
+                import logging
+                logging.getLogger("uvicorn").error(f"Resume persistence failed: {e}")
+                return {}
+
+        extraction = await asyncio.shield(_persist_resume())
 
         result = {
             "session_id": session_id,

@@ -11,6 +11,9 @@ export interface QAMessage {
   role: "user" | "assistant";
   content: string;
   created_at: string;
+  // Transient thinking trace streamed by reasoning models (reasoning_content). Display-only:
+  // populated live during a turn, never persisted, so it's absent on reload.
+  reasoning?: string;
 }
 
 export interface QASummaryResult {

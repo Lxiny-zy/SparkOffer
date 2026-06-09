@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, memo, useMemo } from "react";
 import {
   Plus, Trash2, Send, Download, FileText, Loader2,
-  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square, RefreshCw, AlertCircle,
+  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square, RefreshCw, AlertCircle, Brain,
 } from "lucide-react";
 import { Markdown } from "../components/ChatBubble";
 import { cn } from "@/lib/utils";
@@ -59,6 +59,7 @@ export default function QAArena() {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [streamStage, setStreamStage] = useState<string>("");
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [summaryProgress, setSummaryProgress] = useState("");
   const [summaryEffort, setSummaryEffort] = useState("");
@@ -155,11 +156,13 @@ export default function QAArena() {
     setIsStreaming(true);
     isStreamingRef.current = true;
     setStreamError(null);
+    setStreamStage("");
 
     const controller = new AbortController();
     abortRef.current = controller;
 
     let assistantContent = "";
+    let assistantReasoning = "";
     let pendingUpdate = false;
     let errMsg: string | null = null;
 
@@ -168,7 +171,7 @@ export default function QAArena() {
       pendingUpdate = false;
       setMessages((prev) => {
         const updated = [...prev];
-        updated[updated.length - 1] = { role: "assistant", content: assistantContent, created_at: "" };
+        updated[updated.length - 1] = { role: "assistant", content: assistantContent, created_at: "", reasoning: assistantReasoning };
         return updated;
       });
       // Scroll to bottom during streaming
@@ -177,14 +180,26 @@ export default function QAArena() {
       }
     };
 
+    const scheduleFlush = () => {
+      if (!pendingUpdate) {
+        pendingUpdate = true;
+        rafRef.current = requestAnimationFrame(flushUpdate);
+      }
+    };
+
     try {
       for await (const event of makeStream(controller.signal)) {
         if (event.type === "token") {
           assistantContent += event.content;
-          if (!pendingUpdate) {
-            pendingUpdate = true;
-            rafRef.current = requestAnimationFrame(flushUpdate);
-          }
+          scheduleFlush();
+        } else if (event.type === "reasoning") {
+          // Live thinking trace from a reasoning model — keeps the stream alive during long
+          // thinking and shows progress. Accumulated separately from the visible answer.
+          assistantReasoning += event.content;
+          scheduleFlush();
+        } else if (event.type === "stage") {
+          // Pipeline phase marker (memory → thinking → answering).
+          setStreamStage(event.message || "");
         } else if (event.type === "error") {
           // Backend surfaced an empty / interrupted completion. Keep whatever streamed
           // (if anything) and show a retry hint instead of a silent blank bubble.
@@ -193,6 +208,7 @@ export default function QAArena() {
         } else if (event.type === "done") {
           break;
         }
+        // `ping` and any unknown type: ignored (ping is just a network-level keepalive).
       }
     } catch (err: any) {
       if (err.name !== "AbortError") {
@@ -206,12 +222,13 @@ export default function QAArena() {
       }
       setMessages((prev) => {
         const updated = [...prev];
-        updated[updated.length - 1] = { role: "assistant", content: assistantContent, created_at: "" };
+        updated[updated.length - 1] = { role: "assistant", content: assistantContent, created_at: "", reasoning: assistantReasoning };
         return updated;
       });
       abortRef.current = null;
       isStreamingRef.current = false;
       setIsStreaming(false);
+      setStreamStage("");
       if (errMsg) setStreamError(errMsg);
       listQASessions().then((data) => setSessions(data.sessions));
     }
@@ -520,12 +537,14 @@ export default function QAArena() {
                   key={i}
                   role={m.role}
                   content={m.content}
-                  emptyHint={m.role === "assistant" && !m.content && !isStreaming && i === messages.length - 1}
+                  reasoning={m.reasoning}
+                  streaming={isStreaming && i === messages.length - 1 && m.role === "assistant"}
+                  emptyHint={m.role === "assistant" && !m.content && !m.reasoning && !isStreaming && i === messages.length - 1}
                 />
               ))}
               {isStreaming && messages[messages.length - 1]?.content === "" && (
                 <div className="flex items-center gap-2 text-dim text-sm">
-                  <Loader2 className="w-4 h-4 animate-spin" /> 思考中...
+                  <Loader2 className="w-4 h-4 animate-spin" /> {streamStage || "思考中..."}
                 </div>
               )}
               {!isStreaming && messages.length > 0 && (
@@ -630,7 +649,7 @@ export default function QAArena() {
   );
 }
 
-const ChatMessage = memo(function ChatMessage({ role, content, emptyHint }: { role: string; content: string; emptyHint?: boolean }) {
+const ChatMessage = memo(function ChatMessage({ role, content, reasoning, streaming, emptyHint }: { role: string; content: string; reasoning?: string; streaming?: boolean; emptyHint?: boolean }) {
   if (role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
@@ -643,6 +662,22 @@ const ChatMessage = memo(function ChatMessage({ role, content, emptyHint }: { ro
   return (
     <div className="flex flex-col animate-fade-in">
       <div className="sig-card max-w-full leading-[1.8] text-[15px] text-text rounded-lg rounded-tl-sm px-4 py-3">
+        {reasoning && (
+          // Collapsible thinking trace from a reasoning model. Auto-open while streaming so
+          // the user sees live progress; collapsible afterward to keep the answer prominent.
+          <details className="mb-2 -mt-0.5" open={streaming}>
+            <summary className="cursor-pointer select-none text-xs text-dim flex items-center gap-1.5 list-none">
+              <Brain className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--sig-accent)" }} />
+              思考过程{streaming && !content ? "（进行中…）" : ""}
+            </summary>
+            <div
+              className="mt-2 mb-1 text-xs leading-relaxed text-dim whitespace-pre-wrap max-h-64 overflow-y-auto border-l-2 pl-3"
+              style={{ borderColor: "var(--sig-line-2)" }}
+            >
+              {reasoning}
+            </div>
+          </details>
+        )}
         <div className="md-content">
           {content ? (
             <Markdown>{content}</Markdown>

@@ -11,6 +11,8 @@ from backend.graphs.topic_drill import _parse_json_response
 from backend.indexer import query_resume, gather_topic_contexts, load_topics
 from backend.llm_provider import get_langchain_llm
 from backend.memory import get_profile_summary
+from backend.utils.sse_helpers import iter_llm_stream, chunk_text
+from backend.utils.stream_parser import extract_complete_objects
 from backend.redis_cache import get_cache
 from backend.prompts.job_prep import (
     JOB_PREP_EVAL_PROMPT,
@@ -144,13 +146,18 @@ def generate_job_prep_preview(
         HumanMessage(content=prompt),
     ])
 
+    raw = chunk_text(response)
+    if not raw.strip():
+        # Reasoning model returned thinking only, no visible JSON (billed but empty).
+        logger.error("JD prep preview returned empty content (reasoning budget exhausted?)")
+        raise RuntimeError("JD 分析失败：模型未返回正文（可能思考预算耗尽），请重试或降低该渠道的 reasoning_effort。")
     try:
-        parsed = _parse_json_response(response.content)
+        parsed = _parse_json_response(raw)
         if not isinstance(parsed, dict):
             raise ValueError(f"Expected dict, got {type(parsed)}")
     except Exception as exc:
         logger.error(f"JD prep preview failed: {exc}")
-        logger.error(f"LLM raw response: {response.content[:800]}")
+        logger.error(f"LLM raw response: {raw[:800]}")
         raise RuntimeError("JD 分析失败，LLM 返回格式异常。请重试。")
 
     return _normalize_preview(
@@ -188,14 +195,24 @@ def generate_job_prep_questions(
         HumanMessage(content=prompt),
     ])
 
+    raw = chunk_text(response)
+    if not raw.strip():
+        logger.error("JD prep question generation returned empty content (reasoning budget exhausted?)")
+        raise RuntimeError("JD 备面出题失败：模型未返回正文（可能思考预算耗尽），请重试或降低该渠道的 reasoning_effort。")
     try:
-        questions = _parse_json_response(response.content)
+        questions = _parse_json_response(raw)
         if not isinstance(questions, list):
             raise ValueError(f"Expected list, got {type(questions)}")
     except Exception as exc:
-        logger.error(f"JD prep question generation failed: {exc}")
-        logger.error(f"LLM raw response: {response.content[:800]}")
-        raise RuntimeError("JD 备面出题失败，LLM 返回格式异常。请重试。")
+        # Truncated mid-array by max_tokens → salvage the complete question objects.
+        salvaged, _ = extract_complete_objects(raw)
+        if salvaged:
+            logger.warning("JD prep question JSON parse failed (%s); salvaged %d objects", exc, len(salvaged))
+            questions = salvaged
+        else:
+            logger.error(f"JD prep question generation failed: {exc}")
+            logger.error(f"LLM raw response: {raw[:800]}")
+            raise RuntimeError("JD 备面出题失败，LLM 返回格式异常。请重试。")
 
     normalized = []
     for i, q in enumerate(questions[:8], start=1):
@@ -437,11 +454,14 @@ async def stream_evaluate_job_prep_answers(
     _fallback_overall = lambda: {"avg_score": None, "summary": "评估过程出错。", "new_weak_points": [], "new_strong_points": [], "dimension_scores": {}}
 
     try:
-        async for chunk in llm.astream(lc_messages):
-            token = chunk.content if hasattr(chunk, "content") else ""
-            if token:
-                accumulated += token
-                chars_since_heartbeat += len(token)
+        async for kind, delta in iter_llm_stream(llm, lc_messages):
+            if kind == "idle":
+                yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+            elif kind == "reasoning":
+                yield f"data: {json.dumps({'type': 'eval_progress', 'message': '正在分析评估中...（思考中）'}, ensure_ascii=False)}\n\n"
+            elif kind == "token":
+                accumulated += delta
+                chars_since_heartbeat += len(delta)
                 if chars_since_heartbeat >= 200:
                     chars_since_heartbeat = 0
                     yield f"data: {json.dumps({'type': 'eval_progress', 'message': f'正在分析评估中... ({len(accumulated)} 字)'}, ensure_ascii=False)}\n\n"

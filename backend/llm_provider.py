@@ -1,5 +1,7 @@
 """LLM / Embedding provider with multi-channel failover support."""
+import asyncio
 import logging
+import time
 from urllib.parse import urlparse, urlunparse, quote
 
 import httpx
@@ -16,8 +18,20 @@ _llama_config_version = -1
 _embedding_config_version = -1
 
 _CUSTOM_HEADERS = {"User-Agent": "curl/7.88.1"}
-_LLM_TIMEOUT = httpx.Timeout(connect=15.0, read=240.0, write=30.0, pool=30.0)
+# read=360s is intentionally ABOVE nginx's proxy_read_timeout (300s) so a long reasoning
+# phase is bounded by ONE layer (nginx), not raced between httpx and nginx. The app-level
+# 30s idle ping refreshes nginx's timer; it does NOT refresh httpx's read timer (that
+# tracks the upstream socket), hence the generous read budget here.
+_LLM_TIMEOUT = httpx.Timeout(connect=15.0, read=360.0, write=30.0, pool=30.0)
 _EMBED_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)  # 与 vector_memory._EMBED_TIMEOUT_SECONDS 对齐
+
+# Same-channel retry: a transient 5xx/429/timeout is often gone on a quick retry, and
+# retrying the same channel first avoids needlessly tripping every channel's cooldown (the
+# old code failed over on the first blip → on a single-channel deploy that meant instant
+# RuntimeError). Mirrors the embedding path's explicit retry policy.
+_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
+_MAX_SAME_CHANNEL_ATTEMPTS = 2          # 1 original + 1 retry
+_SAME_CHANNEL_BACKOFF_SECONDS = 1.5
 
 # 上游可接受的 reasoning_effort 档位。当某 provider 新增档位（如 OpenAI gpt-5.x 的
 # "xhigh"）时在此集合补一项即可；集合外的取值会被 _resolve_reasoning_effort 丢成 None。
@@ -127,6 +141,22 @@ def _reraise_if_fatal(exc: Exception, channel: dict) -> None:
         raise exc
 
 
+def _is_transient_error(exc: Exception) -> bool:
+    """Worth one same-channel retry before failing over: a 5xx/429/408/409 or a
+    network/transport/timeout error. Fatal 4xx are already filtered by _reraise_if_fatal."""
+    code = _extract_status_code(exc)
+    if code is not None:
+        return code in _RETRYABLE_STATUS
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (httpx.TimeoutException, httpx.TransportError)):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 # ── ResilientChatModel — transparent failover wrapper ──
 
 class ResilientChatModel:
@@ -175,16 +205,25 @@ class ResilientChatModel:
         tried: set[str] = set()
         channel = get_channel("llm", tier=self._tier)
         while channel:
-            try:
-                result = self._make_and_bind(channel).invoke(messages, **kwargs)
-                report_success("llm", channel["id"])
-                return result
-            except Exception as e:
-                _reraise_if_fatal(e, channel)
-                logger.warning("LLM channel '%s' invoke failed: %s", channel["name"], e)
-                report_error("llm", channel["id"])
-                tried.add(channel["id"])
-                channel = get_next_channel("llm", tried, tier=self._tier)
+            for attempt in range(_MAX_SAME_CHANNEL_ATTEMPTS):
+                try:
+                    result = self._make_and_bind(channel).invoke(messages, **kwargs)
+                    report_success("llm", channel["id"])
+                    return result
+                except Exception as e:
+                    _reraise_if_fatal(e, channel)
+                    if attempt + 1 < _MAX_SAME_CHANNEL_ATTEMPTS and _is_transient_error(e):
+                        logger.warning(
+                            "LLM channel '%s' transient error (attempt %d/%d), retrying same channel: %s",
+                            channel["name"], attempt + 1, _MAX_SAME_CHANNEL_ATTEMPTS, e,
+                        )
+                        time.sleep(_SAME_CHANNEL_BACKOFF_SECONDS)
+                        continue
+                    logger.warning("LLM channel '%s' invoke failed: %s", channel["name"], e)
+                    report_error("llm", channel["id"])
+                    tried.add(channel["id"])
+                    break
+            channel = get_next_channel("llm", tried, tier=self._tier)
         raise RuntimeError("All LLM channels exhausted")
 
     async def ainvoke(self, messages, **kwargs):
@@ -192,16 +231,25 @@ class ResilientChatModel:
         tried: set[str] = set()
         channel = get_channel("llm", tier=self._tier)
         while channel:
-            try:
-                result = await self._make_and_bind(channel).ainvoke(messages, **kwargs)
-                report_success("llm", channel["id"])
-                return result
-            except Exception as e:
-                _reraise_if_fatal(e, channel)
-                logger.warning("LLM channel '%s' ainvoke failed: %s", channel["name"], e)
-                report_error("llm", channel["id"])
-                tried.add(channel["id"])
-                channel = get_next_channel("llm", tried, tier=self._tier)
+            for attempt in range(_MAX_SAME_CHANNEL_ATTEMPTS):
+                try:
+                    result = await self._make_and_bind(channel).ainvoke(messages, **kwargs)
+                    report_success("llm", channel["id"])
+                    return result
+                except Exception as e:
+                    _reraise_if_fatal(e, channel)
+                    if attempt + 1 < _MAX_SAME_CHANNEL_ATTEMPTS and _is_transient_error(e):
+                        logger.warning(
+                            "LLM channel '%s' transient error (attempt %d/%d), retrying same channel: %s",
+                            channel["name"], attempt + 1, _MAX_SAME_CHANNEL_ATTEMPTS, e,
+                        )
+                        await asyncio.sleep(_SAME_CHANNEL_BACKOFF_SECONDS)
+                        continue
+                    logger.warning("LLM channel '%s' ainvoke failed: %s", channel["name"], e)
+                    report_error("llm", channel["id"])
+                    tried.add(channel["id"])
+                    break
+            channel = get_next_channel("llm", tried, tier=self._tier)
         raise RuntimeError("All LLM channels exhausted")
 
     async def astream(self, messages, **kwargs):

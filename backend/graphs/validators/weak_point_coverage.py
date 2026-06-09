@@ -127,17 +127,24 @@ class WeakPointCoverageValidator:
         if not wp_embeddings:
             return
 
-        matrix = np.stack(wp_embeddings)
         matched_qids: set = set()
         for q in unmatched:
             qtext = (q.get("question") or "") + " " + (q.get("focus_area") or "")
             emb = _embed(qtext)
             if emb is None:
                 continue
+            # 混维度守卫：换过 embedding 模型后 wp 缓存里可能残留旧维度向量，
+            # np.stack 后与本题 emb 做 cosine 会 ValueError 打断出题。只保留与 emb
+            # 同维度的 wp 行（keys 同步过滤）；过滤后为空则当作未命中，安全跳过。
+            rows = [(k, e) for k, e in zip(wp_keys, wp_embeddings) if e.shape == emb.shape]
+            if not rows:
+                continue
+            safe_keys = [k for k, _ in rows]
+            matrix = np.stack([e for _, e in rows])
             sims = _cosine_similarity(emb, matrix)
             best_idx = int(np.argmax(sims))
             if float(sims[best_idx]) >= EMBED_HIT_THRESHOLD:
-                wp = wp_keys[best_idx]
+                wp = safe_keys[best_idx]
                 covered_wps.add(wp)
                 wp_to_questions[wp].append(q.get("id"))
                 matched_qids.add(q.get("id"))

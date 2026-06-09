@@ -15,7 +15,21 @@ from backend.redis_cache import get_cache
 
 logger = logging.getLogger("uvicorn")
 
-_TIMEOUT = httpx.Timeout(connect=10.0, read=90.0, write=10.0, pool=10.0)
+# rerank 是轻量 cross-encoder，正常亚秒级返回；read 不必给到 90s。
+# 外层 drill 总预算仅 100s（drill_pipeline.py），rerank 卡满会连带把已检索好的
+# chunk 一起超时丢弃，故把 read 收紧到 30s（connect/write/pool 保持）。
+_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+
+# 送去打分的输入上限（仅影响打分入参，不影响回传的完整原文）：
+# - MAX_RERANK_DOCS: 候选条数上限。调用方传 top_n=len(chunks)，评测 --top-k 50
+#   或大检索集会撑爆上游 rerank API 的文档条数上限；最终调用方还会 [:final_top_n]
+#   截到 10，故 50 足够覆盖。
+# - MAX_DOC_CHARS: 单条文档字符上限。MarkdownNodeParser 单段可达上万字，整段进
+#   payload 会触发上游单文档 token 上限 → 400/413。
+# - MAX_QUERY_CHARS: query 字符上限，避免超长 query 同样撑爆输入。
+MAX_RERANK_DOCS = 50
+MAX_DOC_CHARS = 2000
+MAX_QUERY_CHARS = 512
 
 
 def _get_reranker_config() -> dict | None:
@@ -95,6 +109,12 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
     if not config:
         return chunks, "off"
 
+    # 输入上限：仅约束送去打分的候选集与文本长度，避免撑爆上游 rerank API。
+    # 注意：候选条数截断后，reordered 仍取 chunks[i] 的【完整原文】（见下方
+    # documents 单独做字符截断，chunks 本身不截短），保证回传内容不被截断。
+    chunks = chunks[:MAX_RERANK_DOCS]
+    query = query[:MAX_QUERY_CHARS]
+
     effective_top_n = min(top_n, len(chunks))
     cache = get_cache()
     ck = _cache_key(query, chunks, effective_top_n)
@@ -115,7 +135,8 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
     payload = {
         "model": config["api_model"],
         "query": query,
-        "documents": chunks,
+        # 单条文档截断仅用于打分输入；reordered 回传时取的是未截断的 chunks[i] 完整原文。
+        "documents": [c[:MAX_DOC_CHARS] for c in chunks],
         "top_n": effective_top_n,
         "return_documents": False,
     }
@@ -167,8 +188,12 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
         logger.warning("Reranker timeout (%ds read): query=%r, %d chunks", _TIMEOUT.read, query[:50], len(chunks))
         _report(channel_id, False)
     except httpx.HTTPStatusError as e:
-        logger.warning("Reranker HTTP error %d: %s", e.response.status_code, e.response.text[:200])
-        _report(channel_id, False)
+        status = e.response.status_code
+        logger.warning("Reranker HTTP error %d: %s", status, e.response.text[:200])
+        # 400/413/422 是确定性的输入过大/格式错误，换渠道也救不了，不应污染
+        # 渠道失败计数（否则 3 次后会误把可用渠道冷却 60s）；其余（5xx 等）仍上报。
+        if status not in (400, 413, 422):
+            _report(channel_id, False)
     except Exception as e:
         logger.warning("Reranker failed: %s", e)
         _report(channel_id, False)

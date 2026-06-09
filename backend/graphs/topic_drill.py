@@ -12,6 +12,8 @@ from backend.llm_provider import get_langchain_llm
 from backend.indexer import retrieve_topic_context, gather_topic_contexts, safe_retrieve_topic_context, load_topics
 from backend.memory import get_profile_summary, get_profile_summary_for_drill, get_topic_context_for_drill
 from backend.prompts.interviewer import DRILL_QUESTION_GEN_PROMPT, DRILL_BATCH_EVAL_PROMPT
+from backend.utils.sse_helpers import iter_llm_stream, chunk_text
+from backend.utils.stream_parser import extract_complete_objects
 
 _logger = logging.getLogger("uvicorn")
 
@@ -176,21 +178,35 @@ def generate_drill_questions(topic: str, user_id: str) -> list[dict]:
         HumanMessage(content=prompt),
     ])
 
+    raw = chunk_text(response)
+    if not raw.strip():
+        # A reasoning model can burn its whole token budget on thinking and return no
+        # visible JSON (billed but empty). Surface a retryable message instead of letting
+        # an empty string fall into _parse_json_response → JSONDecodeError → 500.
+        _logger.error("Drill question generation returned empty content (reasoning budget exhausted?)")
+        raise RuntimeError("出题失败：模型未返回题目正文（可能思考预算耗尽），请重试或降低该渠道的 reasoning_effort。")
+
     try:
-        questions = _parse_json_response(response.content)
+        questions = _parse_json_response(raw)
         if not isinstance(questions, list):
             raise ValueError(f"Expected a list, got {type(questions)}")
-        # Ensure each question has an id
-        for i, q in enumerate(questions):
-            if "id" not in q:
-                q["id"] = i + 1
-        return questions[:10]
-    except (json.JSONDecodeError, ValueError, IndexError) as e:
-        import logging
-        logger = logging.getLogger("uvicorn")
-        logger.error(f"Drill question generation failed: {e}")
-        logger.error(f"LLM raw response: {response.content[:500]}")
-        raise RuntimeError(f"出题失败，LLM 返回格式异常: {e}")
+    except (json.JSONDecodeError, ValueError) as e:
+        # Output may have been truncated mid-array by max_tokens — salvage the complete
+        # question objects that did stream rather than failing the whole request.
+        salvaged, _ = extract_complete_objects(raw)
+        if salvaged:
+            _logger.warning("Drill question JSON parse failed (%s); salvaged %d complete objects", e, len(salvaged))
+            questions = salvaged
+        else:
+            _logger.error(f"Drill question generation failed: {e}")
+            _logger.error(f"LLM raw response: {raw[:500]}")
+            raise RuntimeError(f"出题失败，LLM 返回格式异常: {e}")
+
+    # Ensure each question has an id
+    for i, q in enumerate(questions):
+        if isinstance(q, dict) and "id" not in q:
+            q["id"] = i + 1
+    return questions[:10]
 
 
 def evaluate_drill_answers(topic: str, questions: list[dict], answers: list[dict],
@@ -290,11 +306,15 @@ async def stream_evaluate_drill_answers(
     accumulated = ""
     chars_since_heartbeat = 0
     try:
-        async for chunk in llm.astream(lc_messages):
-            token = chunk.content if hasattr(chunk, "content") else ""
-            if token:
-                accumulated += token
-                chars_since_heartbeat += len(token)
+        async for kind, delta in iter_llm_stream(llm, lc_messages):
+            if kind == "idle":
+                yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+            elif kind == "reasoning":
+                # Keep the stream alive during the model's thinking phase.
+                yield f"data: {json.dumps({'type': 'eval_progress', 'message': '正在分析评估中...（思考中）'}, ensure_ascii=False)}\n\n"
+            elif kind == "token":
+                accumulated += delta
+                chars_since_heartbeat += len(delta)
                 if chars_since_heartbeat >= 200:
                     chars_since_heartbeat = 0
                     yield f"data: {json.dumps({'type': 'eval_progress', 'message': f'正在分析评估中... ({len(accumulated)} 字)'}, ensure_ascii=False)}\n\n"

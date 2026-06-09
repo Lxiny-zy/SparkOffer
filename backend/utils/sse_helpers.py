@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 from typing import Any, Callable
 
@@ -12,6 +13,10 @@ logger = logging.getLogger("uvicorn")
 
 IDLE_HEARTBEAT_SECONDS = 30
 PROGRESS_CHAR_INTERVAL = 200
+# A reasoning model can stream thinking deltas for minutes with empty visible
+# content. We forward batched reasoning at least this often so the SSE stream
+# never goes byte-silent (which a proxy/httpx read-timeout would otherwise kill).
+REASONING_KEEPALIVE_SECONDS = 3.0
 
 
 def sse_event(data: dict) -> str:
@@ -24,6 +29,114 @@ def streaming_response(generator: AsyncGenerator[str, None]) -> StreamingRespons
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def chunk_text(chunk) -> str:
+    """Extract visible answer text from a streamed LangChain chunk, robust to provider quirks.
+
+    ``chunk.content`` is not always a plain string: OpenAI-compatible / reasoning gateways
+    stream it as a list of content blocks (``[{"type": "text", "text": ...}]`` or bare
+    strings), or as an empty list while the real answer is carried elsewhere. A bare
+    ``accumulated += chunk.content`` then raises ``TypeError`` on a list, or silently
+    appends nothing on an empty list → blank reply. Reasoning-only deltas (thinking carried
+    in ``additional_kwargs``) yield "" here by design — see ``chunk_reasoning``. Never raises.
+    """
+    content = getattr(chunk, "content", None)
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                t = block.get("text") or block.get("content") or ""
+                if isinstance(t, str):
+                    parts.append(t)
+        return "".join(parts)
+    return ""
+
+
+def chunk_reasoning(chunk) -> str:
+    """Extract the *thinking* (reasoning) delta from a streamed chunk, if the model emits one.
+
+    Reasoning models (gpt-5.x / o-series / DeepSeek-R1) served through an OpenAI-compatible
+    gateway stream their thinking in a side channel LangChain drops into ``additional_kwargs``
+    (never ``content``) — usually ``reasoning_content`` (DeepSeek-style) or ``reasoning``.
+    Forwarding it keeps the SSE stream alive during long thinking and lets the UI show
+    progress. Never raises.
+    """
+    kw = getattr(chunk, "additional_kwargs", None)
+    if not isinstance(kw, dict):
+        return ""
+    for key in ("reasoning_content", "reasoning"):
+        val = kw.get(key)
+        if isinstance(val, str):
+            if val:
+                return val
+        elif isinstance(val, dict):
+            t = val.get("text") or val.get("content")
+            if isinstance(t, str) and t:
+                return t
+    return ""
+
+
+async def iter_llm_stream(
+    llm, lc_messages, *,
+    idle_timeout: float = IDLE_HEARTBEAT_SECONDS,
+    keepalive_interval: float = REASONING_KEEPALIVE_SECONDS,
+):
+    """Reasoning-aware, heartbeat-safe LLM stream → typed delta tuples.
+
+    Yields ``(kind, text)`` where kind is:
+      - ``"token"``     visible answer delta (via ``chunk_text``)
+      - ``"reasoning"`` thinking delta (via ``chunk_reasoning``), time-batched so a long
+                        reasoning phase still emits bytes ~every ``keepalive_interval`` s
+      - ``"idle"``      no chunk for ``idle_timeout`` s — caller should emit a ping
+
+    This is the single hardened streaming loop every SSE endpoint should use instead of a
+    bare ``async for chunk in llm.astream(...)``: the bare form goes byte-silent during a
+    reasoning model's thinking phase (chunks arrive steadily but carry empty ``content``,
+    so neither a token nor the idle ping fires) until httpx/nginx times out → blank reply.
+
+    Pass ``keepalive_interval=0`` to forward every reasoning delta unbatched (smooth live
+    thinking, e.g. interactive chat). Mid-stream errors propagate to the caller, matching
+    ``ResilientChatModel`` (no failover once streaming has begun); the caller decides how to
+    surface whatever streamed before the drop.
+    """
+    aiter = llm.astream(lc_messages).__aiter__()
+    rbuf = ""
+    last_emit = time.monotonic()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=idle_timeout)
+        except asyncio.TimeoutError:
+            if rbuf:
+                yield ("reasoning", rbuf)
+                rbuf = ""
+            last_emit = time.monotonic()
+            yield ("idle", "")
+            continue
+        except StopAsyncIteration:
+            break
+        r = chunk_reasoning(chunk)
+        if r:
+            rbuf += r
+            if time.monotonic() - last_emit >= keepalive_interval:
+                yield ("reasoning", rbuf)
+                rbuf = ""
+                last_emit = time.monotonic()
+        t = chunk_text(chunk)
+        if t:
+            if rbuf:
+                yield ("reasoning", rbuf)
+                rbuf = ""
+            yield ("token", t)
+            last_emit = time.monotonic()
+    if rbuf:
+        yield ("reasoning", rbuf)
 
 
 async def stream_llm_sse(
@@ -64,31 +177,27 @@ async def stream_llm_sse(
 
     try:
         llm = get_langchain_llm()
-        aiter = llm.astream(lc_messages).__aiter__()
-        while True:
-            try:
-                chunk = await asyncio.wait_for(
-                    aiter.__anext__(), timeout=IDLE_HEARTBEAT_SECONDS,
-                )
-                token = chunk.content if hasattr(chunk, "content") else ""
-                if token:
-                    accumulated += token
-                    if stream_content:
-                        yield ("sse", sse_event({"type": "content", "delta": token}))
-                    chars_since_heartbeat += len(token)
-                    if chars_since_heartbeat >= PROGRESS_CHAR_INTERVAL:
-                        yield (
-                            "sse",
-                            sse_event({
-                                "type": "progress",
-                                "message": f"{progress_prefix}... ({len(accumulated)} 字)",
-                            }),
-                        )
-                        chars_since_heartbeat = 0
-            except asyncio.TimeoutError:
+        async for kind, delta in iter_llm_stream(llm, lc_messages):
+            if kind == "idle":
                 yield ("sse", sse_event({"type": "ping"}))
-            except StopAsyncIteration:
-                break
+            elif kind == "reasoning":
+                # Thinking phase — keep the stream hot and the progress bar alive without
+                # dumping raw reasoning into these (non-chat) endpoints.
+                yield ("sse", sse_event({"type": "progress", "message": f"{progress_prefix}...（思考中）"}))
+            elif kind == "token":
+                accumulated += delta
+                if stream_content:
+                    yield ("sse", sse_event({"type": "content", "delta": delta}))
+                chars_since_heartbeat += len(delta)
+                if chars_since_heartbeat >= PROGRESS_CHAR_INTERVAL:
+                    yield (
+                        "sse",
+                        sse_event({
+                            "type": "progress",
+                            "message": f"{progress_prefix}... ({len(accumulated)} 字)",
+                        }),
+                    )
+                    chars_since_heartbeat = 0
     except Exception as e:
         logger.error("stream_llm_sse failed: %s", e)
         yield ("sse", sse_event({"type": "error", "message": "AI 服务暂时不可用，请稍后重试"}))

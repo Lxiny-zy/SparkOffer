@@ -46,6 +46,7 @@ from backend.prompts._common import JSON_OUTPUT_DISCIPLINE
 logger = logging.getLogger("uvicorn")
 
 _LLM_CONCURRENCY = 4          # 限制并发 ainvoke，避免打爆 channel
+_EMBED_CONCURRENCY = 2        # 限制并发检索（含 embedding 调用），避免打爆 embedding key
 _RELEVANCY_QUESTIONS = 3      # answer_relevancy 反向生成的问题数
 _GOLD_MATCH_COSINE = 0.90     # gold↔检索 chunk 的内容兜底匹配阈值
 _TRIVIAL_HIT_COSINE = 0.97    # 命中 chunk 与 gold 源文几乎相同 → 送分自命中
@@ -459,13 +460,17 @@ async def _answer_correctness(answer: str, reference: str, sem: asyncio.Semaphor
 
 
 async def evaluate_question(
-    gold: GoldItem, topic: str, user_id: str, k: int, judge_mode: str, sem: asyncio.Semaphore,
+    gold: GoldItem, topic: str, user_id: str, k: int, judge_mode: str,
+    sem: asyncio.Semaphore, embed_sem: asyncio.Semaphore,
 ) -> QuestionResult:
     # Retrieve a few extra so leave-one-out still has k candidates after dropping
     # the gold's own source chunk. Standard metrics use the top-k slice.
-    retrieved_ext = await safe_retrieve_topic_context_with_scores(
-        topic, gold.question, user_id, top_k=k + _LOO_MARGIN
-    )
+    # 检索内部含 embedding 调用：用独立的 embed_sem 限流，避免 N 题同时打 embedding
+    # key 触发上游限流。只包检索这一步，下游 LLM 指标仍走各自的 sem，不串行化整题。
+    async with embed_sem:
+        retrieved_ext = await safe_retrieve_topic_context_with_scores(
+            topic, gold.question, user_id, top_k=k + _LOO_MARGIN
+        )
     retrieved = retrieved_ext[:k]
     rank, match_method, trivial_hit = await _match_gold(gold, retrieved)
     hit = 1 if rank is not None else 0
@@ -541,6 +546,7 @@ async def run_eval(job: dict, topic: str, user_id: str, n: int, k: int, judge_mo
     from backend.storage.rag_eval_store import save_rag_eval_run
 
     sem = asyncio.Semaphore(_LLM_CONCURRENCY)
+    embed_sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
     try:
         job["status"] = "running"
         job["phase"] = "synthesizing"
@@ -561,7 +567,7 @@ async def run_eval(job: dict, topic: str, user_id: str, n: int, k: int, judge_mo
 
         async def _eval_one(g: GoldItem) -> QuestionResult | None:
             try:
-                res = await evaluate_question(g, topic, user_id, k, judge_mode, sem)
+                res = await evaluate_question(g, topic, user_id, k, judge_mode, sem, embed_sem)
             except Exception as e:
                 logger.warning("rag_eval question failed: %s", e)
                 res = None
@@ -569,8 +575,13 @@ async def run_eval(job: dict, topic: str, user_id: str, n: int, k: int, judge_mo
             job["updated_at"] = time.time()
             return res
 
-        results = await asyncio.gather(*[_eval_one(g) for g in gold])
-        ok = [r for r in results if r is not None]
+        # return_exceptions=True：单题被取消/抛出（如逃出内层 try 的 CancelledError）
+        # 不应炸掉整批。聚合前过滤掉 Exception 实例（参考 graphs/rag_retrieval.py:94-97）。
+        results = await asyncio.gather(
+            *[_eval_one(g) for g in gold],
+            return_exceptions=True,
+        )
+        ok = [r for r in results if isinstance(r, QuestionResult)]
         error_count = len(results) - len(ok)
 
         job["phase"] = "aggregating"

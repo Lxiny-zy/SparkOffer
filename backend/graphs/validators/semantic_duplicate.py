@@ -47,7 +47,13 @@ class SemanticDuplicateValidator:
                     return None
 
             recent_embs = [e for e in (_embed(q) for q in ctx.recent_questions[-20:] if q) if e is not None]
-            recent_matrix = np.stack(recent_embs) if recent_embs else None
+
+            def _dim_safe_matrix(rows, ref):
+                """混维度守卫：换过 embedding 模型后缓存里可能残留旧维度向量，
+                直接 np.stack 后与 ref 做 cosine 会 ValueError 打断出题。这里只保留
+                与 ref 同维度的行；过滤后为空返回 None（视为无可比项，安全跳过）。"""
+                same = [r for r in rows if r.shape == ref.shape]
+                return np.stack(same) if same else None
 
             bad_ids: list[int] = []
             reasons: dict[int, str] = {}
@@ -62,6 +68,7 @@ class SemanticDuplicateValidator:
                     # filter it out and fall over when *every* embed failed.
                     continue
                 # Check against recent history.
+                recent_matrix = _dim_safe_matrix(recent_embs, emb)
                 if recent_matrix is not None:
                     sims = _cosine_similarity(emb, recent_matrix)
                     if float(sims.max()) >= DUP_THRESHOLD:
@@ -72,8 +79,9 @@ class SemanticDuplicateValidator:
                         # we already threw away, corrupting the dedup decision.
                         continue
                 # Check against earlier questions in the same batch.
-                if kept_embs:
-                    sims = _cosine_similarity(emb, np.stack(kept_embs))
+                batch_matrix = _dim_safe_matrix(kept_embs, emb)
+                if batch_matrix is not None:
+                    sims = _cosine_similarity(emb, batch_matrix)
                     if float(sims.max()) >= DUP_THRESHOLD:
                         bad_ids.append(q.get("id"))
                         reasons[q.get("id")] = "本题与同批早一题重复。请改成考察不同角度。"

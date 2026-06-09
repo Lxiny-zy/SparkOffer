@@ -47,7 +47,7 @@ from backend.prompts.strategies import allocate_slots, render_strategy_block, di
 from backend.redis_cache import get_cache
 from backend.spaced_repetition import get_due_reviews, init_sr_for_existing_points
 from backend.storage.sessions import create_session
-from backend.utils.sse_helpers import sse_event
+from backend.utils.sse_helpers import sse_event, iter_llm_stream
 from backend.utils.stream_parser import extract_complete_objects
 
 logger = logging.getLogger("uvicorn")
@@ -439,12 +439,16 @@ class DrillPipeline:
         # continue from len(seed_questions)+1.
         seed_offset = len(seed_questions)
 
-        async for chunk in llm.astream([
+        async for kind, delta in iter_llm_stream(llm, [
             SystemMessage(content="你是专项训练出题引擎。只返回 JSON 数组，不要其他内容。"),
             HumanMessage(content=prompt),
         ]):
-            token = chunk.content if hasattr(chunk, "content") else str(chunk)
-            accumulated += token
+            if kind in ("idle", "reasoning"):
+                # Keep the SSE stream alive during the model's thinking phase — no question
+                # objects emit then, so a bare loop would sit byte-silent → proxy timeout.
+                yield sse_event({"type": "ping"})
+                continue
+            accumulated += delta  # kind == "token"
 
             objects, _ = extract_complete_objects(accumulated)
             while emitted_count < len(objects) and emitted_count < n_from_llm:
@@ -509,12 +513,14 @@ class DrillPipeline:
         llm = get_langchain_llm()
         accumulated = ""
         emitted_count = 0
-        async for chunk in llm.astream([
+        async for kind, delta in iter_llm_stream(llm, [
             _Sys(content="你是初次诊断的出题引擎，只返回 JSON 数组。"),
             _Hum(content=prompt),
         ]):
-            token = chunk.content if hasattr(chunk, "content") else str(chunk)
-            accumulated += token
+            if kind in ("idle", "reasoning"):
+                yield sse_event({"type": "ping"})
+                continue
+            accumulated += delta  # kind == "token"
             objects, _ = extract_complete_objects(accumulated)
             while emitted_count < len(objects):
                 q = objects[emitted_count]

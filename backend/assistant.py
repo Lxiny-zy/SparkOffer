@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import AsyncGenerator
 
 from backend.config import settings
@@ -15,6 +16,7 @@ from backend.storage.assistant_chats import save_message
 from backend.spaced_repetition import get_due_reviews
 from backend.vector_memory import search_memory
 from backend.indexer import load_topics, retrieve_topic_context
+from backend.utils.sse_helpers import chunk_text, chunk_reasoning
 
 logger = logging.getLogger("uvicorn")
 
@@ -767,6 +769,7 @@ async def stream_assistant_chat(
 
         try:
             aiter = llm_with_tools.astream(lc_messages).__aiter__()
+            last_beat = time.monotonic()
             while True:
                 try:
                     chunk = await asyncio.wait_for(aiter.__anext__(), timeout=IDLE_HEARTBEAT_SECONDS)
@@ -775,11 +778,20 @@ async def stream_assistant_chat(
                     if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
                         has_tool_chunks = True
 
-                    token = chunk.content if hasattr(chunk, "content") else ""
+                    # Forward thinking as a (throttled) keep-alive: a reasoning model streams
+                    # chunks with empty content during its thinking phase, so neither a token
+                    # nor the idle ping fires — the stream would go byte-silent until timeout.
+                    if chunk_reasoning(chunk) and time.monotonic() - last_beat >= 2.0:
+                        last_beat = time.monotonic()
+                        yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+
+                    token = chunk_text(chunk)
                     if token and not has_tool_chunks:
                         streamed_content += token
+                        last_beat = time.monotonic()
                         yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
                 except asyncio.TimeoutError:
+                    last_beat = time.monotonic()
                     yield f"data: {json.dumps({'type': 'ping'})}\n\n"
                 except StopAsyncIteration:
                     break
@@ -824,10 +836,18 @@ async def stream_assistant_chat(
         # 原顺序消费，保证 action 事件顺序确定、tool 消息与 tool_call_id 对齐。
         # return_exceptions=True：单个工具抛错（如 LLM 给的参数缺字段）不应整轮
         # 中断 SSE 流，转成错误结果后继续，前端仍能收到 done。
-        raw_results = await asyncio.gather(
+        # 工具执行期间不产生任何 SSE（单个知识库查询最长 60s，多轮叠加更久），用
+        # 周期 ping 驱动，避免空闲连接被代理超时掐断。
+        tool_task = asyncio.ensure_future(asyncio.gather(
             *(_execute_tool(tc["name"], tc["args"], user_id) for tc in tool_calls),
             return_exceptions=True,
-        )
+        ))
+        while True:
+            done, _ = await asyncio.wait({tool_task}, timeout=15)
+            if done:
+                break
+            yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+        raw_results = tool_task.result()
         results = []
         for tc, r in zip(tool_calls, raw_results):
             if isinstance(r, Exception):

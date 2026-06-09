@@ -8,6 +8,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from backend.llm_provider import get_langchain_llm
 from backend.prompts.reviewer import REVIEW_SYSTEM
 from backend.models import InterviewMode
+from backend.utils.sse_helpers import iter_llm_stream
 
 _logger = logging.getLogger("uvicorn")
 
@@ -108,18 +109,27 @@ async def stream_generate_review(
 
     review_text = ""
     chars_since_heartbeat = 0
+    stream_error = False
     try:
-        async for chunk in llm.astream(lc_messages):
-            token = chunk.content if hasattr(chunk, "content") else ""
-            if token:
-                review_text += token
-                chars_since_heartbeat += len(token)
+        async for kind, delta in iter_llm_stream(llm, lc_messages):
+            if kind == "idle":
+                yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+            elif kind == "reasoning":
+                # Thinking phase — keep the SSE stream alive (a reasoning model would
+                # otherwise sit byte-silent here until the proxy times out the connection).
+                yield f"data: {json.dumps({'type': 'eval_progress', 'message': '正在生成复盘报告...（思考中）'}, ensure_ascii=False)}\n\n"
+            elif kind == "token":
+                review_text += delta
+                chars_since_heartbeat += len(delta)
                 if chars_since_heartbeat >= 200:
                     chars_since_heartbeat = 0
                     yield f"data: {json.dumps({'type': 'eval_progress', 'message': '正在生成复盘报告...'}, ensure_ascii=False)}\n\n"
     except Exception as e:
         _logger.error("Review streaming failed: %s", e)
+        stream_error = True
         if not review_text:
             review_text = "复盘报告生成失败，请重试。"
 
-    yield f"data: {json.dumps({'type': 'review_result', 'data': review_text}, ensure_ascii=False)}\n\n"
+    # Mid-stream drop with partial text → flag it so the front end can mark it incomplete.
+    partial = stream_error and bool(review_text) and review_text != "复盘报告生成失败，请重试。"
+    yield f"data: {json.dumps({'type': 'review_result', 'data': review_text, 'partial': partial}, ensure_ascii=False)}\n\n"

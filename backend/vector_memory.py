@@ -40,6 +40,19 @@ _MAX_EMBED_RETRIES = 2  # Retry count for transient failures
 _RETRY_BACKOFF_BASE = 1.5  # Exponential backoff base (seconds)
 
 
+def _zero_vec() -> np.ndarray:
+    """embedding 失败/熔断时的零向量兜底，维度跟随当前 embedding 模型。
+
+    历史上这里硬编码 1536；换成 1024 维模型（如 bge-m3）后会写入/返回错误维度，
+    污染检索并触发下游混维度 cosine。改为从 indexer 探测当前维度；探测本身失败时
+    再退回 1536，至少不抛异常。"""
+    try:
+        from backend.indexer import _current_embed_dim
+        return np.zeros(_current_embed_dim(), dtype=np.float32)
+    except Exception:
+        return np.zeros(1536, dtype=np.float32)
+
+
 async def _embed(text: str) -> np.ndarray:
     """Async embed text with timeout, retry, and circuit breaker protection.
 
@@ -52,7 +65,7 @@ async def _embed(text: str) -> np.ndarray:
     cb = get_circuit_breaker()
     if not cb.can_execute():
         logger.debug("Embedding circuit breaker OPEN, returning zero vector")
-        return np.zeros(1536, dtype=np.float32)
+        return _zero_vec()
 
     for attempt in range(_MAX_EMBED_RETRIES + 1):
         try:
@@ -85,7 +98,7 @@ async def _embed(text: str) -> np.ndarray:
             else:
                 logger.error(f"Embedding permanently failed: {e}")
 
-    return np.zeros(1536, dtype=np.float32)
+    return _zero_vec()
 
 
 def _embed_sync(text: str) -> list[float]:
@@ -108,7 +121,7 @@ async def _embed_batch(texts: list[str]) -> list[np.ndarray]:
     cb = get_circuit_breaker()
     if not cb.can_execute():
         logger.debug(f"Embedding circuit breaker OPEN, returning {len(texts)} zero vectors")
-        return [np.zeros(1536, dtype=np.float32) for _ in texts]
+        return [_zero_vec() for _ in texts]
 
     # Split large batches into chunks of 10 to limit blast radius
     CHUNK_SIZE = 10
@@ -157,7 +170,7 @@ async def _embed_batch_chunk(texts: list[str], cb) -> list[np.ndarray]:
             else:
                 logger.error(f"Batch embedding permanently failed ({len(texts)} texts): {e}")
 
-    return [np.zeros(1536, dtype=np.float32) for _ in texts]
+    return [_zero_vec() for _ in texts]
 
 
 def _embed_batch_sync(texts: list[str]) -> list[list[float]]:
@@ -272,13 +285,19 @@ async def index_session_memory(
     vectors = await _embed_batch(texts)
 
     now = datetime.now().isoformat()
+    # embedding 失败/熔断时 _embed_batch 会返回全零兜底向量；这些零向量不能当正常
+    # record 入库，否则脏行会污染后续检索（且可能是错误维度）。写库前过滤掉全零项。
     records = [
         MemoryRecord(
             content=content, chunk_type=chunk_type, topic=t,
             session_id=sid, embedding=vec, created_at=now, metadata=meta,
         )
         for (chunk_type, content, t, sid, meta), vec in zip(chunks, vectors)
+        if np.any(vec)
     ]
+    if not records:
+        logger.warning("index_session_memory: 所有向量均为兜底零向量，跳过写库。")
+        return
 
     # Backend write + cleanup are sync — wrap in to_thread so the event loop
     # isn't blocked (the old inline conn.execute path did block).

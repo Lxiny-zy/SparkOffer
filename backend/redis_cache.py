@@ -224,9 +224,23 @@ class RedisCache:
     # ── key helpers ──
 
     @staticmethod
-    def _embed_key(text: str) -> str:
+    def _model_tag() -> str:
+        """当前 embedding 配置的标识，拼进缓存 key。
+
+        换 embedding 模型（维度可能变化）后，配置版本号 +1，历史文本天然 miss
+        并按新模型重算，绝不返回旧维度向量给下游 cosine。优先用配置版本号；
+        取不到时退化为固定串（仅丢失跨模型隔离，不影响正确性）。
+        """
+        try:
+            from backend.ai_config import get_config_version
+            return f"v{get_config_version()}"
+        except Exception:
+            return "v0"
+
+    @classmethod
+    def _embed_key(cls, text: str) -> str:
         digest = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
-        return f"embed:{digest}"
+        return f"embed:{cls._model_tag()}:{digest}"
 
     def health(self) -> dict:
         return {
