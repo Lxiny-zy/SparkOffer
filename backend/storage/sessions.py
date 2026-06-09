@@ -28,7 +28,7 @@ def append_message(session_id: str, role: str, content: str, *, user_id: str):
     now = datetime.now().isoformat()
     msg_json = json.dumps({"role": role, "content": content, "time": now}, ensure_ascii=False)
     conn.execute(
-        "UPDATE sessions SET transcript = json_insert(transcript, '$[#]', json(?)), "
+        "UPDATE sessions SET transcript = json_insert(COALESCE(transcript, '[]'), '$[#]', json(?)), "
         "updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ?",
         (msg_json, session_id, user_id),
     )

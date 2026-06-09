@@ -1,4 +1,5 @@
 """模式2: 专项强化训练 — 批量出题 + 批量评估（不再使用 LangGraph）."""
+import asyncio
 import concurrent.futures
 import json
 import logging
@@ -8,7 +9,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
-from backend.indexer import retrieve_topic_context, load_topics
+from backend.indexer import retrieve_topic_context, gather_topic_contexts, safe_retrieve_topic_context, load_topics
 from backend.memory import get_profile_summary, get_profile_summary_for_drill, get_topic_context_for_drill
 from backend.prompts.interviewer import DRILL_QUESTION_GEN_PROMPT, DRILL_BATCH_EVAL_PROMPT
 
@@ -202,14 +203,17 @@ def evaluate_drill_answers(topic: str, questions: list[dict], answers: list[dict
     # Only evaluate answered questions
     answered_questions = [q for q in questions if answer_map.get(q["id"])]
 
+    # Retrieve references for all answered questions concurrently (was: serial,
+    # a fresh max_workers=1 pool per question).
+    per_q_refs = gather_topic_contexts(
+        [(topic, q["question"]) for q in answered_questions], user_id, top_k=2,
+    )
     qa_lines = []
     ref_lines = []
-    for q in answered_questions:
+    for q, refs in zip(answered_questions, per_q_refs):
         qid = q["id"]
         answer = answer_map[qid]
         qa_lines.append(f"### Q{qid} (难度 {q.get('difficulty', '?')}/5)\n**题目**: {q['question']}\n**回答**: {answer}")
-
-        refs = _safe_retrieve(topic, q["question"], user_id, top_k=2)
         if refs:
             ref_lines.append(f"### Q{qid} 参考\n" + "\n".join(refs)[:800])
 
@@ -254,13 +258,19 @@ async def stream_evaluate_drill_answers(
 
     yield f"data: {json.dumps({'type': 'eval_start', 'total': len(answered_questions)}, ensure_ascii=False)}\n\n"
 
+    # Retrieve references for all answered questions concurrently on the loop
+    # (was: serial _safe_retrieve, each spinning up its own thread pool).
+    per_q_refs = await asyncio.gather(*[
+        safe_retrieve_topic_context(topic, q["question"], user_id, top_k=2)
+        for q in answered_questions
+    ]) if answered_questions else []
+
     qa_lines = []
     ref_lines = []
-    for q in answered_questions:
+    for q, refs in zip(answered_questions, per_q_refs):
         qid = q["id"]
         answer = answer_map[qid]
         qa_lines.append(f"### Q{qid} (难度 {q.get('difficulty', '?')}/5)\n**题目**: {q['question']}\n**回答**: {answer}")
-        refs = _safe_retrieve(topic, q["question"], user_id, top_k=2)
         if refs:
             ref_lines.append(f"### Q{qid} 参考\n" + "\n".join(refs)[:800])
 

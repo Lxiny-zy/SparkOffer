@@ -1,5 +1,5 @@
-import { API_BASE, authFetch } from "./client";
-import { fetchSSE, type SSECallbacks } from "./sse";
+import { API_BASE, authFetch, iterSSEFrames } from "./client";
+import { fetchSSE, withSSETimeout, type SSECallbacks } from "./sse";
 import type {
   Question,
   InterviewStartResponse,
@@ -79,6 +79,13 @@ interface StreamCallbacks {
   onStage?: (event: PipelineStageEvent) => void;
 }
 
+export interface RAGRetrievalMetrics {
+  relevance: number;
+  coverage: number;
+  diversity: number;
+  chunk_details: { score: number; source: string }[];
+}
+
 export interface PipelineStageEvent {
   stage: string;
   label?: string;
@@ -86,42 +93,27 @@ export interface PipelineStageEvent {
   ts: number;
   duration_ms?: number;
   detail?: string;
+  rag_metrics?: RAGRetrievalMetrics;
 }
 
 export async function startInterviewStream(mode: string, topic: string | null, { onQuestion, onQuestionUpdate, onDone, onError, onStage }: StreamCallbacks): Promise<void> {
-  const res = await authFetch(`${API_BASE}/interview/start-stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode, topic }),
-  });
-  if (!res.ok) throw new Error(await res.text());
+  await withSSETimeout(async (signal) => {
+    const res = await authFetch(`${API_BASE}/interview/start-stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, topic }),
+      signal,
+    });
+    if (!res.ok) throw new Error(await res.text());
 
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const lines = buffer.split("\n");
-    buffer = lines.pop()!;
-
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      try {
-        const event = JSON.parse(line.slice(6));
-        if (event.type === "question" && onQuestion) onQuestion(event.data);
-        else if (event.type === "question_update" && onQuestionUpdate) onQuestionUpdate(event.data);
-        else if (event.type === "done" && onDone) onDone(event);
-        else if (event.type === "error" && onError) onError(event.message);
-        else if (event.type === "pipeline_stage" && onStage) onStage(event as PipelineStageEvent);
-      } catch (e) {
-        // ignore parse errors in SSE stream
-      }
+    for await (const event of iterSSEFrames(res)) {
+      if (event.type === "question" && onQuestion) onQuestion(event.data);
+      else if (event.type === "question_update" && onQuestionUpdate) onQuestionUpdate(event.data);
+      else if (event.type === "done" && onDone) onDone(event);
+      else if (event.type === "error" && onError) onError(event.message);
+      else if (event.type === "pipeline_stage" && onStage) onStage(event as PipelineStageEvent);
     }
-  }
+  });
 }
 
 export async function previewJobPrep(payload: any, callbacks?: SSECallbacks): Promise<any> {
@@ -148,8 +140,16 @@ export async function sendMessage(sessionId: string, message: string, callbacks?
   }, callbacks);
 }
 
+export interface RAGEvalMetrics {
+  faithfulness: number;
+  answer_relevance: number;
+  answer_correctness: number;
+  per_question: { question_id: number; faithfulness: number; answer_relevance: number }[];
+}
+
 interface EndInterviewCallbacks {
   onProgress?: (message: string) => void;
+  onRAGMetrics?: (data: RAGEvalMetrics) => void;
 }
 
 export async function endInterview(
@@ -162,42 +162,33 @@ export async function endInterview(
     options.headers = { "Content-Type": "application/json" };
     options.body = JSON.stringify({ answers });
   }
-  const res = await authFetch(`${API_BASE}/interview/end/${sessionId}`, options);
-  if (!res.ok) throw new Error(await res.text());
+  return withSSETimeout<EndInterviewResponse>(async (signal) => {
+    const res = await authFetch(`${API_BASE}/interview/end/${sessionId}`, {
+      ...options,
+      signal,
+    });
+    if (!res.ok) throw new Error(await res.text());
 
-  const contentType = res.headers.get("content-type") || "";
-  if (!contentType.includes("text/event-stream")) {
-    return res.json();
-  }
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("text/event-stream")) {
+      return res.json();
+    }
 
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let result: EndInterviewResponse | null = null;
+    let result: EndInterviewResponse | null = null;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      try {
-        const event = JSON.parse(line.slice(6));
-        if (event.type === "eval_progress" && callbacks?.onProgress) {
-          callbacks.onProgress(event.message);
-        } else if (event.type === "complete") {
-          result = event.data;
-        }
-      } catch {
-        // skip malformed SSE
+    for await (const event of iterSSEFrames(res)) {
+      if (event.type === "eval_progress" && callbacks?.onProgress) {
+        callbacks.onProgress(event.message);
+      } else if (event.type === "rag_eval_metrics" && callbacks?.onRAGMetrics) {
+        callbacks.onRAGMetrics(event.data);
+      } else if (event.type === "complete") {
+        result = event.data;
       }
     }
-  }
 
-  if (!result) throw new Error("评估流结束但未收到结果");
-  return result;
+    if (!result) throw new Error("评估流结束但未收到结果");
+    return result;
+  });
 }
 
 export async function getReview(sessionId: string): Promise<any> {
@@ -624,4 +615,52 @@ export async function exportAlgorithmCards(format: string, ids: string[] | null 
   });
   if (!res.ok) throw new Error(await res.text());
   return res;
+}
+
+// ── RAG Metrics ──
+
+export interface RAGMetricsRecord {
+  id: number;
+  session_id: string;
+  topic: string;
+  stage: string;
+  // question_gen stage (retrieval health gauges)
+  relevance: number | null;
+  coverage: number | null;
+  diversity: number | null;
+  // legacy columns kept for historical rows (older question_gen records):
+  // `discrimination` was superseded by `coverage`; context_* predate both.
+  discrimination: number | null;
+  context_relevance: number | null;
+  context_precision: number | null;
+  context_recall: number | null;
+  // answer_eval stage (generation-side, LLM-judged)
+  faithfulness: number | null;
+  answer_relevance: number | null;
+  answer_correctness: number | null;
+  chunk_count: number | null;
+  detail: Record<string, any>;
+  created_at: string;
+}
+
+export async function getRAGMetrics(params: {
+  topic?: string;
+  stage?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<RAGMetricsRecord[]> {
+  const qs = new URLSearchParams();
+  if (params.topic) qs.set("topic", params.topic);
+  if (params.stage) qs.set("stage", params.stage);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const res = await authFetch(`${API_BASE}/interview/rag-metrics?${qs}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getSessionRAGMetrics(sessionId: string): Promise<RAGMetricsRecord[]> {
+  const res = await authFetch(`${API_BASE}/interview/rag-metrics/${sessionId}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }

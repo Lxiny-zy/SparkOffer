@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   Bot, Database, Mic, Cloud, Eye, EyeOff, Loader2,
-  CheckCircle2, XCircle, Save, RotateCcw, User, Lock, Activity,
+  CheckCircle2, XCircle, Save, RotateCcw, User, Lock, Activity, ListOrdered,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -21,7 +21,7 @@ import ChannelManager from "@/components/ChannelManager";
 // 网关健康仪表盘 ── L1 hero
 // ─────────────────────────────────────────────────────────────
 interface SectionHealth { healthy: number; total: number; }
-interface HealthSummary { llm: SectionHealth; embedding: SectionHealth; asr: SectionHealth; }
+interface HealthSummary { llm: SectionHealth; embedding: SectionHealth; asr: SectionHealth; reranker: SectionHealth; }
 
 function HealthRing({ healthy, total, label, color, icon }: {
   healthy: number; total: number; label: string; color: string; icon: React.ReactNode;
@@ -44,7 +44,6 @@ function HealthRing({ healthy, total, label, color, icon }: {
               strokeDashoffset={offset}
               strokeLinecap="round"
               className="transition-all duration-1000 ease-out"
-              style={{ filter: `drop-shadow(0 0 6px ${color}66)` }}
             />
           )}
         </svg>
@@ -54,9 +53,9 @@ function HealthRing({ healthy, total, label, color, icon }: {
         </div>
       </div>
       <div className="min-w-0">
-        <div className="text-[11px] font-mono uppercase tracking-[0.18em] text-dim mb-0.5">{label}</div>
+        <div className="sig-kicker mb-0.5">{label}</div>
         <div className="flex items-baseline gap-1">
-          <span className="text-2xl font-bold score-pop" style={{ color: empty ? "var(--muted-fg)" : color }}>
+          <span className="text-2xl sig-stat" style={{ color: empty ? "var(--muted-fg)" : color }}>
             {empty ? "—" : healthy}
           </span>
           {!empty && <span className="text-sm text-dim">/ {total}</span>}
@@ -68,29 +67,26 @@ function HealthRing({ healthy, total, label, color, icon }: {
 }
 
 function HealthDashboard({ summary }: { summary: HealthSummary | null }) {
-  const s = summary || { llm: {healthy:0,total:0}, embedding: {healthy:0,total:0}, asr: {healthy:0,total:0} };
-  const allHealthy = s.llm.healthy === s.llm.total && s.embedding.healthy === s.embedding.total && s.asr.healthy === s.asr.total;
-  const anyConfigured = s.llm.total + s.embedding.total + s.asr.total > 0;
+  const s = summary || { llm: {healthy:0,total:0}, embedding: {healthy:0,total:0}, asr: {healthy:0,total:0}, reranker: {healthy:0,total:0} };
+  const allHealthy = s.llm.healthy === s.llm.total && s.embedding.healthy === s.embedding.total && s.asr.healthy === s.asr.total && s.reranker.healthy === s.reranker.total;
+  const anyConfigured = s.llm.total + s.embedding.total + s.asr.total + s.reranker.total > 0;
   return (
-    <Card className="mb-6 stat-card-gradient relative overflow-hidden card-hover-lift animate-fade-in-up">
-      <div
-        className="absolute -top-16 -right-16 w-[260px] h-[260px] rounded-full pointer-events-none opacity-30 morph-blob"
-        style={{ background: `radial-gradient(circle, ${allHealthy && anyConfigured ? "var(--glow-accent)" : "rgba(253,203,110,0.4)"}, transparent 70%)` }}
-      />
+    <Card hoverLift className="mb-6 relative overflow-hidden animate-fade-in-up">
       <CardContent className="p-5 md:p-6 relative">
         <div className="flex items-center gap-2 mb-4">
           <Activity size={16} className="text-primary" />
-          <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-primary/70">Gateway Health</span>
+          <span className="sig-kicker">Gateway Health</span>
           {anyConfigured && (
-            <span className={`ml-auto text-[11px] font-medium px-2 py-0.5 rounded-full ${allHealthy ? "bg-green/15 text-green status-dot-bg" : "bg-orange/15 text-orange"}`}>
+            <span className="ml-auto text-[11px] font-medium px-2 py-0.5 rounded" style={allHealthy ? { background: "color-mix(in srgb, var(--sig-success) 15%, transparent)", color: "var(--sig-success)" } : { background: "color-mix(in srgb, var(--sig-warning) 15%, transparent)", color: "var(--sig-warning)" }}>
               {allHealthy ? "● 全部健康" : "● 部分异常"}
             </span>
           )}
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-5 md:gap-4">
-          <HealthRing healthy={s.llm.healthy} total={s.llm.total} label="LLM"       color="var(--aurora-1)" icon={<Bot size={20} />} />
-          <HealthRing healthy={s.embedding.healthy} total={s.embedding.total} label="Embedding" color="var(--tertiary)"  icon={<Database size={20} />} />
-          <HealthRing healthy={s.asr.healthy} total={s.asr.total} label="ASR"       color="var(--teal)"    icon={<Mic size={20} />} />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 md:gap-4">
+          <HealthRing healthy={s.llm.healthy} total={s.llm.total} label="LLM"       color="var(--sig-chart-1)" icon={<Bot size={20} />} />
+          <HealthRing healthy={s.embedding.healthy} total={s.embedding.total} label="Embedding" color="var(--sig-chart-2)"  icon={<Database size={20} />} />
+          <HealthRing healthy={s.asr.healthy} total={s.asr.total} label="ASR"       color="var(--sig-chart-3)"    icon={<Mic size={20} />} />
+          <HealthRing healthy={s.reranker.healthy} total={s.reranker.total} label="Reranker" color="var(--sig-chart-6)" icon={<ListOrdered size={20} />} />
         </div>
       </CardContent>
     </Card>
@@ -320,6 +316,7 @@ export default function Settings() {
         llm: summarize(data.llm),
         embedding: summarize(data.embedding),
         asr: summarize(data.asr),
+        reranker: summarize(data.reranker),
       });
     } catch { /* silent */ }
   }, []);
@@ -408,7 +405,7 @@ export default function Settings() {
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <Loader2 className="w-6 h-6 animate-spin text-primary" />
+        <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--sig-accent)" }} />
       </div>
     );
   }
@@ -418,7 +415,8 @@ export default function Settings() {
   return (
     <div className="flex-1 overflow-y-auto min-h-0 w-full"><div className="max-w-3xl mx-auto p-4 md:p-8 space-y-6">
       <div className="space-y-1 animate-fade-in">
-        <h1 className="text-2xl md:text-[28px] font-display font-bold aurora-text">设置</h1>
+        <div className="sig-kicker mb-1">// 设置 / SETTINGS</div>
+        <h1 className="sig-display text-2xl md:text-[28px]">设置<span className="sig-accent-c">.</span></h1>
         <p className="text-dim text-sm">
           Manage your account and AI provider configuration.
         </p>
@@ -482,6 +480,24 @@ export default function Settings() {
         </CardContent>
       </Card>
 
+      {/* Reranker Channels */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-secondary/10 flex items-center justify-center">
+              <ListOrdered className="w-5 h-5 text-secondary" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Reranker Channels</CardTitle>
+              <CardDescription>Cross-Encoder re-ranking — Cohere-compatible /rerank (optional)</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <ChannelManager section="reranker" />
+        </CardContent>
+      </Card>
+
       {/* Qiniu OSS Section */}
       <Card>
         <CardHeader>
@@ -540,7 +556,7 @@ export default function Settings() {
             </ConfigField>
           </div>
           {testMsg.qiniu && (
-            <div className={`text-xs px-3 py-2 rounded-xl ${testStatus.qiniu === "success" ? "bg-green/10 text-green" : "bg-destructive/10 text-destructive"}`}>
+            <div className="text-xs px-3 py-2 rounded-md" style={testStatus.qiniu === "success" ? { background: "color-mix(in srgb, var(--sig-success) 10%, transparent)", color: "var(--sig-success)" } : { background: "color-mix(in srgb, var(--sig-danger) 10%, transparent)", color: "var(--sig-danger)" }}>
               {testMsg.qiniu}
             </div>
           )}

@@ -1,9 +1,42 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { cn } from "@/lib/utils";
+
+// 按需注册语法高亮：只把面试场景高频的几种语言打进包，而非 Prism 全量入口的 200+ 种。
+// 这是构建模块数 / 内存峰值的最大单一来源。未注册的语言会安全降级为纯文本（不报错、仅无配色）。
+import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
+import javascript from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
+import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
+import jsx from "react-syntax-highlighter/dist/esm/languages/prism/jsx";
+import tsx from "react-syntax-highlighter/dist/esm/languages/prism/tsx";
+import java from "react-syntax-highlighter/dist/esm/languages/prism/java";
+import go from "react-syntax-highlighter/dist/esm/languages/prism/go";
+import rust from "react-syntax-highlighter/dist/esm/languages/prism/rust";
+import cpp from "react-syntax-highlighter/dist/esm/languages/prism/cpp";
+import c from "react-syntax-highlighter/dist/esm/languages/prism/c";
+import csharp from "react-syntax-highlighter/dist/esm/languages/prism/csharp";
+import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
+import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
+import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
+import markdown from "react-syntax-highlighter/dist/esm/languages/prism/markdown";
+
+// 标准语言名 → 语法定义
+const SYNTAX: Record<string, any> = {
+  python, javascript, typescript, jsx, tsx, java, go, rust,
+  cpp, c, csharp, sql, bash, json, yaml, markdown,
+};
+// 常见 fenced-code 标记别名 → 标准名（LLM 输出里 ```py / ```sh / ```yml 很常见）
+const ALIASES: Record<string, string> = {
+  py: "python", js: "javascript", ts: "typescript",
+  sh: "bash", shell: "bash", zsh: "bash", console: "bash",
+  yml: "yaml", golang: "go", cs: "csharp", md: "markdown",
+};
+Object.entries(SYNTAX).forEach(([name, syntax]) => SyntaxHighlighter.registerLanguage(name, syntax));
+Object.entries(ALIASES).forEach(([alias, target]) => SyntaxHighlighter.registerLanguage(alias, SYNTAX[target]));
 
 interface ChatBubbleProps {
   role: "user" | "assistant";
@@ -46,7 +79,7 @@ export const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["com
           style={oneDark}
           customStyle={{
             margin: 0,
-            borderRadius: "12px",
+            borderRadius: "6px",
             fontSize: "13px",
             padding: "16px 18px",
           }}
@@ -70,11 +103,24 @@ export const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["com
   },
 };
 
+/**
+ * 统一 Markdown 渲染组件：固定带上 remarkPlugins（GFM）+ markdownComponents。
+ * 各处一律用 <Markdown> 代替裸 <ReactMarkdown>，杜绝漏传 remarkPlugins 导致
+ * 表格 / 删除线 / 任务列表等 GFM 语法退化成纯文本（历史上有 7 处渲染点因此失效）。
+ */
+export function Markdown({ children }: { children?: string | null }) {
+  return (
+    <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>
+      {children}
+    </ReactMarkdown>
+  );
+}
+
 export default function ChatBubble({ role, content }: ChatBubbleProps) {
   if (role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
-        <div className="max-w-[70%] px-4 py-2.5 rounded-3xl rounded-tr-lg bg-primary text-primary-foreground text-[15px] leading-[1.7] whitespace-pre-wrap shadow-sm">
+        <div className="max-w-[70%] px-4 py-2.5 rounded-lg rounded-tr-sm bg-primary text-primary-foreground text-[15px] leading-[1.7] whitespace-pre-wrap">
           {content}
         </div>
       </div>
@@ -86,7 +132,7 @@ export default function ChatBubble({ role, content }: ChatBubbleProps) {
       <div className="h-px bg-border mb-6" />
       <div className="max-w-full md:max-w-[720px] leading-[1.8] text-[15px] text-text">
         <div className="md-content">
-          <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{content}</ReactMarkdown>
+          <Markdown>{content}</Markdown>
         </div>
       </div>
     </div>

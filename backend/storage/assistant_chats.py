@@ -10,11 +10,18 @@ def save_message(user_id: str, role: str, content: str):
         "INSERT INTO assistant_chats (user_id, role, content) VALUES (?, ?, ?)",
         (user_id, role, content),
     )
-    # Periodic trim: every ~10 inserts, keep only latest 200 messages per user
-    last_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    if last_id % 10 == 0:
-        _trim_history(user_id, keep=200)
+    # Commit the insert immediately so a later trim failure (e.g. a lock timeout)
+    # can never roll back / discard the message we just saved.
     conn.commit()
+    # Trim when THIS user crosses the cap. Keying off the global last_insert_rowid
+    # meant a low-frequency user could sit above the limit indefinitely. The 220
+    # hysteresis (> keep=200) avoids trimming on every insert. COUNT uses idx_ac_user.
+    count = conn.execute(
+        "SELECT COUNT(*) FROM assistant_chats WHERE user_id = ?", (user_id,)
+    ).fetchone()[0]
+    if count > 220:
+        _trim_history(user_id, keep=200)
+        conn.commit()
 
 
 def _trim_history(user_id: str, keep: int = 200):

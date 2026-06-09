@@ -30,10 +30,14 @@ async def stream_llm_sse(
     lc_messages: list,
     *,
     progress_prefix: str = "正在生成中",
+    stream_content: bool = False,
 ) -> AsyncGenerator[tuple[str, str], None]:
     """Stream an LLM call with heartbeat, yielding (event_type, sse_line) pairs.
 
-    Yields SSE lines (progress / ping) during generation.
+    Yields SSE lines (progress / ping) during generation. When ``stream_content``
+    is True, additionally emits a per-token ``{"type": "content", "delta": ...}``
+    SSE event so the caller can render the answer live (真流式)。默认 False，保持
+    其它端点依赖的"只推进度计数"行为不变。
     The final yield is ("result", accumulated_text) — NOT an SSE line.
     Caller is responsible for emitting the ``complete`` and ``done`` events
     after any post-processing.
@@ -69,6 +73,8 @@ async def stream_llm_sse(
                 token = chunk.content if hasattr(chunk, "content") else ""
                 if token:
                     accumulated += token
+                    if stream_content:
+                        yield ("sse", sse_event({"type": "content", "delta": token}))
                     chars_since_heartbeat += len(token)
                     if chars_since_heartbeat >= PROGRESS_CHAR_INTERVAL:
                         yield (

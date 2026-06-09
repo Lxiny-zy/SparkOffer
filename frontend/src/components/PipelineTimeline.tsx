@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
-import type { PipelineStageEvent } from "@/api/interview";
+import type { PipelineStageEvent, RAGRetrievalMetrics } from "@/api/interview";
 
 /**
  * 5 known stages — order matters for rendering. Keep in sync with
@@ -26,6 +26,7 @@ export interface PipelineStageState {
   duration_ms?: number;
   detail?: string;
   startedAt?: number;
+  rag_metrics?: RAGRetrievalMetrics;
 }
 
 export type PipelineStages = Record<string, PipelineStageState>;
@@ -62,7 +63,7 @@ export function PipelineTimeline({ stages, totalHighlight = true }: PipelineTime
   }, [stages]);
 
   return (
-    <div className="rounded-xl border border-border/60 bg-muted/30 backdrop-blur-sm p-3 space-y-2">
+    <div className="rounded-md border border-border/60 bg-muted/30 p-3 space-y-2">
       <div className="flex items-center justify-between text-xs">
         <span className="font-medium text-muted-fg">出题流水线 · 阶段耗时</span>
         {totalHighlight && totalMs > 0 && (
@@ -177,6 +178,7 @@ export function applyStageEvent(prev: PipelineStages, evt: PipelineStageEvent): 
       status: "ok",
       duration_ms: evt.duration_ms,
       detail: evt.detail,
+      rag_metrics: evt.rag_metrics,
     };
   } else if (evt.status === "error") {
     next[evt.stage] = {

@@ -10,15 +10,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PipelineTimeline, applyStageEvent, type PipelineStages } from "@/components/PipelineTimeline";
+import { RAGMetricsPanel } from "@/components/RAGMetricsPanel";
 import type { Question, Profile, DueReview, TopicInfo } from "../types/api";
 
 interface ModeCard {
   mode: string;
   icon: React.ComponentType<any>;
-  gradient: string;
-  iconBg: string;
-  borderActive: string;
-  badgeVariant: string;
   title: string;
   desc: string;
   tag: string;
@@ -28,10 +25,6 @@ const MODE_CARDS: ModeCard[] = [
   {
     mode: "resume",
     icon: FileText,
-    gradient: "from-primary/15 via-primary/5 to-transparent",
-    iconBg: "bg-primary/12 text-primary",
-    borderActive: "border-primary/50",
-    badgeVariant: "default",
     title: "实战模拟场",
     desc: "AI 读取你的简历，模拟真实面试官。从自我介绍到项目深挖，完整走一遍面试流程。",
     tag: "沉浸体验",
@@ -39,10 +32,6 @@ const MODE_CARDS: ModeCard[] = [
   {
     mode: "topic_drill",
     icon: Target,
-    gradient: "from-green/15 via-green/5 to-transparent",
-    iconBg: "bg-green/12 text-green",
-    borderActive: "border-green/50",
-    badgeVariant: "success",
     title: "弱点狙击站",
     desc: "选一个领域集中训练，AI 根据你的回答动态调整难度，精准定位薄弱点。",
     tag: "精准打击",
@@ -50,10 +39,6 @@ const MODE_CARDS: ModeCard[] = [
   {
     mode: "job_prep",
     icon: BriefcaseBusiness,
-    gradient: "from-tertiary/15 via-tertiary/5 to-transparent",
-    iconBg: "bg-tertiary/12 text-tertiary",
-    borderActive: "border-tertiary/50",
-    badgeVariant: "secondary",
     title: "岗位特训营",
     desc: "贴入岗位 JD，AI 拆解岗位重点，结合简历生成高概率问题和岗位匹配复盘。",
     tag: "定向突破",
@@ -61,10 +46,6 @@ const MODE_CARDS: ModeCard[] = [
   {
     mode: "recording",
     icon: Mic,
-    gradient: "from-info/15 via-info/5 to-transparent",
-    iconBg: "bg-info/12 text-info",
-    borderActive: "border-info/50",
-    badgeVariant: "blue",
     title: "回放实验室",
     desc: "上传面试录音或粘贴文字，AI 自动转写分析，帮你复盘每一场真实面试。",
     tag: "复盘利器",
@@ -246,7 +227,7 @@ export default function Home() {
       .sort((a, b) => (b[1].score || 0) - (a[1].score || 0))
       .slice(0, 3);
     return (
-      <Card className="w-full max-w-[700px] mb-10 stat-card-gradient card-hover-lift">
+      <Card hoverLift className="w-full max-w-[700px] mb-10">
         <CardContent className="p-5 md:p-6">
           <div className="flex justify-between items-center mb-4">
             <div className="flex items-center gap-2">
@@ -269,19 +250,10 @@ export default function Home() {
                 {topTopics.map(([t, d]) => (
                   <div key={t} className="flex items-center gap-2 mb-1.5">
                     <span className="text-xs w-[70px] text-text truncate">{t}</span>
-                    <div className="flex-1 h-2 rounded-full bg-border overflow-hidden relative">
-                      <div
-                        className="h-full rounded-full transition-all duration-700 relative overflow-hidden"
-                        style={{
-                          width: `${d.score || 0}%`,
-                          background: "linear-gradient(90deg, var(--aurora-1), var(--aurora-2))",
-                          boxShadow: "0 0 8px var(--tech-glow)",
-                        }}
-                      >
-                        <div className="absolute inset-0 opacity-50" style={{ background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)", backgroundSize: "200% 100%", animation: "text-shimmer 2s ease-in-out infinite" }} />
-                      </div>
+                    <div className="sig-progress flex-1">
+                      <div className="sig-progress-fill" style={{ width: `${d.score || 0}%` }} />
                     </div>
-                    <span className="text-[11px] text-dim w-7 text-right">{d.score || 0}</span>
+                    <span className="text-[11px] text-dim w-7 text-right sig-num">{d.score || 0}</span>
                   </div>
                 ))}
               </div>
@@ -302,20 +274,14 @@ export default function Home() {
   return (
     <div className="flex-1 overflow-y-auto min-h-0 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
       {/* Hero */}
-      <div className="text-center mb-10 md:mb-12 relative">
-        <div className="absolute -top-32 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-aurora rounded-full blur-3xl pointer-events-none opacity-50 morph-blob" />
-        <div className="relative">
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full glass-subtle text-xs font-medium mb-4 badge-pulse" style={{ color: "var(--aurora-2)" }}>
-            <Sparkles size={14} className="animate-float" />
-            AI-Powered Mock Interview
-          </div>
-          <h1 className="text-3xl md:text-[44px] font-display font-bold mb-3 aurora-text">
-            SparkOffer
-          </h1>
-          <p className="text-base text-dim max-w-[500px]">
-            越练越懂你的 AI 面试教练——追踪你的成长轨迹，精准命中薄弱点
-          </p>
-        </div>
+      <div className="text-center mb-10 md:mb-12">
+        <div className="sig-kicker mb-3 inline-block">// AI-POWERED MOCK INTERVIEW</div>
+        <h1 className="sig-display text-3xl md:text-[44px] mb-3">
+          SparkOffer<span className="sig-accent-c">.</span>
+        </h1>
+        <p className="text-base text-dim max-w-[500px] mx-auto">
+          越练越懂你的 AI 面试教练——追踪你的成长轨迹，精准命中薄弱点
+        </p>
       </div>
 
       {/* Mode cards */}
@@ -326,12 +292,12 @@ export default function Home() {
           return (
             <div
               key={card.mode}
+              data-spotlight={isActive ? undefined : ""}
+              style={isActive ? { borderColor: "var(--sig-accent)", background: "color-mix(in srgb, var(--sig-accent) 6%, transparent)" } : undefined}
               className={cn(
-                "w-full relative overflow-hidden cursor-pointer text-left rounded-3xl active:scale-[0.97] group",
-                "transition-[transform,border-color,box-shadow,background-color] duration-300 ease-[cubic-bezier(0.2,0,0,1)]",
-                isActive
-                  ? "glass-strong animated-border shadow-[0_8px_32px_var(--tech-glow)]"
-                  : "bg-card border border-border/60 hover:border-primary/30 hover:shadow-[0_4px_16px_var(--glow-primary)]"
+                "sig-card w-full relative overflow-hidden cursor-pointer text-left active:scale-[0.97] group",
+                "transition-[transform,border-color,background-color] duration-300 ease-[cubic-bezier(0.2,0,0,1)]",
+                isActive ? "" : "sig-hover-lift spotlight"
               )}
               onClick={() => {
                 const switching = mode !== card.mode;
@@ -343,8 +309,8 @@ export default function Home() {
               {/* L1 — Eyebrow 眼眉色条 */}
               <div className="relative px-6 pt-6 pb-0">
                 <div className="flex items-center gap-2 mb-3">
-                  <div className={cn("w-1 h-4 rounded-full transition-opacity", isActive ? "opacity-90" : "opacity-40")} style={{ background: "currentColor" }} />
-                  <span className={cn("text-[10px] font-mono uppercase tracking-[0.18em] transition-opacity", isActive ? "opacity-80" : "opacity-50")} style={{ color: "currentColor" }}>
+                  <div className={cn("w-1 h-4 rounded-full transition-opacity", isActive ? "opacity-90" : "opacity-40")} style={{ background: "var(--sig-accent)" }} />
+                  <span className="sig-kicker" style={{ opacity: isActive ? 0.9 : 0.55 }}>
                     {card.tag}
                   </span>
                 </div>
@@ -353,7 +319,7 @@ export default function Home() {
               {/* L2 — 图标 + L3 标题 */}
               <div className="relative px-6 pt-1 pb-4">
                 <div className="flex items-center gap-3 mb-3">
-                  <div className={cn("w-11 h-11 rounded-2xl flex items-center justify-center transition-all duration-300 shrink-0", card.iconBg, isActive && "scale-110 shadow-[0_4px_20px_var(--tech-glow)]")}>
+                  <div className={cn("w-11 h-11 rounded-md flex items-center justify-center transition-all duration-300 shrink-0", isActive && "scale-110")} style={{ background: "color-mix(in srgb, var(--sig-accent) 12%, transparent)", color: "var(--sig-accent)" }}>
                     <Icon size={20} />
                   </div>
                   {/* L3 — 标题 */}
@@ -365,20 +331,6 @@ export default function Home() {
               <div className="relative px-6 pb-6">
                 <div className="text-sm text-dim leading-relaxed">{card.desc}</div>
               </div>
-
-              {/* Corner geometric accent — 默认隐藏，hover/激活时显现 */}
-              <svg
-                className={cn(
-                  "absolute top-3 right-3 pointer-events-none transition-opacity duration-300",
-                  isActive ? "opacity-50" : "opacity-0 group-hover:opacity-40"
-                )}
-                width="36" height="36" viewBox="0 0 36 36" fill="none"
-              >
-                <circle cx="30" cy="6" r="1.5" fill="currentColor" className="text-primary" />
-                <circle cx="25" cy="11" r="1" fill="currentColor" className="text-primary" />
-                <circle cx="30" cy="16" r="1" fill="currentColor" className="text-primary" />
-                <line x1="20" y1="6" x2="30" y2="6" stroke="currentColor" strokeOpacity="0.3" strokeWidth="0.5" className="text-primary" />
-              </svg>
             </div>
           );
         })}
@@ -386,18 +338,18 @@ export default function Home() {
 
       {/* Due review reminder — 编号列表化 */}
       {!mode && dueReviews.length > 0 && (
-        <Card className="w-full max-w-[700px] mb-6 border-orange/30 bg-orange/5 card-hover-lift animate-fade-in relative overflow-hidden">
-          <div className="absolute -top-12 -right-12 w-[200px] h-[200px] rounded-full pointer-events-none opacity-25 morph-blob" style={{ background: "radial-gradient(circle, rgba(253,203,110,0.5), transparent 70%)" }} />
+        <Card hoverLift className="w-full max-w-[700px] mb-6 animate-fade-in relative overflow-hidden" style={{ borderColor: "color-mix(in srgb, var(--sig-warning) 35%, transparent)", background: "color-mix(in srgb, var(--sig-warning) 5%, transparent)" }}>
           <CardContent className="p-4 md:p-5 relative">
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
-                <AlertCircle size={18} className="text-orange animate-float" />
+                <AlertCircle size={18} style={{ color: "var(--sig-warning)" }} />
                 <span className="text-[15px] font-semibold">
                   {dueReviews.length} 个薄弱点待复习
                 </span>
               </div>
               <button
-                className="text-[13px] font-medium px-3 py-1.5 rounded-full bg-orange/15 text-orange hover:bg-orange/25 transition-all flex items-center gap-1 cursor-pointer hover:-translate-y-px"
+                className="text-[13px] font-medium px-3 py-1.5 rounded-md transition-all flex items-center gap-1 cursor-pointer hover:-translate-y-px"
+                style={{ background: "color-mix(in srgb, var(--sig-warning) 15%, transparent)", color: "var(--sig-warning)" }}
                 onClick={() => {
                   setMode("topic_drill");
                   const topicOfFirst = dueReviews[0]?.topic;
@@ -409,13 +361,13 @@ export default function Home() {
             </div>
             <div className="flex flex-col gap-2">
               {dueReviews.slice(0, 6).map((wp, i) => (
-                <div key={i} className="flex items-start gap-2.5 text-[13px] text-orange/90 animate-fade-in-up" style={{ animationDelay: `${0.05 * i}s` }}>
-                  <span className="font-mono font-semibold text-orange/50 text-[11px] shrink-0 mt-0.5 w-5 text-right">
+                <div key={i} className="flex items-start gap-2.5 text-[13px] animate-fade-in-up" style={{ animationDelay: `${0.05 * i}s`, color: "color-mix(in srgb, var(--sig-warning) 85%, var(--sig-fg))" }}>
+                  <span className="sig-num font-semibold text-[11px] shrink-0 mt-0.5 w-5 text-right" style={{ color: "color-mix(in srgb, var(--sig-warning) 55%, transparent)" }}>
                     {String(i + 1).padStart(2, "0")}
                   </span>
                   <span className="flex-1 leading-relaxed">
                     {wp.point}
-                    {wp.topic && <span className="ml-2 text-[11px] text-orange/40">({wp.topic})</span>}
+                    {wp.topic && <span className="ml-2 text-[11px] text-dim">({wp.topic})</span>}
                   </span>
                 </div>
               ))}
@@ -499,7 +451,7 @@ export default function Home() {
 
       {/* Streaming progress */}
       {isStreaming && (
-        <Card className="w-full max-w-[700px] mb-6 animate-fade-in gradient-border">
+        <Card className="w-full max-w-[700px] mb-6 animate-fade-in">
           <CardContent className="p-4 md:p-5 space-y-3">
             <div className="flex items-center gap-2">
               <div className="flex gap-1.5">
@@ -513,20 +465,14 @@ export default function Home() {
             </div>
 
             <PipelineTimeline stages={pipelineStages} />
+            {pipelineStages.retrieve?.rag_metrics && (
+              <RAGMetricsPanel metrics={pipelineStages.retrieve.rag_metrics} />
+            )}
 
             {streamingQuestions.length > 0 && (
               <>
-                <div className="h-2 rounded-full bg-border overflow-hidden relative">
-                  <div
-                    className="h-full rounded-full transition-all duration-300 ease-out relative overflow-hidden"
-                    style={{
-                      width: `${(streamingQuestions.length / 10) * 100}%`,
-                      background: "linear-gradient(90deg, var(--aurora-1), var(--aurora-2))",
-                      boxShadow: "0 0 12px var(--tech-glow)",
-                    }}
-                  >
-                    <div className="absolute inset-0 opacity-60" style={{ background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent)", backgroundSize: "200% 100%", animation: "text-shimmer 1.5s linear infinite" }} />
-                  </div>
+                <div className="sig-progress">
+                  <div className="sig-progress-fill" style={{ width: `${(streamingQuestions.length / 10) * 100}%` }} />
                 </div>
                 <div className="flex flex-col gap-1.5">
                   {streamingQuestions.map((q) => (
@@ -544,16 +490,19 @@ export default function Home() {
 
       {/* Ready to start — 出题完成后等用户确认 */}
       {readyToStart && (
-        <Card className="w-full max-w-[700px] mb-6 animate-fade-in gradient-border">
+        <Card className="w-full max-w-[700px] mb-6 animate-fade-in">
           <CardContent className="p-4 md:p-5 space-y-3">
             <div className="flex items-center gap-2">
-              <CheckCircle2 size={18} className="text-green-500" />
+              <CheckCircle2 size={18} style={{ color: "var(--sig-success)" }} />
               <span className="text-sm font-medium">
                 出题完成 · {readyToStart.questions.length} 道题已准备就绪
               </span>
             </div>
 
             <PipelineTimeline stages={pipelineStages} />
+            {pipelineStages.retrieve?.rag_metrics && (
+              <RAGMetricsPanel metrics={pipelineStages.retrieve.rag_metrics} />
+            )}
 
             <div className="flex items-center gap-2 text-[12px] text-dim flex-wrap">
               <span className="mr-1">难度分布：</span>

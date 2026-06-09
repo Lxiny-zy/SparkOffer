@@ -73,30 +73,27 @@ export default function RecordingAnalysis() {
     <div className="flex-1 overflow-y-auto min-h-0 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
       <div className="w-full max-w-[700px]">
         <div className="mb-8 animate-fade-in">
-          <h1 className="text-2xl md:text-[28px] font-display font-bold mb-2 aurora-text">录音复盘</h1>
+          <div className="sig-kicker mb-2">// 录音复盘 / RECORDING</div>
+          <h1 className="sig-display text-2xl md:text-[28px] mb-2">回放实验室<span className="sig-accent-c">.</span></h1>
           <p className="text-sm text-dim">上传面试录音或粘贴转写文字，AI 自动识别涉及领域并分析复盘</p>
         </div>
 
         <div className="mb-6 animate-fade-in-up">
           <div className="text-[15px] font-semibold mb-3">录音模式</div>
           <div className="flex gap-3">
-            {RECORDING_MODES.map(({ key, label, sub, Icon, color }) => (
+            {RECORDING_MODES.map(({ key, label, sub, Icon }) => (
               <Card
                 key={key}
                 className={cn(
                   "flex-1 cursor-pointer transition-all hover:-translate-y-px",
-                  recordingMode === key && "border-2 shadow-md",
-                  recordingMode === key && color === "blue" && "border-tertiary",
-                  recordingMode === key && color === "violet" && "border-violet-500"
+                  recordingMode === key && "border-[color:var(--sig-accent)]"
                 )}
                 onClick={() => setRecordingMode(key)}
               >
                 <CardContent className="p-4 flex items-center gap-3">
                   <div className={cn(
                     "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
-                    recordingMode === key
-                      ? color === "blue" ? "bg-tertiary/15 text-tertiary" : "bg-primary/15 text-primary"
-                      : "bg-secondary text-dim"
+                    recordingMode === key ? "bg-primary/15 text-primary" : "bg-secondary text-dim"
                   )}>
                     <Icon size={20} />
                   </div>
@@ -122,13 +119,14 @@ export default function RecordingAnalysis() {
         </div>
 
         <div className="mb-4 animate-fade-in-up [animation-delay:0.1s]">
-          <div className="flex gap-1 bg-secondary rounded-lg p-1 w-fit mb-4">
+          <div className="flex gap-1 p-1 w-fit mb-4 rounded-md border" style={{ borderColor: "var(--sig-line)" }}>
             {["upload", "paste"].map((t) => (
               <button
                 key={t}
+                style={inputTab === t ? { background: "var(--sig-accent)", color: "var(--sig-accent-fg)" } : undefined}
                 className={cn(
-                  "px-4 py-1.5 rounded-md text-sm transition-all cursor-pointer",
-                  inputTab === t ? "bg-card text-text shadow-sm font-medium" : "text-dim hover:text-text"
+                  "px-4 py-1.5 rounded text-sm transition-all cursor-pointer",
+                  inputTab !== t && "text-dim hover:text-text"
                 )}
                 onClick={() => setInputTab(t)}
               >
@@ -175,7 +173,7 @@ export default function RecordingAnalysis() {
               {audioFile && !transcript && (
                 <Button
                   variant="outline"
-                  className="w-full border-tertiary/30 text-tertiary hover:bg-tertiary/10"
+                  className="w-full"
                   onClick={handleTranscribe}
                   disabled={transcribing}
                 >
@@ -189,7 +187,7 @@ export default function RecordingAnalysis() {
 
           {inputTab === "paste" && !transcript && (
             <textarea
-              className="w-full h-40 md:h-48 px-4 py-3 rounded-xl bg-card border border-border text-sm text-text leading-relaxed resize-none md:resize-y focus:outline-none focus:border-primary"
+              className="sig-textarea w-full h-40 md:h-48 md:resize-y"
               placeholder={
                 recordingMode === "dual"
                   ? "粘贴面试对话记录...\n\n格式示例：\n面试官：请介绍一下你自己\n我：我是XXX，目前..."
@@ -208,7 +206,7 @@ export default function RecordingAnalysis() {
               <span className="text-xs text-dim">可直接编辑修正</span>
             </div>
             <textarea
-              className="w-full h-48 md:h-64 px-4 py-3 rounded-xl bg-card border border-border text-sm text-text leading-relaxed resize-none md:resize-y focus:outline-none focus:border-primary"
+              className="sig-textarea w-full h-48 md:h-64 md:resize-y"
               value={transcript}
               onChange={(e) => setTranscript(e.target.value)}
             />
@@ -216,7 +214,7 @@ export default function RecordingAnalysis() {
         )}
 
         {error && (
-          <div className="mb-4 px-4 py-3 rounded-xl bg-red/10 border border-red/20 text-sm text-red animate-shake">
+          <div className="mb-4 px-4 py-3 rounded-md border text-sm animate-shake" style={{ borderColor: "color-mix(in srgb, var(--sig-danger) 35%, transparent)", background: "color-mix(in srgb, var(--sig-danger) 8%, transparent)", color: "var(--sig-danger)" }}>
             {error}
           </div>
         )}

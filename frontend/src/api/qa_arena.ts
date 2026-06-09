@@ -1,4 +1,4 @@
-import { API_BASE, authHeaders } from "./client";
+import { API_BASE, authHeaders, handleStreamUnauthorized, iterSSEFrames } from "./client";
 
 export interface QASession {
   id: string;
@@ -84,34 +84,34 @@ export async function* streamQAChat(sessionId: string, message: string, signal?:
     signal,
   });
 
-  if (res.status === 401) {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    window.location.href = "/login";
+  if (handleStreamUnauthorized(res)) {
     return;
   }
 
   if (!res.ok) throw new Error(`问答演练场错误: ${res.status}`);
 
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  for await (const event of iterSSEFrames(res)) {
+    yield event;
+  }
+}
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (line.startsWith("data: ")) {
-        try {
-          yield JSON.parse(line.slice(6));
-        } catch {
-          // skip malformed
-        }
-      }
-    }
+// Re-answer the last user question (regenerate). No body: the backend re-uses the
+// last stored user message and drops any trailing (broken/partial/empty) AI reply.
+export async function* regenerateQAChat(sessionId: string, signal?: AbortSignal): AsyncGenerator<any> {
+  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/regenerate`, {
+    method: "POST",
+    headers: authHeaders(),
+    signal,
+  });
+
+  if (handleStreamUnauthorized(res)) {
+    return;
+  }
+
+  if (!res.ok) throw new Error(`重新生成失败: ${res.status}`);
+
+  for await (const event of iterSSEFrames(res)) {
+    yield event;
   }
 }
 
@@ -120,8 +120,10 @@ export async function* streamQAChat(sessionId: string, message: string, signal?:
 export async function generateQASummary(
   sessionId: string,
   onProgress?: (msg: string) => void,
+  effort?: string,
 ): Promise<QASummaryResult> {
-  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/summary`, {
+  const qs = effort ? `?effort=${encodeURIComponent(effort)}` : "";
+  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/summary${qs}`, {
     method: "POST",
     headers: authHeaders(),
   });
@@ -135,31 +137,15 @@ export async function generateQASummary(
     return res.json();
   }
 
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
   let result: QASummaryResult | null = null;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      try {
-        const event = JSON.parse(line.slice(6));
-        if (event.type === "progress" && onProgress) {
-          onProgress(event.message);
-        } else if (event.type === "error") {
-          throw new Error(event.message);
-        } else if (event.type === "complete") {
-          result = event.data;
-        }
-      } catch (e: any) {
-        if (e.message && !e.message.includes("JSON")) throw e;
-      }
+  for await (const event of iterSSEFrames(res)) {
+    if (event.type === "progress" && onProgress) {
+      onProgress(event.message);
+    } else if (event.type === "error") {
+      throw new Error(event.message);
+    } else if (event.type === "complete") {
+      result = event.data;
     }
   }
 

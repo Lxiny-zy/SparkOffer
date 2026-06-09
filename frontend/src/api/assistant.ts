@@ -1,4 +1,5 @@
-import { API_BASE, authHeaders } from "./client";
+import { API_BASE, authHeaders, handleStreamUnauthorized, iterSSEFrames } from "./client";
+import { withSSETimeoutGen } from "./sse";
 import type { ChatMessage } from "../types/api";
 
 /**
@@ -39,42 +40,23 @@ export async function fetchWelcomeMessage(): Promise<string | null> {
  * Stream assistant chat via SSE.
  * Yields parsed events: { type: "token"|"action"|"done", ... }
  */
-export async function* streamAssistantChat(message: string): AsyncGenerator<any> {
-  const res = await fetch(`${API_BASE}/assistant/chat`, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ message }),
-  });
+export function streamAssistantChat(message: string, signal?: AbortSignal): AsyncGenerator<any> {
+  return withSSETimeoutGen(async function* (innerSignal) {
+    const res = await fetch(`${API_BASE}/assistant/chat`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ message }),
+      signal: innerSignal,
+    });
 
-  if (res.status === 401) {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    window.location.href = "/login";
-    return;
-  }
-
-  if (!res.ok) {
-    throw new Error(`Assistant error: ${res.status}`);
-  }
-
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (line.startsWith("data: ")) {
-        try {
-          yield JSON.parse(line.slice(6));
-        } catch {
-          // skip malformed
-        }
-      }
+    if (handleStreamUnauthorized(res)) {
+      return;
     }
-  }
+
+    if (!res.ok) {
+      throw new Error(`Assistant error: ${res.status}`);
+    }
+
+    yield* iterSSEFrames(res);
+  }, undefined, signal);
 }

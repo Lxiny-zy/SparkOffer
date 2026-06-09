@@ -150,6 +150,18 @@ def get_current_user(
         raise HTTPException(401, "Invalid or expired token")
 
 
+def require_owner(user_id: str = Depends(get_current_user)) -> str:
+    """Restrict an endpoint to the configured default/owner account.
+
+    The AI channel pool is global (not per-user); without this, any registered
+    user could rewrite everyone's LLM/embedding/ASR config or point traffic at an
+    attacker-controlled endpoint. Reduces to a no-op in single-user deployments.
+    """
+    if user_id != _default_user_id(settings.default_email):
+        raise HTTPException(403, "Owner only")
+    return user_id
+
+
 def get_user_by_id(user_id: str) -> dict | None:
     conn = get_db()
     row = conn.execute("SELECT id, email, name, created_at FROM users WHERE id = ?", (user_id,)).fetchone()

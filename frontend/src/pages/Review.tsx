@@ -1,10 +1,11 @@
 import { useParams, useLocation, useNavigate } from "react-router-dom";
-import { useState, useEffect, ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
-import { markdownComponents, remarkPlugins } from "../components/ChatBubble";
+import { useState, useEffect, useRef, ReactNode } from "react";
+import { Markdown } from "../components/ChatBubble";
 import { BookOpen, BriefcaseBusiness, Sparkles, RefreshCw, Star } from "lucide-react";
-import { getReview, getReferenceAnswer, addFavorite } from "../api/interview";
+import { getReview, getReferenceAnswer, addFavorite, getSessionRAGMetrics, type RAGEvalMetrics } from "../api/interview";
 import { cn } from "@/lib/utils";
+import { metricColorVar } from "@/lib/metrics";
+import { MetricInfoTooltip } from "@/components/MetricInfoTooltip";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -75,7 +76,7 @@ function HeroOverview({ eyebrow, title, subtitle, summary, avgScore, rightExtra,
   const accentVar = accent === "tertiary" ? "var(--tertiary)" : "var(--primary)";
 
   return (
-    <Card className="mb-6 stat-card-gradient relative overflow-hidden card-hover-lift animate-fade-in-up">
+    <Card className="mb-6 relative overflow-hidden animate-fade-in-up" hoverLift>
       {/* 装饰光斑 */}
       <div
         className="absolute -top-20 -right-20 w-[300px] h-[300px] rounded-full pointer-events-none opacity-30"
@@ -143,7 +144,7 @@ function StatStrip({ items }: StatStripProps) {
       {items.map((it, i) => (
         <div
           key={i}
-          className="rounded-2xl bg-card/60 border border-border/50 px-4 py-3 hover:border-primary/30 transition-colors animate-fade-in-up"
+          className="sig-card px-4 py-3 hover:border-[color:var(--sig-line-2)] transition-colors animate-fade-in-up"
           style={{ animationDelay: `${i * 0.05}s` }}
         >
           <div className="text-[10px] uppercase tracking-widest text-dim/70 mb-1">{it.label}</div>
@@ -201,7 +202,7 @@ function TimelineNode({ index, score, isSkipped, isLast, children }: TimelineNod
         <span className="text-[9px] font-mono text-dim/60 tracking-wider">Q{String(index).padStart(2, "0")}</span>
       </div>
       {/* 内容卡 */}
-      <div className={cn("rounded-2xl transition-colors", isSkipped ? "opacity-60" : "")}>
+      <div className={cn("rounded-lg transition-colors", isSkipped ? "opacity-60" : "")}>
         {children}
       </div>
     </div>
@@ -246,7 +247,7 @@ function DimensionScores({ dimensionScores, avgScore, labels }: DimensionScoresP
   if (!entries.length) return null;
 
   return (
-    <Card className="mb-6 card-hover-lift">
+    <Card className="mb-6" hoverLift>
       <CardContent className="p-5 md:p-7">
         <div className="text-lg font-semibold mb-4 heading-underline">
           维度评分
@@ -260,10 +261,10 @@ function DimensionScores({ dimensionScores, avgScore, labels }: DimensionScoresP
           return (
             <div key={key} className="flex items-center gap-3 mb-2.5" style={{ animationDelay: `${idx * 0.1}s` }}>
               <div className="w-[90px] md:w-[110px] text-[13px] text-dim text-right shrink-0">{label}</div>
-              <div className="flex-1 h-2.5 rounded-full bg-border overflow-hidden relative">
+              <div className="flex-1 h-2.5 bg-border overflow-hidden relative">
                 <div
-                  className="h-full rounded-full transition-[width] duration-700 ease-out progress-animated"
-                  style={{ width: `${score * 10}%`, background: `linear-gradient(90deg, ${color}, color-mix(in srgb, ${color} 70%, var(--aurora-2)))` }}
+                  className="h-full transition-[width] duration-700 ease-out"
+                  style={{ width: `${score * 10}%`, background: color }}
                 />
               </div>
               <div className="w-9 text-sm font-semibold text-right shrink-0 score-pop" style={{ color, animationDelay: `${idx * 0.15 + 0.3}s` }}>{score}</div>
@@ -453,9 +454,26 @@ interface DrillReviewProps {
   topic: string | null | undefined;
   sessionId: string | undefined;
   cachedRefAnswers: Record<string, string>;
+  ragEvalMetrics?: RAGEvalMetrics | null;
 }
 
-function DrillReview({ scores, overall, questions, answers, topic, sessionId, cachedRefAnswers }: DrillReviewProps) {
+function RAGQualityBadge({ value, label, metricKey }: { value: number | null | undefined; label: string; metricKey?: string }) {
+  if (value == null) return null;
+  const pct = Math.round(value);
+  const color = metricColorVar(value / 100, metricKey);
+  const badge = (
+    <div className="flex flex-col items-center gap-0.5 rounded-lg border border-border/40 bg-card/60 px-3 py-2 min-w-[80px]">
+      <span className="text-[11px] text-muted-fg">{label}</span>
+      <span className="text-lg font-semibold font-mono tabular-nums" style={{ color }}>{pct}%</span>
+      <div className="w-full h-1 rounded-full bg-muted overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: color }} />
+      </div>
+    </div>
+  );
+  return metricKey ? <MetricInfoTooltip metricKey={metricKey} label={label}>{badge}</MetricInfoTooltip> : badge;
+}
+
+function DrillReview({ scores, overall, questions, answers, topic, sessionId, cachedRefAnswers, ragEvalMetrics }: DrillReviewProps) {
   const answerMap: Record<number, string> = {};
   for (const a of (answers || [])) answerMap[a.question_id] = a.answer;
   const scoreMap: Record<number, Score> = {};
@@ -530,6 +548,17 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
         ]}
       />
 
+      {ragEvalMetrics && (
+        <div className="mb-4 animate-fade-in">
+          <div className="text-[11px] font-medium text-muted-fg tracking-wider mb-2">RAG 质量</div>
+          <div className="grid grid-cols-3 gap-2">
+            <RAGQualityBadge label="忠实度" value={ragEvalMetrics.faithfulness} metricKey="faithfulness" />
+            <RAGQualityBadge label="切题度" value={ragEvalMetrics.answer_relevance} metricKey="answer_relevance" />
+            <RAGQualityBadge label="综合质量" value={ragEvalMetrics.answer_correctness} metricKey="answer_correctness" />
+          </div>
+        </div>
+      )}
+
       <PointList title="薄弱点" items={overall?.new_weak_points} />
       <PointList title="亮点" items={overall?.new_strong_points} tone="green" />
 
@@ -555,19 +584,19 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
                   </CardContent>
                 </Card>
               ) : (
-                <Card className="animate-fade-in card-hover-lift">
+                <Card className="animate-fade-in" hoverLift>
                   <CardContent className="p-4 md:p-5">
                     <QMetaRow parts={[q.focus_area, q.difficulty ? `难度 ${q.difficulty}/5` : null]} />
                     {/* L2 焦点：题目 */}
                     <div className="md-content question-md text-[15px] md:text-base leading-relaxed mb-3">
-                      <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{q.question}</ReactMarkdown>
+                      <Markdown>{q.question}</Markdown>
                     </div>
 
                     {/* 你的回答 */}
                     <div className="bg-secondary/60 rounded-xl px-3.5 py-3 mb-3 border-l-2 border-primary/30">
                       <div className="text-[10px] uppercase tracking-widest text-dim/70 mb-1.5">YOUR ANSWER</div>
                       <div className="md-content text-sm leading-relaxed text-text/90">
-                        <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{answer}</ReactMarkdown>
+                        <Markdown>{answer}</Markdown>
                       </div>
                     </div>
 
@@ -604,6 +633,26 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
                         )}
                       </div>
                     )}
+
+                    {/* RAG 指标 */}
+                    {ragEvalMetrics?.per_question && (() => {
+                      const pq = ragEvalMetrics.per_question.find((r) => r.question_id === q.id);
+                      if (!pq) return null;
+                      return (
+                        <div className="flex gap-2 mt-2 text-[11px]">
+                          {pq.faithfulness != null && (
+                            <Badge variant="outline" className="font-mono text-[10px] gap-1" style={{ borderColor: metricColorVar(pq.faithfulness / 10), color: metricColorVar(pq.faithfulness / 10) }}>
+                              忠实 {pq.faithfulness}/10
+                            </Badge>
+                          )}
+                          {pq.answer_relevance != null && (
+                            <Badge variant="outline" className="font-mono text-[10px] gap-1" style={{ borderColor: metricColorVar(pq.answer_relevance / 10), color: metricColorVar(pq.answer_relevance / 10) }}>
+                              切题 {pq.answer_relevance}/10
+                            </Badge>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* 操作行 */}
                     <div className="mt-3 pt-3 border-t border-border/50 flex items-center gap-1 flex-wrap">
@@ -649,7 +698,7 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
                           </Button>
                         </div>
                         <div className="md-content bg-secondary/60 rounded-xl px-3.5 py-3">
-                          <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{refAnswers[q.id]}</ReactMarkdown>
+                          <Markdown>{refAnswers[q.id]}</Markdown>
                         </div>
                       </div>
                     )}
@@ -752,7 +801,7 @@ function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepRev
                 </div>
 
                 <div className="text-[15px] font-medium leading-relaxed mb-3 md-content question-md">
-                  <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{q.question}</ReactMarkdown>
+                  <Markdown>{q.question}</Markdown>
                 </div>
 
                 {q.intent && (
@@ -768,7 +817,7 @@ function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepRev
                     <div className="bg-secondary rounded-lg px-3 py-3 md:px-4 mb-3">
                       <div className="text-xs font-semibold text-dim mb-1.5 opacity-70">你的回答</div>
                       <div className="md-content text-sm leading-relaxed">
-                        <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{answer}</ReactMarkdown>
+                        <Markdown>{answer}</Markdown>
                       </div>
                     </div>
 
@@ -832,10 +881,17 @@ export default function Review() {
   const [meta, setMeta] = useState<Record<string, any>>(stateData.meta || {});
   const [showTranscript, setShowTranscript] = useState(false);
   const [refAnswersCache, setRefAnswersCache] = useState<Record<string, string>>({});
+  const [ragEvalMetrics, setRagEvalMetrics] = useState<RAGEvalMetrics | null>(stateData.ragEvalMetrics || null);
   const [loading, setLoading] = useState(!review && !scores);
+  // Fetch the review at most once per session. The effect's deps include
+  // review/scores, so an empty backend response for an in-progress session would
+  // otherwise let it re-fire getReview on every subsequent render.
+  const fetchedRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!review && !scores) {
+      if (fetchedRef.current === sessionId) return;
+      fetchedRef.current = sessionId;
       setLoading(true);
       getReview(sessionId)
         .then((data: any) => {
@@ -865,6 +921,27 @@ export default function Review() {
     }
   }, [sessionId, review, scores]);
 
+  useEffect(() => {
+    if (ragEvalMetrics || !sessionId) return;
+    getSessionRAGMetrics(sessionId)
+      .then((records) => {
+        const evalRec = records.find((r) => r.stage === "answer_eval");
+        if (evalRec && (evalRec.faithfulness != null || evalRec.answer_relevance != null)) {
+          setRagEvalMetrics({
+            faithfulness: Math.round((evalRec.faithfulness ?? 0) * 100),
+            answer_relevance: Math.round((evalRec.answer_relevance ?? 0) * 100),
+            answer_correctness: Math.round((evalRec.answer_correctness ?? 0) * 100),
+            per_question: (evalRec.detail as any)?.per_question?.map((pq: any) => ({
+              question_id: pq.qid,
+              faithfulness: pq.f,
+              answer_relevance: pq.ar,
+            })) || [],
+          });
+        }
+      })
+      .catch(() => {});
+  }, [sessionId, ragEvalMetrics]);
+
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center py-15 text-dim">
@@ -889,17 +966,14 @@ export default function Review() {
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
-      <div className="mb-8 animate-fade-in relative">
-        <div className="absolute -top-8 -left-8 w-[200px] h-[200px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(circle, var(--glow-accent), transparent 70%)" }} />
-        <div className="relative">
-          <div className="flex items-center gap-2 mb-2">
-            {isJobPrep && <BriefcaseBusiness size={18} className="text-tertiary" />}
-            {showDrill && !isJobPrep && !isRecording && <Sparkles size={18} className="text-primary" />}
-            {isRecording && <BookOpen size={18} className="text-primary" />}
-            <div className="text-2xl md:text-[28px] font-display font-bold">{title}</div>
-          </div>
-          <div className="text-sm text-dim">Session: {sessionId}</div>
+      <div className="mb-8 animate-fade-in">
+        <div className="flex items-center gap-2 mb-2">
+          {isJobPrep && <BriefcaseBusiness size={18} className="text-tertiary" />}
+          {showDrill && !isJobPrep && !isRecording && <Sparkles size={18} className="text-primary" />}
+          {isRecording && <BookOpen size={18} className="text-primary" />}
+          <h1 className="sig-display text-2xl md:text-[28px]">{title}<span className="sig-accent-c">.</span></h1>
         </div>
+        <div className="text-sm text-dim sig-num">Session: {sessionId}</div>
       </div>
 
       <div className="stagger-children">
@@ -908,7 +982,7 @@ export default function Review() {
         ) : isJobPrep ? (
           <JobPrepReview scores={scores} overall={overall} questions={questions} answers={answers} meta={meta} />
         ) : showDrill ? (
-          <DrillReview scores={scores} overall={overall} questions={questions} answers={answers} topic={topic} sessionId={sessionId} cachedRefAnswers={refAnswersCache} />
+          <DrillReview scores={scores} overall={overall} questions={questions} answers={answers} topic={topic} sessionId={sessionId} cachedRefAnswers={refAnswersCache} ragEvalMetrics={ragEvalMetrics} />
         ) : (
           <>
             <DimensionScores
@@ -919,7 +993,7 @@ export default function Review() {
             <Card className="mb-6">
               <CardContent className="p-5 md:p-8 leading-[1.8] text-[15px]">
                 <div className="md-content">
-                  <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{review || ""}</ReactMarkdown>
+                  <Markdown>{review || ""}</Markdown>
                 </div>
               </CardContent>
             </Card>

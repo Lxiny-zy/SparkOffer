@@ -1,19 +1,43 @@
 """Knowledge base management routes."""
 import asyncio
 import re
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Depends
 
 from backend.config import settings
-from backend.indexer import load_topics, _index_cache, invalidate_topic_index, build_topic_index
+from backend.indexer import load_topics, invalidate_topic_index, build_topic_index
 from backend.embedding_tasks import schedule_index_rebuild, get_task_queue
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api")
 
+KNOWLEDGE_EXTS = (".md", ".txt", ".py")
+
+
+def _validate_filename(filename: str) -> str:
+    """Reject path-traversal / separators in a user-supplied filename.
+
+    The file endpoints join `filename` under a per-user topic dir; without this
+    a value like '../../../ai_config.json' would escape the user's knowledge
+    root and let an authenticated user read/write/delete arbitrary files.
+    """
+    name = (filename or "").strip()
+    if not name or name in (".", "..") or name != Path(name).name:
+        raise HTTPException(400, f"Invalid filename: {filename}")
+    return name
+
+
+def _glob_knowledge_files(topic_dir: Path) -> list[Path]:
+    """Return all knowledge files sorted by name, matching KNOWLEDGE_EXTS."""
+    if not topic_dir.exists():
+        return []
+    return sorted(f for f in topic_dir.iterdir() if f.is_file() and f.suffix in KNOWLEDGE_EXTS)
+
 
 def _count_files(user_id: str, topic_dir_name: str) -> int:
     topic_dir = settings.user_knowledge_path(user_id) / topic_dir_name
-    return sum(1 for _ in topic_dir.glob("*.md")) if topic_dir.exists() else 0
+    return len(_glob_knowledge_files(topic_dir))
 
 
 def _status_to_dict(st) -> dict:
@@ -39,10 +63,8 @@ async def get_core_knowledge(topic: str, user_id: str = Depends(get_current_user
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
     topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
-    if not topic_dir.exists():
-        return []
     files = []
-    for f in sorted(topic_dir.glob("*.md")):
+    for f in _glob_knowledge_files(topic_dir):
         try:
             mtime = int(f.stat().st_mtime * 1000)
         except OSError:
@@ -61,12 +83,14 @@ async def update_core_knowledge(topic: str, filename: str, body: dict,
     topics = load_topics(user_id)
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
+    filename = _validate_filename(filename)
     topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
     filepath = topic_dir / filename
     if not filepath.exists():
         raise HTTPException(404, f"File not found: {filename}")
     filepath.write_text(body.get("content", ""), encoding="utf-8")
-    _index_cache.pop((user_id, topic), None)
+    await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+    schedule_index_rebuild(topic, user_id)
     return {"ok": True}
 
 
@@ -76,12 +100,14 @@ async def delete_core_knowledge(topic: str, filename: str,
     topics = load_topics(user_id)
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
+    filename = _validate_filename(filename)
     topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
     filepath = topic_dir / filename
     if not filepath.exists():
         raise HTTPException(404, f"File not found: {filename}")
     filepath.unlink()
-    _index_cache.pop((user_id, topic), None)
+    await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+    schedule_index_rebuild(topic, user_id)
     return {"ok": True}
 
 
@@ -92,15 +118,17 @@ async def create_core_knowledge(topic: str, body: dict,
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
     filename = body.get("filename", "").strip()
-    if not filename or not filename.endswith(".md"):
-        raise HTTPException(400, "Filename must end with .md")
+    if not filename or not any(filename.endswith(ext) for ext in KNOWLEDGE_EXTS):
+        raise HTTPException(400, f"Filename must end with one of {', '.join(KNOWLEDGE_EXTS)}")
+    filename = _validate_filename(filename)
     topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
     topic_dir.mkdir(parents=True, exist_ok=True)
     filepath = topic_dir / filename
     if filepath.exists():
         raise HTTPException(409, f"File already exists: {filename}")
     filepath.write_text(body.get("content", ""), encoding="utf-8")
-    _index_cache.pop((user_id, topic), None)
+    await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+    schedule_index_rebuild(topic, user_id)
     return {"ok": True, "filename": filename}
 
 
@@ -139,7 +167,8 @@ async def generate_core_knowledge(topic: str, user_id: str = Depends(get_current
         topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
         topic_dir.mkdir(parents=True, exist_ok=True)
         (topic_dir / "README.md").write_text(content, encoding="utf-8")
-        _index_cache.pop((user_id, topic), None)
+        invalidate_topic_index(topic, user_id)
+        schedule_index_rebuild(topic, user_id)
 
         yield sse_event({"type": "complete", "data": {"ok": True, "content": content}})
         yield sse_event({"type": "done"})
@@ -262,7 +291,7 @@ async def get_knowledge_stats(topic: str, user_id: str = Depends(get_current_use
 
     if topic_dir.exists():
         marker_re = re.compile(r"<!--\s*自动沉淀\s+[\d\-:\s]+-->")
-        for f in topic_dir.glob("*.md"):
+        for f in _glob_knowledge_files(topic_dir):
             file_count += 1
             try:
                 mtime = int(f.stat().st_mtime * 1000)

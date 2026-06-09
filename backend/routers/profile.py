@@ -178,7 +178,7 @@ def get_topic_history(topic: str, user_id: str = Depends(get_current_user)):
 
 
 @router.post("/profile/topic/{topic}/retrospective")
-async def generate_retrospective(topic: str, user_id: str = Depends(get_current_user)):
+def generate_retrospective(topic: str, user_id: str = Depends(get_current_user)):
     from backend.prompts.interviewer import TOPIC_RETROSPECTIVE_PROMPT
     from backend.llm_provider import get_langchain_llm
     from langchain_core.messages import SystemMessage, HumanMessage
@@ -256,7 +256,7 @@ async def generate_retrospective(topic: str, user_id: str = Depends(get_current_
 # ── History ──
 
 @router.get("/interview/review/{session_id}")
-async def get_review(session_id: str, user_id: str = Depends(get_current_user)):
+def get_review(session_id: str, user_id: str = Depends(get_current_user)):
     session = get_session(session_id, user_id=user_id)
     if not session:
         raise HTTPException(404, "Session not found.")
@@ -266,7 +266,7 @@ async def get_review(session_id: str, user_id: str = Depends(get_current_user)):
 
 
 @router.get("/interview/history")
-async def get_history(
+def get_history(
     limit: int = 20, offset: int = 0,
     mode: str = None, topic: str = None,
     status: str = "completed",
@@ -326,7 +326,7 @@ async def save_session_progress(
 
 
 @router.delete("/interview/session/{session_id}")
-async def delete_session_endpoint(session_id: str, user_id: str = Depends(get_current_user)):
+def delete_session_endpoint(session_id: str, user_id: str = Depends(get_current_user)):
     deleted = delete_session(session_id, user_id=user_id)
     if not deleted:
         raise HTTPException(404, "Session not found.")
@@ -334,5 +334,5 @@ async def delete_session_endpoint(session_id: str, user_id: str = Depends(get_cu
 
 
 @router.get("/interview/topics")
-async def get_interview_topics(user_id: str = Depends(get_current_user)):
+def get_interview_topics(user_id: str = Depends(get_current_user)):
     return list_distinct_topics(user_id=user_id)

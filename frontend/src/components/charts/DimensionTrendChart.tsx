@@ -6,13 +6,13 @@ import {
 import { ScoreHistoryEntry } from "../../types/api";
 
 const DIMENSIONS: Record<string, { label: string; color: string }> = {
-  technical_depth: { label: "技术深度", color: "#6366f1" },
-  communication: { label: "沟通表达", color: "#22c55e" },
-  problem_solving: { label: "解题思路", color: "#f59e0b" },
-  project_articulation: { label: "项目表达", color: "#ec4899" },
-  role_fit: { label: "岗位匹配", color: "#06b6d4" },
-  engineering_quality: { label: "工程质量", color: "#8b5cf6" },
-  project_relevance: { label: "项目相关", color: "#f97316" },
+  technical_depth: { label: "技术深度", color: "var(--sig-chart-1)" },
+  communication: { label: "沟通表达", color: "var(--sig-chart-3)" },
+  problem_solving: { label: "解题思路", color: "var(--sig-chart-4)" },
+  project_articulation: { label: "项目表达", color: "var(--sig-chart-5)" },
+  role_fit: { label: "岗位匹配", color: "var(--sig-chart-6)" },
+  engineering_quality: { label: "工程质量", color: "var(--sig-chart-2)" },
+  project_relevance: { label: "项目相关", color: "var(--sig-warning)" },
 };
 
 interface DimensionTrendChartProps {
@@ -56,7 +56,7 @@ export default function DimensionTrendChart({ history }: DimensionTrendChartProp
             <button
               key={dim}
               onClick={() => toggle(dim)}
-              className={`text-xs px-2.5 py-1 rounded-full border transition-all cursor-pointer ${
+              className={`text-xs px-2.5 py-1 rounded border transition-all cursor-pointer ${
                 active
                   ? "border-transparent text-white"
                   : "border-border text-dim bg-transparent opacity-50"

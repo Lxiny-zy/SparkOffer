@@ -5,6 +5,7 @@
 - 两阶段提取（Mem0）：Extract → Update，不无脑追加
 - 向量召回（embedding）：语义搜索历史洞察
 """
+import copy
 import json
 import logging
 import os
@@ -163,7 +164,11 @@ def _load_profile(user_id: str) -> dict:
         path = _profile_path(user_id)
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
-        return DEFAULT_PROFILE.copy()
+        # deepcopy, not .copy(): a shallow copy shares DEFAULT_PROFILE's nested
+        # lists/dicts (weak_points, strong_points, topic_mastery, ...). Mutating a
+        # new user's profile would then leak into the global default and bleed
+        # into the next new user's "empty" profile.
+        return copy.deepcopy(DEFAULT_PROFILE)
 
 
 def _save_profile(profile: dict, user_id: str):
@@ -434,8 +439,11 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str):
     for op in ops.get("weak_point_ops", []):
         action = op.get("action", "NOOP")
         if action == "ADD":
+            point = op.get("point")
+            if not point:
+                continue
             weak_points.append({
-                "point": op["point"],
+                "point": point,
                 "topic": op.get("topic", topic or ""),
                 "first_seen": now, "last_seen": now,
                 "times_seen": 1, "improved": False,
@@ -466,14 +474,21 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str):
             })
 
 
-def _deterministic_update(profile: dict, new_weak: list, new_strong: list,
-                          topic: str | None, now: str, user_id: str):
-    """Fallback: vector cosine dedup when LLM parse fails."""
-    from backend.vector_memory import find_similar_weak_point_sync
+async def _deterministic_update(profile: dict, new_weak: list, new_strong: list,
+                                topic: str | None, now: str, user_id: str):
+    """Fallback: vector cosine dedup when LLM parse fails.
+
+    Awaits find_similar_weak_point directly in the loop. Each point previously
+    went through find_similar_weak_point_sync → _run_async which, under the async
+    llm_update_profile caller, spun up a ThreadPoolExecutor + fresh event loop per
+    point (an N+1 of event loops). New points still dedup against ones appended
+    earlier in the same batch — the comparison list is the growing profile["weak_points"].
+    """
+    from backend.vector_memory import find_similar_weak_point
 
     for wp in new_weak:
         point = wp.get("point", wp) if isinstance(wp, dict) else str(wp)
-        match_idx = find_similar_weak_point_sync(point, profile.get("weak_points", []), user_id=user_id)
+        match_idx = await find_similar_weak_point(point, profile.get("weak_points", []), user_id=user_id)
         if match_idx is not None:
             profile["weak_points"][match_idx]["times_seen"] = profile["weak_points"][match_idx].get("times_seen", 1) + 1
             profile["weak_points"][match_idx]["last_seen"] = now
@@ -672,7 +687,7 @@ async def llm_update_profile(
                 raise ValueError(f"Expected dict, got {type(ops)}")
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             logger.warning(f"Profile update LLM parse failed ({e}), falling back to deterministic")
-            _deterministic_update(profile, new_weak_points, new_strong_points, topic, now, user_id)
+            await _deterministic_update(profile, new_weak_points, new_strong_points, topic, now, user_id)
 
     # ── Snapshot current mastery for frontend comparison overlay ──
     import copy
@@ -745,14 +760,13 @@ async def update_profile_after_interview(
     ])
 
     try:
-        content = response.content.strip()
-        if "```" in content:
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-        extraction = json.loads(content)
-    except (json.JSONDecodeError, IndexError):
+        # Reuse the hardened parser (handles raw JSON, ```json fences, and
+        # leading prose) instead of a fragile split("```")[1] that breaks on
+        # unfenced output and silently discarded the whole session's signal.
+        extraction = _parse_json_safe(response.content)
+        if not isinstance(extraction, dict):
+            raise ValueError("extraction is not a JSON object")
+    except (json.JSONDecodeError, ValueError):
         extraction = {"session_summary": "提取失败", "weak_points": [], "strong_points": []}
 
     # ── Stage 2: LLM-based Update (Mem0 style) ──

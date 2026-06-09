@@ -115,7 +115,10 @@ class DrillPipeline:
                 yield sse_event({"type": "error", "message": f"{STAGE_LABELS.get(stage, stage)}失败: {exc}"})
                 return
             duration_ms = (time.perf_counter() - t0) * 1000.0
-            yield _stage_event(stage, "ok", duration_ms=duration_ms, detail=self._stage_detail(stage))
+            extra = {}
+            if stage == "retrieve":
+                extra = self._rag_metrics_payload()
+            yield _stage_event(stage, "ok", duration_ms=duration_ms, detail=self._stage_detail(stage), **extra)
 
     # ── stage_detail: short string summarizing what the stage produced ──
 
@@ -136,9 +139,15 @@ class DrillPipeline:
                 return f"缓存命中 · {n} 个片段 (跳过 RAG)"
             stats = self.ctx.get("retrieval_stats")
             if stats is not None:
+                rerank_seg = {
+                    "applied": " · 重排 ✓ 生效",
+                    "degraded": " · 重排 ⚠ 降级",
+                    "off": " · 重排 未启用",
+                }.get(stats.reranker_status, "")
                 return (
                     f"{queries} 路检索 · {stats.raw_chunks}→{stats.fused_chunks}→{n} 片段 · "
                     f"缓存 {stats.embed_cache_hits}/{stats.embed_cache_hits + stats.embed_cache_misses}"
+                    f"{rerank_seg}"
                 )
             return f"{queries} 次检索 · {n} 个去重后片段"
         if stage == "generate":
@@ -225,7 +234,7 @@ class DrillPipeline:
         # same active weak_points (common during a single sitting).
         cache = get_cache()
         cache_key = self._knowledge_cache_key(all_weak)
-        cached_payload = cache.get_json(cache_key)
+        cached_payload = await asyncio.to_thread(cache.get_json, cache_key)
         if cached_payload and isinstance(cached_payload, dict):
             self.ctx["knowledge_ctx"] = cached_payload.get("knowledge_ctx", "")
             self.ctx["knowledge_chunks"] = cached_payload.get("chunks", 0)
@@ -235,12 +244,22 @@ class DrillPipeline:
             return
 
         try:
-            chunks, stats = await retrieve_for_drill(
-                topic=self.topic,
-                user_id=self.user_id,
-                weak_points=all_weak,
-                fallback_query=fallback_query,
+            # Hard end-to-end budget for the whole RAG hop (retrieve + dedup +
+            # rerank). This sits on the SSE question-gen path, so cap it well
+            # below the worst-case sum of per-stage timeouts and degrade to empty
+            # context on overrun rather than making the user wait minutes.
+            chunks, stats = await asyncio.wait_for(
+                retrieve_for_drill(
+                    topic=self.topic,
+                    user_id=self.user_id,
+                    weak_points=all_weak,
+                    fallback_query=fallback_query,
+                ),
+                timeout=100.0,
             )
+        except asyncio.TimeoutError:
+            logger.warning("Phase 3 RAG exceeded 100s budget; continuing with empty context")
+            chunks, stats = [], None
         except Exception as exc:
             logger.warning("Phase 3 RAG failed (%s); falling back to empty context", exc)
             chunks, stats = [], None
@@ -254,11 +273,11 @@ class DrillPipeline:
 
         # Cache TTL 1h — long enough to span a multi-drill sitting but short
         # enough that knowledge-base edits propagate the same day.
-        cache.set_json(cache_key, {
+        await asyncio.to_thread(cache.set_json, cache_key, {
             "knowledge_ctx": knowledge_ctx,
             "chunks": len(chunks),
             "queries": stats.queries if stats else 0,
-        }, ttl=3600)
+        }, 3600)
 
     def _knowledge_cache_key(self, weak_points: list[str]) -> str:
         import hashlib
@@ -286,6 +305,22 @@ class DrillPipeline:
         except Exception:
             pass
         return f"{topic_name} 核心知识点 面试常见问题"
+
+    def _rag_metrics_payload(self) -> dict:
+        """Build optional rag_metrics dict for the SSE pipeline_stage event."""
+        stats = self.ctx.get("retrieval_stats")
+        if stats is None or stats.rag_metrics is None:
+            return {}
+        m = stats.rag_metrics
+        # m is already RetrievalMetrics.to_dict() (values rounded) — pass through.
+        return {
+            "rag_metrics": {
+                "relevance": m.get("relevance"),
+                "coverage": m.get("coverage"),
+                "diversity": m.get("diversity"),
+                "chunk_details": m.get("chunk_details", []),
+            }
+        }
 
     def _rag_quality_hint(self) -> str:
         """Tell the LLM how much to lean on knowledge_context this round.
@@ -649,6 +684,24 @@ class DrillPipeline:
             self.session_id, self.mode, self.topic,
             questions=self.questions, user_id=self.user_id,
         )
+
+        # Persist retrieval-stage RAG metrics
+        stats = self.ctx.get("retrieval_stats")
+        if stats and stats.rag_metrics:
+            try:
+                from backend.storage.rag_metrics_store import save_rag_metrics
+                m = stats.rag_metrics
+                save_rag_metrics(
+                    self.session_id, self.user_id, self.topic, "question_gen",
+                    relevance=m.get("relevance"),
+                    coverage=m.get("coverage"),
+                    diversity=m.get("diversity"),
+                    chunk_count=stats.final_chunks,
+                    detail={"chunk_details": m.get("chunk_details", [])},
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist RAG metrics: %s", exc)
+
         save_live(drill_sessions, self.session_id, "drill", self.user_id, {
             "topic": self.topic,
             "questions": self.questions,

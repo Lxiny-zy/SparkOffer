@@ -43,7 +43,7 @@ async def extract_and_writeback(
         qa_text = "\n\n---\n\n".join(worthy)
         llm = get_langchain_llm()
         from langchain_core.messages import HumanMessage
-        response = llm.invoke([HumanMessage(content=_EXTRACT_PROMPT.format(qa_text=qa_text))])
+        response = await llm.ainvoke([HumanMessage(content=_EXTRACT_PROMPT.format(qa_text=qa_text))])
         extracted = response.content.strip()
         if not extracted or len(extracted) < 20:
             return

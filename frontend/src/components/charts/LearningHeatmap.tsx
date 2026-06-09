@@ -7,9 +7,9 @@ const DAY_LABELS = ["", "一", "", "三", "", "五", ""];
 
 function getColor(count: number): string {
   if (count === 0) return "var(--border)";
-  if (count === 1) return "#86efac";
-  if (count === 2) return "#22c55e";
-  return "#15803d";
+  if (count === 1) return "color-mix(in srgb, var(--sig-accent) 38%, transparent)";
+  if (count === 2) return "color-mix(in srgb, var(--sig-accent) 68%, transparent)";
+  return "var(--sig-accent)";
 }
 
 interface CellData {

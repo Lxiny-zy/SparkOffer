@@ -1,11 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import { ArrowLeft, Sparkles } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import CatAvatar from "@/components/CatAvatar";
 
 export default function Login() {
@@ -62,97 +58,102 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen bg-bg text-text relative overflow-hidden bg-noise flex items-center justify-center px-4">
-      {/* Background layers */}
-      <div className="fixed inset-0 bg-aurora pointer-events-none" />
-      <div className="fixed inset-0 bg-grid pointer-events-none opacity-50" />
-      <div className="particle" style={{ top: "20%", left: "15%", animationDelay: "0s" }} />
-      <div className="particle" style={{ top: "70%", right: "20%", animationDelay: "5s" }} />
-      <div className="particle" style={{ top: "40%", right: "10%", animationDelay: "10s" }} />
+    <div className="sig-root min-h-screen relative overflow-hidden flex flex-col">
+      <div className="sig-grid fixed inset-0 pointer-events-none" aria-hidden />
 
-      <div className="w-full max-w-md relative z-10">
-        <button
-          onClick={() => navigate("/")}
-          className="flex items-center gap-1.5 text-sm text-dim hover:text-text transition-colors mb-6 cursor-pointer group"
-        >
-          <ArrowLeft size={16} className="transition-transform duration-300 group-hover:-translate-x-1" />
+      <div className="sig-hr" />
+
+      {/* Header */}
+      <header className="relative z-10 mx-auto w-full max-w-[1200px] px-6 md:px-8 h-16 flex items-center justify-between">
+        <button onClick={() => navigate("/")} className="sig-navlink sig-mono text-[12.5px] uppercase tracking-[0.14em] flex items-center gap-2 group">
+          <ArrowLeft size={14} className="transition-transform duration-300 group-hover:-translate-x-1" />
           返回首页
         </button>
+        <div className="flex items-center gap-3">
+          <CatAvatar size={22} mood="static" />
+          <span className="sig-display text-[15px] tracking-[-0.03em]">SparkOffer</span>
+        </div>
+      </header>
 
-        <Card variant="glass" className="relative overflow-hidden tech-border animate-scale-in">
-          {/* Decorative glow halo */}
-          <div className="absolute -top-20 -right-20 w-48 h-48 rounded-full opacity-40 blur-3xl pointer-events-none" style={{ background: "var(--aurora-2)" }} />
+      <div className="sig-hr" />
 
-          <CardHeader className="relative items-center text-center pb-2">
-            <div className="relative mb-2">
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="w-20 h-20 rounded-full opacity-40 blur-xl" style={{ background: "var(--aurora-2)" }} />
-              </div>
-              <div className="relative animate-glow-breathe rounded-full">
-                <CatAvatar size={64} mood="happy" />
-              </div>
-            </div>
+      {/* Card */}
+      <div className="relative z-10 flex-1 grid place-items-center px-6 py-14 md:py-20">
+        <div className="w-full max-w-[420px]">
+          <div className="sig-kicker">// {isRegister ? "创建账号" : "登录"}</div>
+          <h1 className="sig-display mt-4 text-[clamp(2rem,6vw,3.25rem)]">
+            {isRegister ? "开始训练" : "欢迎回来"}<span className="sig-accent-c">.</span>
+          </h1>
+          <p className="mt-3 text-[13.5px] text-[color:var(--sig-dim)]">
+            {isRegister ? "创建账号，开启你的自适应面试训练。" : "继续你的训练 — 进度与画像已为你保留。"}
+          </p>
 
-            <div className="inline-flex items-center gap-1.5 text-xs text-dim mt-2">
-              <Sparkles size={12} style={{ color: "var(--aurora-2)" }} />
-              {isRegister ? "开启你的训练之旅" : "继续你的训练"}
-            </div>
-
-            <h1 className="text-2xl md:text-3xl font-display font-bold mt-2">
-              <span className="aurora-text">{isRegister ? "创建账号" : "欢迎回来"}</span>
-            </h1>
-          </CardHeader>
-
-          <CardContent className="relative pt-4">
-            <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="sig-card mt-8 p-6 md:p-7">
+            <form onSubmit={handleSubmit} className="space-y-5">
               {isRegister && (
-                <div className="space-y-1.5 animate-fade-in">
-                  <Label>昵称</Label>
-                  <Input type="text" placeholder="你的称呼（选填）" value={name} onChange={(e) => setName(e.target.value)} />
+                <div className="space-y-2">
+                  <label className="sig-kicker block">昵称 / Name</label>
+                  <input
+                    type="text" className="sig-field" placeholder="你的称呼（选填）"
+                    value={name} onChange={(e) => setName(e.target.value)}
+                  />
                 </div>
               )}
 
-              <div className="space-y-1.5">
-                <Label>邮箱</Label>
-                <Input type="email" placeholder="your@email.com" value={email} onChange={(e) => setEmail(e.target.value)} required />
+              <div className="space-y-2">
+                <label className="sig-kicker block">邮箱 / Email</label>
+                <input
+                  type="email" className="sig-field" placeholder="your@email.com"
+                  value={email} onChange={(e) => setEmail(e.target.value)} required
+                />
               </div>
 
-              <div className="space-y-1.5">
-                <Label>密码</Label>
-                <Input type="password" placeholder={isRegister ? "至少 6 个字符" : "输入密码"} value={password} onChange={(e) => setPassword(e.target.value)} required />
+              <div className="space-y-2">
+                <label className="sig-kicker block">密码 / Password</label>
+                <input
+                  type="password" className="sig-field"
+                  placeholder={isRegister ? "至少 6 个字符" : "输入密码"}
+                  value={password} onChange={(e) => setPassword(e.target.value)} required
+                />
               </div>
 
               {error && (
-                <div className="px-3 py-2.5 rounded-2xl bg-red/10 border border-red/30 text-red text-sm animate-fade-in shadow-[0_0_16px_rgba(179,38,30,0.15)]">
+                <div
+                  className="sig-mono text-[12.5px] rounded border px-3 py-2.5"
+                  style={{
+                    borderColor: "color-mix(in srgb, var(--sig-danger) 45%, transparent)",
+                    color: "var(--sig-danger)",
+                    background: "color-mix(in srgb, var(--sig-danger) 8%, transparent)",
+                  }}
+                >
                   {error}
                 </div>
               )}
 
-              <Button type="submit" variant="cta" size="lg" className="w-full mt-2" disabled={loading}>
-                {loading ? "处理中..." : isRegister ? "立即注册" : "登录"}
-              </Button>
+              <button type="submit" className="sig-cta w-full justify-center mt-1" disabled={loading}>
+                {loading ? "处理中…" : isRegister ? "立即注册" : "登录"}
+                {!loading && <ArrowRight size={16} />}
+              </button>
             </form>
 
             {allowReg && (
-              <div className="mt-6 pt-5 text-center">
-                <div className="section-divider mb-4" />
-                <span className="text-sm text-dim">
-                  {isRegister ? "已有账号？" : "还没有账号？"}
-                </span>
-                <button
-                  onClick={() => { setIsRegister(!isRegister); setError(""); }}
-                  className="text-sm font-medium ml-1.5 hover:underline cursor-pointer aurora-text"
-                >
-                  {isRegister ? "去登录" : "立即注册"}
-                </button>
+              <div className="mt-6 pt-5">
+                <div className="sig-hr mb-4" />
+                <div className="text-center">
+                  <span className="sig-kicker">{isRegister ? "已有账号？" : "还没有账号？"}</span>
+                  <button
+                    onClick={() => { setIsRegister(!isRegister); setError(""); }}
+                    className="sig-navlink sig-mono text-[12px] uppercase tracking-[0.14em] ml-2 sig-accent-c"
+                  >
+                    {isRegister ? "去登录" : "立即注册"}
+                  </button>
+                </div>
               </div>
             )}
-          </CardContent>
-        </Card>
+          </div>
 
-        <p className="text-center text-xs text-dim mt-6">
-          由 ❤️ + Claude 驱动 · 本地优先 · 数据归你
-        </p>
+          <p className="sig-kicker mt-6 text-center">本地优先 · 数据归你 · Built with Claude</p>
+        </div>
       </div>
     </div>
   );

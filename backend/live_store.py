@@ -30,13 +30,13 @@ class TTLDict:
     def __setitem__(self, key: str, value: dict):
         with self._lock:
             self._data[key] = (time.time() + self._default_ttl, value)
-            # Evict oldest if over max size
+            # Evict least-recently-used if over max size. Access refreshes the
+            # expiry (see __getitem__), so the min-by-expiry entry is the LRU one.
             if len(self._data) > self._max_size:
                 self._evict_expired()
                 if len(self._data) > self._max_size:
-                    # Remove oldest entry
-                    oldest_key = min(self._data, key=lambda k: self._data[k][0])
-                    del self._data[oldest_key]
+                    lru_key = min(self._data, key=lambda k: self._data[k][0])
+                    del self._data[lru_key]
 
     def __getitem__(self, key: str) -> dict:
         with self._lock:
@@ -46,7 +46,8 @@ class TTLDict:
             if time.time() > expire:
                 del self._data[key]
                 raise KeyError(key)
-            # Refresh TTL on access
+            # Refresh TTL on access: live sessions expire on 2h of INACTIVITY,
+            # not 2h after creation — an active interview should stay warm.
             self._data[key] = (time.time() + self._default_ttl, value)
             return value
 
@@ -87,6 +88,10 @@ drill_sessions: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
 job_prep_sessions: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
 algorithm_sessions: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
 
+# RAG-eval background-job progress (transient; polled by the dashboard). Not
+# persisted to SQLite — the durable result lands in the rag_eval_runs table.
+rag_eval_jobs: TTLDict = TTLDict(default_ttl=7200.0, max_size=200)
+
 _MSG_TYPE_MAP = {"human": HumanMessage, "ai": AIMessage, "system": SystemMessage}
 
 
@@ -101,10 +106,10 @@ def save_live(store: dict, session_id: str, session_type: str, user_id: str, dat
     save_live_session(session_id, session_type, user_id, persist_data)
 
 
-def get_live(store: dict, session_id: str, session_type: str):
+def get_live(store: dict, session_id: str, session_type: str, user_id: str):
     if session_id in store:
         return store[session_id]
-    data = load_live_session(session_id)
+    data = load_live_session(session_id, user_id)
     if data is None:
         return None
     if session_type == "algorithm" and "messages" in data:
@@ -116,6 +121,6 @@ def get_live(store: dict, session_id: str, session_type: str):
     return data
 
 
-def del_live(store: dict, session_id: str):
+def del_live(store: dict, session_id: str, user_id: str):
     store.pop(session_id, None)
-    delete_live_session(session_id)
+    delete_live_session(session_id, user_id)

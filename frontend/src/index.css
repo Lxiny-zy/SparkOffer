@@ -3,6 +3,7 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  color-scheme: light;
   --font-size: 16px;
   /* Surface hierarchy: background < surface-container (AppShell) < card (cards) */
   --background: #F3EDF7;
@@ -35,6 +36,10 @@
   --success: #386A20;
   --warning: #7D5800;
   --info: #00658E;
+  /* Color-word aliases so bare var(--green)/var(--red) call sites resolve
+     (metric coloring in metrics.ts + RAGDashboard charts). Mirrors @theme. */
+  --green: var(--success);
+  --red: var(--destructive);
   --teal: #006B5F;
   --tertiary: #7D5260;
   --tertiary-foreground: #FFFFFF;
@@ -63,6 +68,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --background: #0B0A0F;
   --foreground: #E6E0E9;
   --card: #1C1A22;
@@ -93,6 +99,10 @@
   --success: #A8D88E;
   --warning: #FFB95A;
   --info: #8ECFF2;
+  /* Color-word aliases so bare var(--green)/var(--red) call sites resolve
+     (metric coloring in metrics.ts + RAGDashboard charts). Mirrors @theme. */
+  --green: var(--success);
+  --red: var(--destructive);
   --teal: #6DD6C8;
   --tertiary: #EFB8C8;
   --tertiary-foreground: #492532;
@@ -207,6 +217,9 @@
   html {
     font-size: var(--font-size);
     scrollbar-gutter: stable;
+    /* Firefox scrollbar — translucent brand thumb, transparent track */
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--primary) 32%, transparent) transparent;
   }
 
   body {
@@ -521,10 +534,23 @@
 .stagger-children > *:nth-child(5) { animation-delay: 0.25s; }
 .stagger-children > *:nth-child(6) { animation-delay: 0.3s; }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
+/* Floating capsule scrollbar — translucent brand tint, padding-box inset so it
+   reads as a ~6px pill with breathing room. Blends in both light/dark; replaces
+   the old opaque var(--muted-foreground) thumb that showed as a white bar on dark. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--muted-foreground); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--primary); }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--primary) 28%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 9999px;
+  transition: background 0.2s ease;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--primary) 55%, transparent);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner { background: transparent; }
 
 /* ═══════════════════════════════════════════════════════════
    Markdown 内容渲染 — 多彩配色，亮/暗双主题完整适配
@@ -754,6 +780,11 @@
 }
 .md-content tr:nth-child(even) td {
   background: var(--md-table-row-alt-bg);
+}
+/* 宽表（多列横向对比）在窄容器内横向滚动，避免列被挤压或溢出裁剪 */
+.md-content .md-table-wrapper {
+  overflow-x: auto;
+  max-width:  100%;
 }
 
 /* ── Premium utility classes ───────────────────────── */
@@ -1078,8 +1109,10 @@
     min-width: 44px;
   }
 
-  /* Larger scrollbar for touch */
-  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  /* Thinner scrollbar on small screens — inherits the translucent thumb, just
+     trims the inset so the slimmer thumb stays visible. */
+  ::-webkit-scrollbar { width: 7px; height: 7px; }
+  ::-webkit-scrollbar-thumb { border-width: 1.5px; }
 
   /* Prevent text selection on interactive elements */
   button, [role="button"] {
@@ -1333,3 +1366,441 @@
   animation: text-shimmer 4s ease-in-out infinite;
   opacity: 0.6;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Pointer interaction layer — cursor-following effects (设计感)
+   Driven by PointerFX.tsx (sets --cursor-x/y, --mx/my). Touch &
+   reduced-motion devices skip the JS entirely, so these stay inert.
+   ═══════════════════════════════════════════════════════════ */
+
+/* Cursor-following radial highlight inside a card. Pure pseudo-element overlay →
+   zero layout shift. Opt in via the `.spotlight` class + `data-spotlight`.
+   Uses ::after (not ::before) so it never collides with tech-border/scan-line,
+   which already own ::before. The highlight sits at z-index:-1 inside an isolated
+   stacking context, so real content (incl. absolutely-positioned decor) paints
+   above it untouched — no need to force `position: relative` on children. */
+.spotlight { position: relative; isolation: isolate; }
+.spotlight::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  z-index: -1;
+  background: radial-gradient(
+    circle 220px at var(--mx, 50%) var(--my, 50%),
+    color-mix(in srgb, var(--aurora-2) 16%, transparent),
+    transparent 60%
+  );
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  pointer-events: none;
+}
+.spotlight:hover::after { opacity: 1; }
+
+/* Ambient glow that softly trails the pointer. Intentionally faint. */
+.cursor-glow {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 340px;
+  height: 340px;
+  border-radius: 9999px;
+  pointer-events: none;
+  z-index: 40;
+  will-change: transform;
+  mix-blend-mode: screen;
+  transform: translate3d(
+    calc(var(--cursor-x, -9999px) - 170px),
+    calc(var(--cursor-y, -9999px) - 170px),
+    0
+  );
+  background: radial-gradient(circle, color-mix(in srgb, var(--aurora-2) 10%, transparent), transparent 65%);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.cursor-glow.is-active { opacity: 1; }
+
+/* Magnetic pull — JS sets the transform; this just smooths it. */
+.magnetic { transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1); will-change: transform; }
+
+/* Premium sheen sweeping across a button on hover. */
+.btn-sheen { position: relative; overflow: hidden; }
+.btn-sheen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(110deg, transparent 35%, rgba(255, 255, 255, 0.16) 50%, transparent 65%);
+  transform: translateX(-120%);
+  transition: transform 0.6s ease;
+}
+.btn-sheen:hover::after { transform: translateX(120%); }
+
+/* ═══════════════════════════════════════════════════════════
+   SPEC SHEET — signature visual language (landing / login sample)
+   Swiss-editorial + terminal: hard blueprint grid, oversized tight
+   display type, monospace markers, single electric-violet accent,
+   sharp corners. Scoped under .sig-root so it never touches the
+   rest of the app's tokens. Drop-in: wrap a page in .sig-root.
+   ═══════════════════════════════════════════════════════════ */
+
+.sig-root {
+  --sig-bg: #FAFAF8;
+  --sig-fg: #0B0B0D;
+  --sig-dim: #6A6A72;
+  --sig-faint: #9A9AA2;
+  --sig-line: rgba(11, 11, 13, 0.12);
+  --sig-line-2: rgba(11, 11, 13, 0.22);
+  --sig-accent: #6D3BFF;
+  --sig-accent-fg: #FFFFFF;
+  --sig-surface: #FFFFFF;
+  --sig-danger: #C8362B;
+  --sig-success: #2E7D32;
+  --sig-warning: #B26A00;
+  --sig-info: #2563EB;
+  --sig-surface-2: #F2F2F0;
+  --sig-overlay: rgba(11, 11, 13, 0.45);
+  --sig-chart-1: #6D3BFF;
+  --sig-chart-2: #2563EB;
+  --sig-chart-3: #2E7D32;
+  --sig-chart-4: #B26A00;
+  --sig-chart-5: #C8362B;
+  --sig-chart-6: #0E7490;
+
+  background: var(--sig-bg);
+  color: var(--sig-fg);
+  font-family: "Inter", "Noto Sans SC", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.dark .sig-root {
+  --sig-bg: #08080A;
+  --sig-fg: #F4F4F2;
+  --sig-dim: #8E8E96;
+  --sig-faint: #5C5C64;
+  --sig-line: rgba(255, 255, 255, 0.10);
+  --sig-line-2: rgba(255, 255, 255, 0.22);
+  --sig-accent: #8B6CFF;
+  --sig-accent-fg: #0A0A0B;
+  --sig-surface: #111114;
+  --sig-danger: #FF6B5E;
+  --sig-success: #6BBF6E;
+  --sig-warning: #E0A030;
+  --sig-info: #6B9BFF;
+  --sig-surface-2: #17171B;
+  --sig-overlay: rgba(0, 0, 0, 0.6);
+  --sig-chart-1: #8B6CFF;
+  --sig-chart-2: #6B9BFF;
+  --sig-chart-3: #6BBF6E;
+  --sig-chart-4: #E0A030;
+  --sig-chart-5: #FF6B5E;
+  --sig-chart-6: #4BB8C9;
+}
+
+/* Scope links so the global teal-link rule doesn't bleed in */
+.sig-root a { color: inherit; text-decoration: none; }
+
+/* Blueprint grid — static, structural, edge-faded */
+.sig-grid {
+  background-image:
+    linear-gradient(to right, var(--sig-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--sig-line) 1px, transparent 1px);
+  background-size: 72px 72px;
+  -webkit-mask-image: radial-gradient(ellipse 110% 90% at 50% 0%, #000 45%, transparent 100%);
+  mask-image: radial-gradient(ellipse 110% 90% at 50% 0%, #000 45%, transparent 100%);
+}
+
+/* Monospace markers / kickers */
+.sig-mono { font-family: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace; }
+.sig-kicker {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.24em;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--sig-dim);
+}
+.sig-num {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* Oversized tight editorial display */
+.sig-display {
+  font-family: "Inter", "Noto Sans SC", sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 0.96;
+}
+.sig-accent-c { color: var(--sig-accent); }
+.sig-stroke {
+  color: transparent;
+  -webkit-text-stroke: 1.2px var(--sig-fg);
+}
+.dark .sig-stroke { -webkit-text-stroke-color: var(--sig-fg); }
+
+/* Hairline divider */
+.sig-hr { height: 1px; background: var(--sig-line); border: none; width: 100%; }
+.sig-vr { width: 1px; background: var(--sig-line); align-self: stretch; }
+
+/* Sharp CTA — inverts/lifts on hover, no glow */
+.sig-cta {
+  display: inline-flex; align-items: center; gap: 0.6rem;
+  background: var(--sig-accent); color: var(--sig-accent-fg);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  text-transform: uppercase; letter-spacing: 0.14em; font-size: 12.5px; font-weight: 600;
+  padding: 1rem 1.5rem; border-radius: 4px; border: 1px solid var(--sig-accent);
+  transition: transform 0.18s cubic-bezier(0.2,0,0,1), box-shadow 0.18s, background 0.18s;
+}
+.sig-cta:hover { transform: translateY(-2px); box-shadow: 4px 4px 0 0 var(--sig-fg); }
+.sig-cta:active { transform: translateY(0); box-shadow: 0 0 0 0 var(--sig-fg); }
+.sig-cta svg { transition: transform 0.2s ease; }
+.sig-cta:hover svg { transform: translateX(3px); }
+
+.sig-cta-ghost {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  text-transform: uppercase; letter-spacing: 0.14em; font-size: 12.5px; font-weight: 500;
+  padding: 1rem 1.25rem; border-radius: 4px;
+  border: 1px solid var(--sig-line-2); color: var(--sig-fg);
+  transition: border-color 0.18s, background 0.18s;
+}
+.sig-cta-ghost:hover { border-color: var(--sig-fg); background: color-mix(in srgb, var(--sig-fg) 4%, transparent); }
+
+/* Nav link — animated underline */
+.sig-navlink { position: relative; color: var(--sig-dim); transition: color 0.18s; }
+.sig-navlink:hover { color: var(--sig-fg); }
+.sig-navlink::after {
+  content: ""; position: absolute; left: 0; bottom: -3px; height: 1px; width: 100%;
+  background: var(--sig-accent); transform: scaleX(0); transform-origin: left; transition: transform 0.25s cubic-bezier(0.2,0,0,1);
+}
+.sig-navlink:hover::after { transform: scaleX(1); }
+
+/* Capability row — index-list hover */
+.sig-row {
+  position: relative;
+  transition: background 0.2s ease, padding-left 0.25s cubic-bezier(0.2,0,0,1);
+}
+.sig-row::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: var(--sig-accent); transform: scaleY(0); transform-origin: top; transition: transform 0.25s cubic-bezier(0.2,0,0,1);
+}
+.sig-row:hover { background: color-mix(in srgb, var(--sig-fg) 3%, transparent); padding-left: 1.25rem; }
+.sig-row:hover::before { transform: scaleY(1); }
+.sig-row:hover .sig-row-num { color: var(--sig-accent); }
+.sig-row-num { transition: color 0.2s ease; }
+
+/* Signature inputs (login) — boxed, sharp, focus ring is a single line */
+.sig-field {
+  width: 100%; background: transparent; color: var(--sig-fg);
+  border: 1px solid var(--sig-line-2); border-radius: 4px;
+  padding: 0.85rem 0.95rem; font-size: 15px; font-family: inherit;
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.sig-field::placeholder { color: var(--sig-faint); }
+.sig-field:focus { outline: none; border-color: var(--sig-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--sig-accent) 18%, transparent); }
+
+/* 原生 <select> 展开的 option 列表由浏览器/系统渲染，暗色页面下默认白底、看不清。
+   color-scheme: dark 在个别浏览器对 <select> 弹层不生效，故再显式给 option 上暗色；
+   这里用具体色值而非 var()——原生弹层未必解析继承来的自定义属性。 */
+.dark select { color-scheme: dark; }
+.dark select option,
+.dark select optgroup {
+  background-color: #1c1a22;
+  color: #e6e0e9;
+}
+.sig-card { background: var(--sig-surface); border: 1px solid var(--sig-line); border-radius: 8px; }
+
+/* Line-mask reveal — the one signature entrance */
+.sig-linemask { display: block; overflow: hidden; padding-bottom: 0.04em; }
+.sig-linemask > span { display: block; transform: translateY(110%); animation: sig-line-up 0.85s cubic-bezier(0.16,1,0.3,1) forwards; }
+@keyframes sig-line-up { to { transform: translateY(0); } }
+
+.sig-rise { opacity: 0; animation: sig-rise 0.6s cubic-bezier(0.2,0,0,1) forwards; }
+@keyframes sig-rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Mono marquee ticker */
+.sig-ticker { display: flex; overflow: hidden; white-space: nowrap; }
+.sig-ticker-track { display: inline-flex; align-items: center; gap: 2.5rem; padding-right: 2.5rem; animation: sig-marquee 38s linear infinite; }
+@keyframes sig-marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.sig-ticker:hover .sig-ticker-track { animation-play-state: paused; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sig-linemask > span, .sig-rise { animation: none !important; opacity: 1 !important; transform: none !important; }
+  .sig-ticker-track { animation: none !important; }
+}
+
+.sig-iconbtn {
+  width: 36px; height: 36px; display: grid; place-items: center;
+  border: 1px solid var(--sig-line-2); border-radius: 4px; color: var(--sig-fg);
+  transition: border-color 0.18s, background 0.18s;
+}
+.sig-iconbtn:hover { border-color: var(--sig-fg); background: color-mix(in srgb, var(--sig-fg) 4%, transparent); }
+
+/* ═══════════════════════════════════════════════════════════
+   sig 语义兜底 — 登录后页面包在 .sig-root 内时，把 aurora/glass 系统的
+   语义 token 重映射到 sig 调色板。Tailwind 工具类（bg-bg/text-text/
+   bg-card/border-border/text-dim…）运行时解析这些变量，因此凡是沿用工具
+   类的地方自动呈现 sig 配色 —— 逐页重写过渡期的颜色兜底。仅覆盖颜色/圆角；
+   结构（写死的 rounded-2xl/3xl、glass blur、渐变）由基元 + 逐页重写处理。
+   一次声明即可适配亮/暗：var(--sig-*) 在 .dark .sig-root 上下文解析为暗值。
+   ═══════════════════════════════════════════════════════════ */
+.sig-root {
+  /* 基础面与前景 */
+  --background: var(--sig-bg);
+  --foreground: var(--sig-fg);
+  --card: var(--sig-surface);
+  --card-foreground: var(--sig-fg);
+  --popover: var(--sig-surface);
+  --popover-foreground: var(--sig-fg);
+  --surface-container: var(--sig-surface-2);
+  --surface-container-low: var(--sig-bg);
+  --surface-container-high: var(--sig-surface);
+  /* 强调 / 主色（单一电光紫） */
+  --primary: var(--sig-accent);
+  --primary-hover: color-mix(in srgb, var(--sig-accent) 82%, var(--sig-fg));
+  --primary-foreground: var(--sig-accent-fg);
+  --accent: var(--sig-accent);
+  --accent-foreground: var(--sig-accent-fg);
+  --ai-glow: var(--sig-accent);
+  --ring: var(--sig-accent);
+  /* 中性二级 / 静音 */
+  --secondary: color-mix(in srgb, var(--sig-fg) 6%, transparent);
+  --secondary-foreground: var(--sig-fg);
+  --muted: color-mix(in srgb, var(--sig-fg) 6%, transparent);
+  --muted-foreground: var(--sig-dim);
+  --tertiary: var(--sig-accent);
+  --tertiary-foreground: var(--sig-accent-fg);
+  /* 边框 / 输入 */
+  --border: var(--sig-line);
+  --input: transparent;
+  --input-background: transparent;
+  /* 侧栏 */
+  --sidebar: var(--sig-bg);
+  --sidebar-foreground: var(--sig-fg);
+  --sidebar-primary: var(--sig-accent);
+  --sidebar-accent: color-mix(in srgb, var(--sig-fg) 5%, transparent);
+  --sidebar-border: var(--sig-line);
+  /* 状态色（--green/--red 别名引用 --success/--destructive，自动跟随） */
+  --success: var(--sig-success);
+  --warning: var(--sig-warning);
+  --info: var(--sig-info);
+  --destructive: var(--sig-danger);
+  --destructive-foreground: #fff;
+  --teal: var(--sig-info);
+  /* 圆角：压成 sig 小角（仅影响走 --radius 的工具类；rounded-2xl/3xl 仍需重写） */
+  --radius: 0.375rem;
+  /* 去除发光 / 玻璃 / 彩虹 残留 */
+  --glow-primary: transparent;
+  --glow-accent: transparent;
+  --tech-glow: transparent;
+  --card-highlight: transparent;
+  --grid-line: var(--sig-line);
+  --noise-opacity: 0;
+  --glass-bg: var(--sig-surface);
+  --glass-border: var(--sig-line);
+  --aurora-1: var(--sig-accent);
+  --aurora-2: var(--sig-accent);
+  --aurora-3: var(--sig-accent);
+  --gradient-primary: var(--sig-accent);
+  --gradient-accent: var(--sig-accent);
+  --gradient-warm: var(--sig-accent);
+  --gradient-success: var(--sig-success);
+  /* Markdown：强调色归一到 sig accent（代码块保持深底高对比，不覆盖 --md-pre-*） */
+  --md-inline-code-color: var(--sig-accent);
+  --md-inline-code-bg: color-mix(in srgb, var(--sig-accent) 10%, transparent);
+  --md-inline-code-border: color-mix(in srgb, var(--sig-accent) 22%, transparent);
+  --md-h1-color: var(--sig-fg);
+  --md-h2-color: var(--sig-accent);
+  --md-h2-border: var(--sig-line);
+  --md-h3-color: var(--sig-dim);
+  --md-h4-color: var(--sig-faint);
+  --md-strong-color: var(--sig-fg);
+  --md-em-color: var(--sig-accent);
+  --md-blockquote-border: var(--sig-accent);
+  --md-blockquote-bg: color-mix(in srgb, var(--sig-accent) 6%, transparent);
+  --md-blockquote-color: var(--sig-dim);
+  --md-bullet-color: var(--sig-accent);
+  --md-hr-color: var(--sig-line);
+  --md-table-head-bg: color-mix(in srgb, var(--sig-fg) 5%, transparent);
+  --md-table-row-alt-bg: color-mix(in srgb, var(--sig-fg) 3%, transparent);
+  --md-table-border: var(--sig-line);
+}
+
+/* ── sig 登录后组件套件（逐页重写复用的积木） ─────────────────── */
+
+/* 通用按钮：直角、线框/实心，克制 hover，不强制 mono/uppercase（中文友好） */
+.sig-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+  border-radius: 4px; font-weight: 500; font-size: 13.5px; line-height: 1;
+  border: 1px solid var(--sig-line-2); color: var(--sig-fg); background: transparent;
+  padding: 0.55rem 0.95rem; white-space: nowrap;
+  transition: transform 0.16s cubic-bezier(0.2,0,0,1), box-shadow 0.16s, border-color 0.16s, background 0.16s, color 0.16s, opacity 0.16s;
+}
+.sig-btn:hover { border-color: var(--sig-fg); background: color-mix(in srgb, var(--sig-fg) 5%, transparent); }
+.sig-btn:active { transform: translateY(1px); }
+.sig-btn:disabled { opacity: 0.45; pointer-events: none; }
+.sig-btn svg { flex-shrink: 0; }
+.sig-btn-accent { background: var(--sig-accent); color: var(--sig-accent-fg); border-color: var(--sig-accent); }
+.sig-btn-accent:hover { background: var(--sig-accent); border-color: var(--sig-accent); transform: translateY(-1px); box-shadow: 3px 3px 0 0 var(--sig-fg); }
+.sig-btn-danger { color: var(--sig-danger); border-color: color-mix(in srgb, var(--sig-danger) 45%, transparent); }
+.sig-btn-danger:hover { border-color: var(--sig-danger); background: color-mix(in srgb, var(--sig-danger) 8%, transparent); }
+.sig-btn-ghost { border-color: transparent; color: var(--sig-dim); }
+.sig-btn-ghost:hover { border-color: transparent; color: var(--sig-fg); background: color-mix(in srgb, var(--sig-fg) 5%, transparent); }
+
+/* 卡片克制 hover（位移，无发光） */
+.sig-card-hover { transition: transform 0.18s cubic-bezier(0.2,0,0,1), border-color 0.18s; }
+.sig-card-hover:hover { transform: translateY(-2px); border-color: var(--sig-line-2); }
+.sig-hover-lift { transition: transform 0.18s cubic-bezier(0.2,0,0,1); }
+.sig-hover-lift:hover { transform: translateY(-2px); }
+
+/* 直角徽章 + 状态变体（中文友好，无 mono 强制） */
+.sig-badge {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-size: 11px; font-weight: 600; line-height: 1; white-space: nowrap;
+  padding: 0.2rem 0.5rem; border-radius: 3px;
+  border: 1px solid var(--sig-line-2); color: var(--sig-dim); background: transparent;
+}
+.sig-badge-accent  { color: var(--sig-accent);  border-color: color-mix(in srgb, var(--sig-accent) 40%, transparent);  background: color-mix(in srgb, var(--sig-accent) 9%, transparent); }
+.sig-badge-success { color: var(--sig-success); border-color: color-mix(in srgb, var(--sig-success) 42%, transparent); background: color-mix(in srgb, var(--sig-success) 10%, transparent); }
+.sig-badge-warning { color: var(--sig-warning); border-color: color-mix(in srgb, var(--sig-warning) 42%, transparent); background: color-mix(in srgb, var(--sig-warning) 10%, transparent); }
+.sig-badge-info    { color: var(--sig-info);    border-color: color-mix(in srgb, var(--sig-info) 42%, transparent);    background: color-mix(in srgb, var(--sig-info) 10%, transparent); }
+.sig-badge-danger  { color: var(--sig-danger);  border-color: color-mix(in srgb, var(--sig-danger) 42%, transparent);  background: color-mix(in srgb, var(--sig-danger) 10%, transparent); }
+
+/* 多行输入（沿用 sig-field 视觉） */
+.sig-textarea {
+  width: 100%; background: transparent; color: var(--sig-fg);
+  border: 1px solid var(--sig-line-2); border-radius: 4px;
+  padding: 0.75rem 0.95rem; font-size: 14px; font-family: inherit; line-height: 1.6;
+  transition: border-color 0.18s, box-shadow 0.18s; resize: vertical;
+}
+.sig-textarea::placeholder { color: var(--sig-faint); }
+.sig-textarea:focus { outline: none; border-color: var(--sig-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--sig-accent) 18%, transparent); }
+
+/* 侧栏导航项 + active 直角指示（左 2px accent 线） */
+.sig-navitem {
+  position: relative; display: flex; align-items: center; gap: 0.7rem;
+  width: 100%; padding: 0.6rem 0.85rem; border-radius: 4px;
+  font-size: 13px; font-weight: 500; color: var(--sig-dim); text-align: left;
+  transition: color 0.18s, background 0.18s;
+}
+.sig-navitem:hover { color: var(--sig-fg); background: color-mix(in srgb, var(--sig-fg) 4%, transparent); }
+.sig-navitem-active { color: var(--sig-fg); background: color-mix(in srgb, var(--sig-fg) 6%, transparent); }
+.sig-navitem-active::before {
+  content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  width: 2px; height: 62%; background: var(--sig-accent);
+}
+
+/* 骨架屏（克制脉冲，无彩虹） */
+.sig-skeleton { background: color-mix(in srgb, var(--sig-fg) 8%, transparent); border-radius: 4px; animation: sig-skeleton-pulse 1.5s ease-in-out infinite; }
+@keyframes sig-skeleton-pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+/* 工具提示 */
+.sig-tooltip { background: var(--sig-fg); color: var(--sig-bg); border-radius: 4px; font-size: 12px; font-weight: 500; padding: 0.35rem 0.6rem; }
+
+/* 功能性进度条（流式渲染等保留，直角 sig 风） */
+.sig-progress { height: 6px; width: 100%; background: var(--sig-line); border-radius: 0; overflow: hidden; }
+.sig-progress-fill { height: 100%; background: var(--sig-accent); transition: width 0.3s ease; }
+
+/* 统计数字（等宽，与 sig-num 同族） */
+.sig-stat { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; font-weight: 700; line-height: 1; letter-spacing: -0.01em; }

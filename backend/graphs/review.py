@@ -12,16 +12,19 @@ from backend.models import InterviewMode
 _logger = logging.getLogger("uvicorn")
 
 
-def generate_review(
+def _build_review_messages(
     mode: InterviewMode,
     messages: list,
     scores: list[dict] | None = None,
     weak_points: list[str] | None = None,
     topic: str | None = None,
     eval_history: list[dict] | None = None,
-) -> str:
-    """Generate a structured review report from interview transcript."""
+) -> list:
+    """Assemble the LLM messages for a review request.
 
+    Shared by the sync (``generate_review``) and streaming (``stream_generate_review``)
+    paths so the transcript + extra-context construction lives in one place.
+    """
     # Build transcript from messages
     transcript_lines = []
     for msg in messages:
@@ -65,12 +68,26 @@ def generate_review(
         extra_context=extra,
     )
 
-    llm = get_langchain_llm()
-    response = llm.invoke([
+    return [
         SystemMessage(content=prompt),
         HumanMessage(content="请生成复盘报告。"),
-    ])
+    ]
 
+
+def generate_review(
+    mode: InterviewMode,
+    messages: list,
+    scores: list[dict] | None = None,
+    weak_points: list[str] | None = None,
+    topic: str | None = None,
+    eval_history: list[dict] | None = None,
+) -> str:
+    """Generate a structured review report from interview transcript."""
+    lc_messages = _build_review_messages(
+        mode, messages, scores, weak_points, topic, eval_history,
+    )
+    llm = get_langchain_llm()
+    response = llm.invoke(lc_messages)
     return response.content
 
 
@@ -83,51 +100,11 @@ async def stream_generate_review(
     eval_history: list[dict] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream SSE heartbeats while generating review, yield final review text."""
-    transcript_lines = []
-    for msg in messages:
-        if isinstance(msg, HumanMessage):
-            transcript_lines.append(f"**候选人**: {msg.content}")
-        elif isinstance(msg, AIMessage):
-            transcript_lines.append(f"**面试官**: {msg.content}")
-    transcript = "\n\n".join(transcript_lines)
-
-    extra = ""
-    if mode == InterviewMode.TOPIC_DRILL:
-        if scores:
-            score_summary = "\n".join(
-                f"- Q: {s.get('question', '?')} → {s.get('score', '?')}/10 ({s.get('assessment', '')})"
-                for s in scores
-            )
-            extra += f"\n## 各题评分记录\n{score_summary}\n"
-        if weak_points:
-            extra += f"\n## 已识别的薄弱点\n{', '.join(weak_points)}\n"
-        if topic:
-            extra += f"\n## 训练领域: {topic}\n"
-
-    if mode == InterviewMode.RESUME and eval_history:
-        eval_lines = []
-        for e in eval_history:
-            score = e.get("score", "?")
-            brief = e.get("brief", "")
-            phase = e.get("phase", "")
-            eval_lines.append(f"- [{phase}] {score}/10 — {brief}")
-        scored = [e["score"] for e in eval_history if isinstance(e.get("score"), (int, float))]
-        avg = round(sum(scored) / len(scored), 1) if scored else None
-        extra += f"\n## 面试过程评分记录\n" + "\n".join(eval_lines) + "\n"
-        if avg:
-            extra += f"\n平均分: {avg}/10\n"
-
-    prompt = REVIEW_SYSTEM.format(
-        mode=mode.value,
-        transcript=transcript,
-        extra_context=extra,
+    lc_messages = _build_review_messages(
+        mode, messages, scores, weak_points, topic, eval_history,
     )
 
     llm = get_langchain_llm()
-    lc_messages = [
-        SystemMessage(content=prompt),
-        HumanMessage(content="请生成复盘报告。"),
-    ]
 
     review_text = ""
     chars_since_heartbeat = 0

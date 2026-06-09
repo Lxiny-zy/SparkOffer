@@ -1,4 +1,4 @@
-export type ReasoningEffort = "" | "minimal" | "low" | "medium" | "high";
+export type ReasoningEffort = "" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type ChannelTier = "small" | "large";
 
 export interface LLMChannel {
@@ -9,6 +9,8 @@ export interface LLMChannel {
   model: string;
   temperature: number;
   reasoning_effort?: ReasoningEffort;
+  max_tokens?: number;
+  timeout?: number;
   tier?: ChannelTier;
   priority: number;
   enabled: boolean;
@@ -39,6 +41,17 @@ export interface ASRChannel {
   proxy?: string;
 }
 
+export interface RerankerChannel {
+  id: string;
+  name: string;
+  api_base: string;
+  keys: string[];
+  api_model: string;
+  priority: number;
+  enabled: boolean;
+  proxy?: string;
+}
+
 export interface ChannelHealth {
   id: string;
   name: string;
@@ -57,4 +70,5 @@ export interface AllChannelsResponse {
   llm: SectionChannels<LLMChannel>;
   embedding: SectionChannels<EmbeddingChannel>;
   asr: SectionChannels<ASRChannel>;
+  reranker: SectionChannels<RerankerChannel>;
 }

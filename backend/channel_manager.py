@@ -47,8 +47,12 @@ class ChannelState:
         if self.healthy:
             return True
         if time.time() >= self.cooldown_until:
+            # HALF_OPEN probe: selectable again, but one error short of re-tripping.
+            # mark_success() clears it on a real success; a single mark_error()
+            # pushes error_count back to MAX and re-cools immediately — so the
+            # channel is never fully trusted until it actually succeeds once.
             self.healthy = True
-            self.error_count = 0
+            self.error_count = MAX_ERRORS_BEFORE_COOLDOWN - 1
             return True
         return False
 
@@ -152,13 +156,17 @@ class ChannelManager:
             channels = self._channels.get(section, [])
             states = self._states.get(section, {})
             result = []
+            now = time.time()
             for ch in channels:
                 cid = ch["id"]
                 state = states.get(cid)
+                # Pure read: don't call is_available() here — it revives a
+                # cooled-down channel as a side effect. Compute availability inline.
+                available = (state.healthy or now >= state.cooldown_until) if state else True
                 result.append({
                     "id": cid,
                     "name": ch.get("name", ""),
-                    "healthy": state.is_available() if state else True,
+                    "healthy": available,
                     "error_count": state.error_count if state else 0,
                     "cooldown_until": state.cooldown_until if state and not state.healthy else None,
                     "current_key_index": state.current_key_index if state else 0,

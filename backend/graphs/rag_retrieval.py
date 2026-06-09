@@ -21,9 +21,9 @@ from typing import Iterable
 
 import numpy as np
 
-from backend.indexer import safe_retrieve_topic_context
+from backend.indexer import safe_retrieve_topic_context, safe_retrieve_topic_context_with_scores, ChunkWithMeta
 from backend.redis_cache import get_cache
-from backend.vector_memory import _cosine_similarity
+from backend.vector_store.base import _cosine_similarity
 
 logger = logging.getLogger("uvicorn")
 
@@ -32,6 +32,13 @@ SIMILARITY_THRESHOLD = 0.85   # cosine — > this means "the same chunk paraphra
 RRF_K = 60                    # standard RRF smoothing constant
 PER_QUERY_TOP_K = 5
 FINAL_TOP_N = 10              # post-fusion, pre-context-cap
+
+# Concurrency cap for embedding requests. The retrieval fan-out and the dedup
+# phase both hit the SAME embedding key, so they share this bound: 5 simultaneous
+# requests tripped DashScope's per-key concurrency, making every request stall to
+# its full timeout. 2 stays under the throttle while still ~2.5× faster than
+# serial. The two phases run sequentially, so the effective bound is never doubled.
+_EMBED_CONCURRENCY = 2
 
 
 @dataclass
@@ -43,6 +50,8 @@ class RetrievalStats:
     final_chunks: int
     embed_cache_hits: int
     embed_cache_misses: int
+    reranker_status: str = "off"   # "applied" | "degraded" | "off"
+    rag_metrics: dict | None = None  # serialized RetrievalMetrics from rag_metrics.py
 
 
 async def retrieve_for_drill(
@@ -53,7 +62,7 @@ async def retrieve_for_drill(
     *,
     per_query_top_k: int = PER_QUERY_TOP_K,
     final_top_n: int = FINAL_TOP_N,
-    timeout: float = 90.0,
+    timeout: float = 45.0,
 ) -> tuple[list[str], RetrievalStats]:
     """Run the Phase 3 retrieval pipeline.
 
@@ -72,23 +81,13 @@ async def retrieve_for_drill(
     if not queries:
         queries.append(fallback_query)
     elif len(queries) < 3:
-        # Always include the fallback so we don't over-fit to weak_points
-        # when the user has only 1-2 logged.
         queries.append(fallback_query)
 
-    # Fan out — LlamaIndex retrieval is sync, but safe_retrieve_topic_context
-    # already wraps it in asyncio.to_thread + timeout.
-    # Use return_exceptions so a single timeout/error doesn't void the whole
-    # batch — we still want partial RAG context.
-    # Semaphore caps concurrent embedding requests: 5 simultaneous queries
-    # tripped DashScope's per-key concurrency, making every query hit the
-    # full retrieval timeout. 2 concurrent stays under the throttle while
-    # still ~2.5× faster than serial.
-    sem = asyncio.Semaphore(2)
+    sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
 
     async def _bounded(query: str):
         async with sem:
-            return await safe_retrieve_topic_context(
+            return await safe_retrieve_topic_context_with_scores(
                 topic, query, user_id, top_k=per_query_top_k, timeout=timeout
             )
 
@@ -97,22 +96,66 @@ async def retrieve_for_drill(
         return_exceptions=True,
     )
 
-    per_query_results: list[list[str]] = []
+    per_query_chunks: list[list[ChunkWithMeta]] = []
+    per_query_texts: list[list[str]] = []
     for q, r in zip(queries, raw_results):
         if isinstance(r, Exception):
             logger.warning("RAG sub-query %r failed: %s", q[:60], r)
-            per_query_results.append([])
+            per_query_chunks.append([])
+            per_query_texts.append([])
         else:
-            per_query_results.append(r)
+            per_query_chunks.append(r)
+            per_query_texts.append([c.content for c in r])
 
-    raw_count = sum(len(r) for r in per_query_results)
-    fused_ranked = _reciprocal_rank_fusion(per_query_results, k=RRF_K)
+    raw_count = sum(len(r) for r in per_query_texts)
+
+    # RRF fusion on text content; build a lookup for metadata
+    chunk_meta_map: dict[str, ChunkWithMeta] = {}
+    for chunk_list in per_query_chunks:
+        for cm in chunk_list:
+            if cm.content not in chunk_meta_map:
+                chunk_meta_map[cm.content] = cm
+
+    fused_ranked = _reciprocal_rank_fusion(per_query_texts, k=RRF_K)
     chunks_post_fusion = [c for c, _score in fused_ranked]
 
-    # Semantic dedup using cached embeddings.
-    deduped, hits, misses = await _semantic_dedup(chunks_post_fusion)
+    # Semantic dedup — now also returns embeddings for metrics computation.
+    deduped, hits, misses, dedup_embeddings = await _semantic_dedup(chunks_post_fusion)
 
-    final = deduped[:final_top_n]
+    rerank_query = " ".join(weak_points[:5]).strip() or fallback_query
+    reranked, reranker_status = await _rerank_if_available(rerank_query, deduped)
+
+    final = reranked[:final_top_n]
+
+    # Build aligned metadata and embeddings for final chunks
+    final_sources: list[str] = []
+    final_embeddings: list = []
+    dedup_emb_map = {text: emb for text, emb in zip(deduped, dedup_embeddings)}
+    for chunk_text in final:
+        cm = chunk_meta_map.get(chunk_text)
+        src = f"{cm.source_file}" if cm else ""
+        if cm and cm.header_path:
+            src = f"{src} > {cm.header_path}" if src else cm.header_path
+        final_sources.append(src)
+        final_embeddings.append(dedup_emb_map.get(chunk_text))
+
+    # Compute RAG retrieval quality metrics (embedding-only, zero LLM cost).
+    # compute_retrieval_metrics returns None when it can't measure (degraded
+    # embeddings, dim mismatch) — keep rag_metrics None in that case so we don't
+    # persist a fake all-zeros record that looks like collapsed retrieval.
+    rag_metrics_dict = None
+    try:
+        from backend.rag_metrics import compute_retrieval_metrics
+        metrics = await compute_retrieval_metrics(
+            query_texts=queries,
+            chunks=final,
+            chunk_embeddings=final_embeddings,
+            chunk_sources=final_sources,
+        )
+        rag_metrics_dict = metrics.to_dict() if metrics is not None else None
+    except Exception as exc:
+        logger.warning("RAG metrics computation failed: %s", exc)
+
     stats = RetrievalStats(
         queries=len(queries),
         raw_chunks=raw_count,
@@ -120,6 +163,8 @@ async def retrieve_for_drill(
         final_chunks=len(final),
         embed_cache_hits=hits,
         embed_cache_misses=misses,
+        reranker_status=reranker_status,
+        rag_metrics=rag_metrics_dict,
     )
     return final, stats
 
@@ -140,36 +185,37 @@ def _reciprocal_rank_fusion(rankings: Iterable[list[str]], k: int = RRF_K) -> li
 
 # ── Semantic dedup ──
 
-async def _semantic_dedup(chunks: list[str]) -> tuple[list[str], int, int]:
+async def _semantic_dedup(chunks: list[str]) -> tuple[list[str], int, int, list]:
     """Drop chunks whose cosine to a kept chunk ≥ SIMILARITY_THRESHOLD.
 
-    Returns (kept_chunks, cache_hits, cache_misses).
+    Returns (kept_chunks, cache_hits, cache_misses, kept_embeddings).
     """
     if not chunks:
-        return [], 0, 0
+        return [], 0, 0, []
 
     embeddings, hits, misses = await _embed_many(chunks)
-    # Some embeddings may have failed (None) — keep those chunks but don't
-    # let them participate in the cosine check; they go through verbatim.
     kept: list[str] = []
-    kept_matrix_rows: list[np.ndarray] = []
+    kept_embs: list = []
+    kept_matrix: np.ndarray | None = None
 
     for chunk, emb in zip(chunks, embeddings):
         if emb is None:
             kept.append(chunk)
+            kept_embs.append(None)
             continue
-        if not kept_matrix_rows:
+        if kept_matrix is None:
             kept.append(chunk)
-            kept_matrix_rows.append(emb)
+            kept_embs.append(emb)
+            kept_matrix = emb[np.newaxis, :]
             continue
-        matrix = np.stack(kept_matrix_rows)
-        sims = _cosine_similarity(emb, matrix)
+        sims = _cosine_similarity(emb, kept_matrix)
         if float(np.max(sims)) >= SIMILARITY_THRESHOLD:
-            continue   # near-duplicate; skip
+            continue
         kept.append(chunk)
-        kept_matrix_rows.append(emb)
+        kept_embs.append(emb)
+        kept_matrix = np.vstack((kept_matrix, emb))
 
-    return kept, hits, misses
+    return kept, hits, misses, kept_embs
 
 
 # ── Embedding with cache ──
@@ -181,23 +227,28 @@ async def _embed_many(texts: list[str]) -> tuple[list[np.ndarray | None], int, i
     Failures degrade to ``None`` for that slot — never raise.
     """
     cache = get_cache()
-    hits = 0
-    misses_to_compute: list[tuple[int, str]] = []
-    out: list[np.ndarray | None] = [None] * len(texts)
 
-    for idx, text in enumerate(texts):
-        cached = cache.get_embedding(text)
-        if cached is not None:
-            out[idx] = cached
-            hits += 1
-        else:
-            misses_to_compute.append((idx, text))
+    # Probe the cache for all texts in a single thread hop: keeps a slow Redis
+    # GET (socket_timeout up to 3s) off the event loop, and for the in-memory
+    # LRU it's one context switch instead of N synchronous calls.
+    def _probe_cache() -> tuple[list[np.ndarray | None], int, list[tuple[int, str]]]:
+        probed: list[np.ndarray | None] = [None] * len(texts)
+        hit = 0
+        miss: list[tuple[int, str]] = []
+        for idx, text in enumerate(texts):
+            cached = cache.get_embedding(text)
+            if cached is not None:
+                probed[idx] = cached
+                hit += 1
+            else:
+                miss.append((idx, text))
+        return probed, hit, miss
+
+    out, hits, misses_to_compute = await asyncio.to_thread(_probe_cache)
 
     if not misses_to_compute:
         return out, hits, 0
 
-    # Batch compute the misses. LlamaIndex's embed_model.get_text_embedding is
-    # sync — wrap in to_thread to avoid blocking the event loop.
     try:
         from backend.llm_provider import get_embedding
         embed_model = get_embedding()
@@ -205,18 +256,52 @@ async def _embed_many(texts: list[str]) -> tuple[list[np.ndarray | None], int, i
         logger.warning("RAG dedup: embedding backend unavailable (%s); skipping cosine dedup", exc)
         return out, hits, len(misses_to_compute)
 
+    # Cap concurrency to the same bound as the retrieval fan-out — both hit the
+    # SAME embedding key, and an unbounded gather (one task per miss, easily 20+
+    # on a cold cache) tripped the per-key throttle, stalling every request to
+    # its timeout and silently voiding dedup.
+    sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
+
+    def _embed_and_cache(text: str) -> np.ndarray:
+        # Both the sync LlamaIndex embed call and the cache write run in the
+        # worker thread, so neither blocks the event loop.
+        vec = embed_model.get_text_embedding(text)
+        arr = np.asarray(vec, dtype=np.float32)
+        cache.set_embedding(text, arr)
+        return arr
+
     async def _one(text: str) -> np.ndarray | None:
-        try:
-            vec = await asyncio.to_thread(embed_model.get_text_embedding, text)
-            arr = np.asarray(vec, dtype=np.float32)
-            cache.set_embedding(text, arr)
-            return arr
-        except Exception as exc:
-            logger.warning("RAG dedup: embed failed for text=%r... (%s)", text[:60], exc)
-            return None
+        async with sem:
+            try:
+                return await asyncio.to_thread(_embed_and_cache, text)
+            except Exception as exc:
+                logger.warning("RAG dedup: embed failed for text=%r... (%s)", text[:60], exc)
+                return None
 
     computed = await asyncio.gather(*[_one(text) for _, text in misses_to_compute])
     for (idx, _text), arr in zip(misses_to_compute, computed):
         out[idx] = arr
 
     return out, hits, len(misses_to_compute)
+
+
+# ── Reranker ──
+
+async def _rerank_if_available(query: str, chunks: list[str]) -> tuple[list[str], str]:
+    """Apply Cross-Encoder reranking if configured, otherwise pass through.
+
+    Returns (chunks, status): "applied" | "degraded" | "off" — surfaced in the
+    pipeline timeline so the user can see whether reranking actually ran.
+
+    rerank() already returns (chunks, "off") when no reranker is configured, so
+    we don't pre-check the config here — doing so would call get_channel() twice
+    and rotate the channel's key index an extra time on every drill.
+    """
+    if len(chunks) <= 1:
+        return chunks, "off"
+    try:
+        from backend.reranker import rerank
+        return await rerank(query, chunks, top_n=len(chunks))
+    except Exception as e:
+        logger.warning("Reranker unavailable, skipping: %s", e)
+        return chunks, "degraded"

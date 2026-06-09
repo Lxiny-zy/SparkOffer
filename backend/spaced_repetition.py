@@ -29,9 +29,13 @@ def sm2_update(sr_state: dict, score_0_10: float) -> dict:
         if reps == 0:
             interval = 1
         elif reps == 1:
+            # Deliberately more aggressive than SM-2's standard 6 days — interview
+            # prep wants the second review sooner.
             interval = 3
         else:
-            interval = int(sr_state.get("interval_days", 1) * ef)
+            # round() not int(): truncation systematically biased intervals down,
+            # which over-schedules reviews.
+            interval = round(sr_state.get("interval_days", 1) * ef)
         reps += 1
     else:  # Fail — reset
         interval = 1
@@ -114,8 +118,14 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
         if not (needle in wp_text or wp_text in needle):
             continue
 
-        sr = wp.get("sr", {})
-        wp["sr"] = sm2_update(sr, score)
+        prev_sr = wp.get("sr", {})
+        new_sr = sm2_update(prev_sr, score)
+        # Graduation requires 3 *consecutive* scores >= 7. SM-2's `repetitions`
+        # only counts passes at quality >= 3 (i.e. score >= 6), so relying on it
+        # graduated weak points on mediocre 6/10 performance. Track high scores
+        # explicitly: increment on >= 7, reset to 0 otherwise.
+        new_sr["consecutive_high"] = (prev_sr.get("consecutive_high", 0) + 1) if score >= 7 else 0
+        wp["sr"] = new_sr
 
         prev_mastery = wp.get("mastery")
         if prev_mastery is None:
@@ -124,7 +134,7 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
             wp["mastery"] = round(0.7 * float(prev_mastery) + 0.3 * contribution)
         wp["attempts"] = int(wp.get("attempts", 0)) + 1
 
-        if wp["sr"]["repetitions"] >= 3 and score >= 7:
+        if wp["sr"].get("consecutive_high", 0) >= 3:
             wp["improved"] = True
             wp["improved_at"] = datetime.now().isoformat()
             wp["improved_reason"] = "spaced_repetition_mastery"

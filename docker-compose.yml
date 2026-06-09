@@ -11,6 +11,18 @@ services:
       retries: 3
     restart: unless-stopped
 
+  qdrant:
+    image: qdrant/qdrant:latest        # 建议生产环境 pin 具体版本，如 :v1.12.0
+    ports:
+      - "6333:6333"                     # REST / HTTP API
+      - "6334:6334"                     # gRPC
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    restart: unless-stopped
+    # qdrant/qdrant 基于 distroless，无 shell/curl —— 无法配 exec healthcheck。
+    # backend 对 qdrant 是软依赖（连不上自动降级 numpy），故不设健康检查、
+    # 也不要求 backend 等它 healthy。
+
   backend:
     build:
       context: .
@@ -23,9 +35,15 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
+      # 向量后端默认 numpy；在 .env 设 VECTOR_BACKEND=qdrant + QDRANT_URL 启用。
+      - VECTOR_BACKEND=${VECTOR_BACKEND:-}
+      - QDRANT_URL=${QDRANT_URL:-}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
     depends_on:
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')"]
       interval: 30s

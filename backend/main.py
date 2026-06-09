@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.routers import (
     auth, settings_router, resume, interview, recording,
     profile, knowledge, job_prep, algorithm, favorites,
-    assistant, graph_router, qa_arena,
+    assistant, graph_router, qa_arena, rag_eval, debug,
 )
 
 logger = logging.getLogger("uvicorn")
@@ -36,6 +36,15 @@ async def lifespan(app: FastAPI):
             "Anyone can forge authentication tokens with the default secret."
         )
 
+    # Security check: warn if the default account password is unchanged
+    if settings.default_password == "legend":
+        logger.warning(
+            "⚠️  DEFAULT_PASSWORD is using the default value 'legend'! "
+            "The default account (%s) is loginable — set DEFAULT_PASSWORD in .env "
+            "for any non-local deployment.",
+            settings.default_email,
+        )
+
     emb_backend = get_effective("embedding", "backend") or settings.embedding_backend_mode()
     emb_model = get_effective("embedding", "api_model") or settings.active_embedding_target()
     logger.info("Initializing embedding backend=%s target=%s", emb_backend, emb_model)
@@ -61,11 +70,24 @@ async def lifespan(app: FastAPI):
     from backend.embedding_tasks import get_task_queue
     await get_task_queue().start()
 
+    # Pre-warm knowledge indices in the background. The first retrieval per topic
+    # otherwise pays a 12-27s cold start (synchronous index load / full rebuild +
+    # re-embedding). Fire-and-forget so startup isn't blocked; lazy-load still
+    # covers any topic that hasn't finished warming. Keep a reference so the task
+    # isn't garbage-collected mid-flight.
+    import asyncio
+    from backend.indexer import warmup_user_indices
+    app.state.warmup_task = asyncio.create_task(warmup_user_indices())
+
     logger.info("Startup complete.")
 
     yield
 
-    # Graceful shutdown: stop embedding task queue
+    # Graceful shutdown: cancel warmup if still running, then stop the task queue
+    warmup_task = getattr(app.state, "warmup_task", None)
+    if warmup_task is not None and not warmup_task.done():
+        warmup_task.cancel()
+
     from backend.embedding_tasks import get_task_queue as _get_tq
     await _get_tq().stop()
 
@@ -92,3 +114,5 @@ app.include_router(favorites.router)
 app.include_router(assistant.router)
 app.include_router(graph_router.router)
 app.include_router(qa_arena.router)
+app.include_router(rag_eval.router)
+app.include_router(debug.router)

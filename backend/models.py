@@ -31,6 +31,7 @@ class ResumeInterviewState(TypedDict, total=False):
     messages: Annotated[list, add_messages]
     phase: str           # InterviewPhase value
     resume_context: str
+    knowledge_context: str   # cached at init; reused every ask (query is fixed)
     questions_asked: list[str]
     phase_question_count: int
     is_finished: bool
@@ -194,6 +195,8 @@ class LLMChannelConfig(BaseModel):
     model: str
     temperature: float = 0.7
     reasoning_effort: str = ""
+    max_tokens: int = 16384  # 单次输出上限（OpenAI max_completion_tokens），非上下文窗口
+    timeout: int = 0  # read timeout 秒；0 = 用全局默认 _LLM_TIMEOUT（read 240s）
     tier: str = "large"  # "small" for cheap-fast eval, "large" for primary; default large for back-compat
     priority: int = 1
     enabled: bool = True
@@ -221,10 +224,21 @@ class ASRChannelConfig(BaseModel):
     enabled: bool = True
     proxy: str = ""
 
+class RerankerChannelConfig(BaseModel):
+    id: str = ""
+    name: str = "Default"
+    api_base: str = ""
+    keys: list[str] = Field(default_factory=list)
+    api_model: str = ""
+    priority: int = 1
+    enabled: bool = True
+    proxy: str = ""
+
 class ChannelsConfig(BaseModel):
     llm: list[LLMChannelConfig] = Field(default_factory=list)
     embedding: list[EmbeddingChannelConfig] = Field(default_factory=list)
     asr: list[ASRChannelConfig] = Field(default_factory=list)
+    reranker: list[RerankerChannelConfig] = Field(default_factory=list)
 
 class TestChannelRequest(BaseModel):
     section: str

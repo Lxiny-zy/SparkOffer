@@ -18,14 +18,15 @@ import { REASONING_EFFORT_HINT } from "@/lib/badge-presets";
 type ChannelData = Record<string, any>;
 
 interface ChannelManagerProps {
-  section: "llm" | "embedding" | "asr";
+  section: "llm" | "embedding" | "asr" | "reranker";
   onDirty?: (dirty: boolean) => void;
 }
 
 const SECTION_DEFAULTS: Record<string, () => ChannelData> = {
-  llm: () => ({ id: "", name: "", api_base: "", keys: [""], model: "", temperature: 0.7, reasoning_effort: "", tier: "large", priority: 1, enabled: true, proxy: "" }),
+  llm: () => ({ id: "", name: "", api_base: "", keys: [""], model: "", temperature: 0.7, reasoning_effort: "", max_tokens: 16384, timeout: 0, tier: "large", priority: 1, enabled: true, proxy: "" }),
   embedding: () => ({ id: "", name: "", backend: "api", api_base: "", keys: [""], api_model: "", local_model: "", local_path: "", priority: 1, enabled: true, proxy: "" }),
   asr: () => ({ id: "", name: "", keys: [""], model: "qwen3-asr-flash-filetrans", priority: 1, enabled: true, proxy: "" }),
+  reranker: () => ({ id: "", name: "", api_base: "", keys: [""], api_model: "", priority: 1, enabled: true, proxy: "" }),
 };
 
 function SecretInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
@@ -172,14 +173,16 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
         if (!cleaned.keys.length) cleaned.keys = undefined;
         return cleaned;
       });
-      const payload: any = { llm: [], embedding: [], asr: [] };
-      for (const sec of ["llm", "embedding", "asr"]) {
-        if (sec === section) {
-          payload[sec] = cleanChannels;
-        } else {
-          const raw = allData[sec]?.channels || [];
-          payload[sec] = raw;
-        }
+      const payload: any = {};
+      // Preserve every section the backend returned (incl. reranker) and only
+      // overwrite the one being edited. The previous hardcoded
+      // ["llm","embedding","asr"] list silently dropped reranker channels on
+      // every save, because the backend PUT overwrites omitted sections.
+      const sections = Object.keys(allData).length
+        ? Object.keys(allData)
+        : ["llm", "embedding", "asr", "reranker"];
+      for (const sec of sections) {
+        payload[sec] = sec === section ? cleanChannels : (allData[sec]?.channels || []);
       }
       await saveChannels(payload);
       toast.success("Channels saved");
@@ -232,7 +235,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
               {isOpen ? <ChevronDown size={14} className="text-dim" /> : <ChevronRight size={14} className="text-dim" />}
               <HealthDot health={health} />
               <span className="font-medium text-sm flex-1">{ch.name || `Channel ${idx + 1}`}</span>
-              {ch.model && <Badge variant="secondary" className="text-[10px]">{ch.model}</Badge>}
+              {(ch.model || ch.api_model) && <Badge variant="secondary" className="text-[10px]">{ch.model || ch.api_model}</Badge>}
               <Badge variant="outline" className="text-[10px]">P{ch.priority}</Badge>
               <span className="text-[10px] text-dim">{(ch.keys || []).length} key{(ch.keys || []).length !== 1 ? "s" : ""}</span>
             </div>
@@ -333,6 +336,11 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                         </p>
                       )}
                     </div>
+                  ) : section === "reranker" ? (
+                    <div>
+                      <Label className="text-xs">Model</Label>
+                      <Input value={ch.api_model || ""} onChange={(e) => updateChannel(idx, { api_model: e.target.value })} placeholder="Qwen3-Reranker-8B" className="h-8 text-sm" />
+                    </div>
                   ) : (
                     <div>
                       <Label className="text-xs">Model</Label>
@@ -346,6 +354,21 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                     </div>
                   )}
                 </div>
+
+                {section === "llm" && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label className="text-xs">Max Tokens</Label>
+                      <Input type="number" min={256} step={256} value={ch.max_tokens ?? 16384} onChange={(e) => updateChannel(idx, { max_tokens: parseInt(e.target.value) || 16384 })} className="h-8 text-sm" />
+                      <p className="text-[10px] text-dim mt-1">单次回复上限（非上下文窗口）；推理模型含思考 token，建议 ≥8192</p>
+                    </div>
+                    <div>
+                      <Label className="text-xs">Timeout (秒)</Label>
+                      <Input type="number" min={0} step={10} value={ch.timeout ?? 0} placeholder="默认 240" onChange={(e) => updateChannel(idx, { timeout: parseInt(e.target.value) || 0 })} className="h-8 text-sm" />
+                      <p className="text-[10px] text-dim mt-1">读取超时；0 = 默认 240s</p>
+                    </div>
+                  </div>
+                )}
 
                 {section === "llm" && (
                   <div>
@@ -368,6 +391,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                       <option value="low">Low — 浅度思考</option>
                       <option value="medium">Medium — 中度思考</option>
                       <option value="high">High — 深度思考</option>
+                      <option value="xhigh">XHigh — 极深思考</option>
                     </select>
                     <p className="text-[10px] text-dim mt-1">仅对支持 reasoning 的上游模型生效（如 gpt-5 / o-series / DeepSeek-R1）</p>
                   </div>

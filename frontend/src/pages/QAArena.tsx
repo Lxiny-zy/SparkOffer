@@ -1,10 +1,9 @@
 import { useState, useRef, useEffect, useCallback, memo, useMemo } from "react";
 import {
   Plus, Trash2, Send, Download, FileText, Loader2,
-  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square,
+  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square, RefreshCw, AlertCircle,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import { markdownComponents } from "../components/ChatBubble";
+import { Markdown } from "../components/ChatBubble";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,6 +14,7 @@ import {
   loadQAMessages,
   clearQAMessages,
   streamQAChat,
+  regenerateQAChat,
   generateQASummary,
   downloadMarkdown,
   type QASession,
@@ -58,8 +58,10 @@ export default function QAArena() {
   const [messages, setMessages] = useState<QAMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [summaryProgress, setSummaryProgress] = useState("");
+  const [summaryEffort, setSummaryEffort] = useState("");
   const [summaryResult, setSummaryResult] = useState<QASummaryResult | null>(null);
   const [showSummary, setShowSummary] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -97,12 +99,17 @@ export default function QAArena() {
     if (activeId) inputRef.current?.focus();
   }, [activeId]);
 
+  const switchReqRef = useRef<string | null>(null);
   const switchSession = useCallback(async (id: string) => {
+    switchReqRef.current = id;
     setActiveId(id);
     setSummaryResult(null);
     setShowSummary(false);
+    setStreamError(null);
     const msgs = await loadQAMessages(id);
-    setMessages(msgs);
+    // Guard against out-of-order responses: if the user switched again while this
+    // load was in flight, don't clobber the newer session's messages.
+    if (switchReqRef.current === id) setMessages(msgs);
   }, []);
 
   const handleNewSession = async () => {
@@ -112,6 +119,7 @@ export default function QAArena() {
     setMessages([]);
     setSummaryResult(null);
     setShowSummary(false);
+    setStreamError(null);
     inputRef.current?.focus();
   };
 
@@ -140,26 +148,20 @@ export default function QAArena() {
     setEditingId(null);
   };
 
-  const handleSend = async (overrideText?: string) => {
-    const text = (overrideText || input).trim();
-    if (!text || isStreaming || !activeId) return;
-
-    const userMsg: QAMessage = { role: "user", content: text, created_at: new Date().toISOString() };
-    setMessages((prev) => [...prev, userMsg]);
-    setInput("");
-    // Reset textarea height
-    if (inputRef.current) {
-      inputRef.current.style.height = "auto";
-    }
+  // Shared streaming consumer for both first-send and regenerate. `makeStream` receives
+  // the abort signal so handleStop can cancel the underlying fetch. Assumes the LAST
+  // message in state is the assistant placeholder to fill.
+  const consumeStream = useCallback(async (makeStream: (signal: AbortSignal) => AsyncGenerator<any>) => {
     setIsStreaming(true);
     isStreamingRef.current = true;
+    setStreamError(null);
 
     const controller = new AbortController();
     abortRef.current = controller;
 
     let assistantContent = "";
     let pendingUpdate = false;
-    setMessages((prev) => [...prev, { role: "assistant", content: "", created_at: "" }]);
+    let errMsg: string | null = null;
 
     const flushUpdate = () => {
       rafRef.current = null;
@@ -176,20 +178,25 @@ export default function QAArena() {
     };
 
     try {
-      for await (const event of streamQAChat(activeId, text, controller.signal)) {
+      for await (const event of makeStream(controller.signal)) {
         if (event.type === "token") {
           assistantContent += event.content;
           if (!pendingUpdate) {
             pendingUpdate = true;
             rafRef.current = requestAnimationFrame(flushUpdate);
           }
+        } else if (event.type === "error") {
+          // Backend surfaced an empty / interrupted completion. Keep whatever streamed
+          // (if anything) and show a retry hint instead of a silent blank bubble.
+          errMsg = event.message || "生成失败，请点击重新生成";
+          break;
         } else if (event.type === "done") {
           break;
         }
       }
     } catch (err: any) {
       if (err.name !== "AbortError") {
-        assistantContent += assistantContent ? "\n\n[出错了: " + err.message + "]" : `出错了: ${err.message}`;
+        errMsg = err.message || "网络异常，请点击重新生成";
       }
     } finally {
       // Cancel any pending RAF and do a final flush
@@ -205,8 +212,49 @@ export default function QAArena() {
       abortRef.current = null;
       isStreamingRef.current = false;
       setIsStreaming(false);
+      if (errMsg) setStreamError(errMsg);
       listQASessions().then((data) => setSessions(data.sessions));
     }
+  }, []);
+
+  const handleSend = async (overrideText?: string) => {
+    const text = (overrideText || input).trim();
+    if (!text || isStreaming || !activeId) return;
+    const sid = activeId;
+
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", content: text, created_at: new Date().toISOString() },
+      { role: "assistant", content: "", created_at: "" },
+    ]);
+    setInput("");
+    // Reset textarea height
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
+
+    await consumeStream((signal) => streamQAChat(sid, text, signal));
+  };
+
+  // Re-answer the last user question without re-typing it. Replaces the trailing
+  // assistant bubble (broken / partial / empty) with a freshly streamed answer.
+  const handleRegenerate = async () => {
+    if (!activeId || isStreaming || messages.length === 0) return;
+    const sid = activeId;
+
+    setMessages((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.role === "assistant") {
+        const updated = [...prev];
+        updated[updated.length - 1] = { role: "assistant", content: "", created_at: "" };
+        return updated;
+      }
+      // Last turn left no assistant reply (e.g. a prior empty completion) — add a slot.
+      return [...prev, { role: "assistant", content: "", created_at: "" }];
+    });
+
+    await consumeStream((signal) => regenerateQAChat(sid, signal));
   };
 
   const handleStop = () => {
@@ -219,6 +267,7 @@ export default function QAArena() {
     if (!activeId) return;
     await clearQAMessages(activeId);
     setMessages([]);
+    setStreamError(null);
   };
 
   const handleGenerateSummary = async () => {
@@ -226,7 +275,7 @@ export default function QAArena() {
     setIsSummarizing(true);
     setSummaryProgress("正在分析对话内容...");
     try {
-      const result = await generateQASummary(activeId, (msg) => setSummaryProgress(msg));
+      const result = await generateQASummary(activeId, (msg) => setSummaryProgress(msg), summaryEffort);
       setSummaryResult(result);
       setShowSummary(true);
     } catch (err: any) {
@@ -249,7 +298,7 @@ export default function QAArena() {
   if (!loaded) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <Loader2 className="w-6 h-6 animate-spin text-primary" />
+        <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--sig-accent)" }} />
       </div>
     );
   }
@@ -382,7 +431,7 @@ export default function QAArena() {
               </div>
             </div>
           </aside>
-          <div className="flex-1 bg-black/50 backdrop-blur-sm" onClick={() => setSidebarOpen(false)} />
+          <div className="flex-1 bg-black/50" style={{ background: "var(--sig-overlay)" }} onClick={() => setSidebarOpen(false)} />
         </div>
       )}
 
@@ -417,6 +466,20 @@ export default function QAArena() {
               >
                 <Eraser className="w-4 h-4" />
               </Button>
+              <select
+                className="h-8 shrink-0 rounded border bg-transparent px-2 text-xs transition-colors focus:outline-none focus:border-[color:var(--sig-accent)] hidden sm:inline-flex"
+                style={{ borderColor: "var(--sig-line-2)", color: "var(--sig-fg)" }}
+                value={summaryEffort}
+                onChange={(e) => setSummaryEffort(e.target.value)}
+                disabled={isStreaming || isSummarizing}
+                title="知识卡片思考强度：低档更快，高档更精炼（简单对话用低档即可）"
+              >
+                <option value="" style={{ color: "#000" }}>思考档·默认</option>
+                <option value="minimal" style={{ color: "#000" }}>minimal·最快</option>
+                <option value="low" style={{ color: "#000" }}>low·快</option>
+                <option value="medium" style={{ color: "#000" }}>medium·均衡</option>
+                <option value="high" style={{ color: "#000" }}>high·最精</option>
+              </select>
               <Button
                 variant="outline"
                 size="sm"
@@ -453,11 +516,29 @@ export default function QAArena() {
           ) : (
             <div className="max-w-3xl mx-auto space-y-6">
               {messages.map((m, i) => (
-                <ChatMessage key={i} role={m.role} content={m.content} />
+                <ChatMessage
+                  key={i}
+                  role={m.role}
+                  content={m.content}
+                  emptyHint={m.role === "assistant" && !m.content && !isStreaming && i === messages.length - 1}
+                />
               ))}
               {isStreaming && messages[messages.length - 1]?.content === "" && (
                 <div className="flex items-center gap-2 text-dim text-sm">
                   <Loader2 className="w-4 h-4 animate-spin" /> 思考中...
+                </div>
+              )}
+              {!isStreaming && messages.length > 0 && (
+                <div className="flex">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-dim h-7 px-2 text-xs gap-1"
+                    onClick={handleRegenerate}
+                    title="重新生成上一条回复（无需重新输入问题）"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> 重新生成
+                  </Button>
                 </div>
               )}
             </div>
@@ -466,11 +547,17 @@ export default function QAArena() {
 
         {/* Input */}
         {activeId && (
-          <div className="px-3 md:px-8 py-3 border-t border-border/50 safe-area-bottom backdrop-blur-sm bg-card/30">
+          <div className="px-3 md:px-8 py-3 border-t border-border/50 safe-area-bottom" style={{ background: "var(--sig-bg)" }}>
+            {streamError && !isStreaming && (
+              <div className="max-w-3xl mx-auto mb-2 flex items-center gap-1.5 text-xs text-dim">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--sig-accent)" }} />
+                <span>{streamError}</span>
+              </div>
+            )}
             <div className="max-w-3xl mx-auto flex items-end gap-2">
               <textarea
                 ref={inputRef}
-                className="flex-1 resize-none rounded-2xl border border-border bg-bg/80 backdrop-blur-sm px-4 py-3 text-[15px] md:text-sm outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/40 transition-all min-h-[44px]"
+                className="sig-textarea flex-1 text-[15px] md:text-sm min-h-[44px]"
                 rows={1}
                 placeholder="输入你的问题... (Enter 发送)"
                 value={input}
@@ -487,7 +574,7 @@ export default function QAArena() {
                 <Button
                   size="icon"
                   variant="destructive"
-                  className="rounded-xl h-11 w-11 md:h-10 md:w-10 shrink-0 shadow-md"
+                  className="h-11 w-11 md:h-10 md:w-10 shrink-0"
                   onClick={handleStop}
                   title="停止生成"
                 >
@@ -496,7 +583,7 @@ export default function QAArena() {
               ) : (
                 <Button
                   size="icon"
-                  className="rounded-xl h-11 w-11 md:h-10 md:w-10 shrink-0 shadow-md"
+                  className="h-11 w-11 md:h-10 md:w-10 shrink-0"
                   onClick={() => handleSend()}
                   disabled={!input.trim()}
                 >
@@ -510,9 +597,9 @@ export default function QAArena() {
 
       {/* ── Summary slide-over ── */}
       {showSummary && summaryResult && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={() => setShowSummary(false)}>
+        <div className="fixed inset-0 z-50 flex justify-end" style={{ background: "var(--sig-overlay)" }} onClick={() => setShowSummary(false)}>
           <div
-            className="w-full max-w-lg bg-bg h-full overflow-y-auto shadow-2xl animate-slide-in-right flex flex-col md:max-w-lg"
+            className="w-full max-w-2xl bg-bg h-full overflow-y-auto shadow-2xl animate-slide-in-right flex flex-col md:max-w-2xl border-l border-border"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-5 py-4 border-b border-border flex items-center justify-between sticky top-0 bg-bg z-10">
@@ -533,7 +620,7 @@ export default function QAArena() {
             </div>
             <div className="px-5 py-4 flex-1">
               <div className="md-content text-sm leading-[1.8]">
-                <ReactMarkdown components={markdownComponents}>{summaryResult.content}</ReactMarkdown>
+                <Markdown>{summaryResult.content}</Markdown>
               </div>
             </div>
           </div>
@@ -543,11 +630,11 @@ export default function QAArena() {
   );
 }
 
-const ChatMessage = memo(function ChatMessage({ role, content }: { role: string; content: string }) {
+const ChatMessage = memo(function ChatMessage({ role, content, emptyHint }: { role: string; content: string; emptyHint?: boolean }) {
   if (role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
-        <div className="max-w-[75%] px-4 py-2.5 rounded-3xl rounded-tr-lg text-primary-foreground text-[15px] leading-[1.7] whitespace-pre-wrap shadow-md" style={{ background: "linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary) 80%, var(--aurora-2)))" }}>
+        <div className="max-w-[75%] px-4 py-2.5 rounded-lg rounded-tr-sm text-[15px] leading-[1.7] whitespace-pre-wrap" style={{ background: "var(--sig-accent)", color: "var(--sig-accent-fg)" }}>
           {content}
         </div>
       </div>
@@ -555,9 +642,13 @@ const ChatMessage = memo(function ChatMessage({ role, content }: { role: string;
   }
   return (
     <div className="flex flex-col animate-fade-in">
-      <div className="max-w-full leading-[1.8] text-[15px] text-text rounded-2xl rounded-tl-lg px-4 py-3 bg-card/60 backdrop-blur-sm border border-border/50 shadow-sm">
+      <div className="sig-card max-w-full leading-[1.8] text-[15px] text-text rounded-lg rounded-tl-sm px-4 py-3">
         <div className="md-content">
-          <ReactMarkdown components={markdownComponents}>{content}</ReactMarkdown>
+          {content ? (
+            <Markdown>{content}</Markdown>
+          ) : emptyHint ? (
+            <span className="text-dim text-sm italic">（本次回复为空，请点击下方"重新生成"）</span>
+          ) : null}
         </div>
       </div>
     </div>
@@ -566,22 +657,18 @@ const ChatMessage = memo(function ChatMessage({ role, content }: { role: string;
 
 function EmptyWelcome({ onNewSession }: { onNewSession: () => void }) {
   return (
-    <div className="flex-1 flex flex-col items-center justify-center text-center py-20 relative">
-      <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-        <div className="w-[400px] h-[400px] rounded-full morph-blob opacity-30" style={{ background: "radial-gradient(circle, var(--glow-accent), transparent 70%)" }} />
+    <div className="flex-1 flex flex-col items-center justify-center text-center py-20">
+      <div className="w-16 h-16 rounded-lg flex items-center justify-center mb-4 mx-auto" style={{ background: "color-mix(in srgb, var(--sig-accent) 10%, transparent)" }}>
+        <MessageSquare className="w-8 h-8" style={{ color: "var(--sig-accent)" }} />
       </div>
-      <div className="relative">
-        <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 mx-auto hover-glow">
-          <MessageSquare className="w-8 h-8 text-primary" />
-        </div>
-        <h3 className="text-lg font-medium mb-2">问答演练场</h3>
-        <p className="text-dim text-sm mb-6 max-w-sm">
-          自由提问，深入学习技术知识。AI 导师会记住你之前的学习内容，帮你建立完整的知识体系。
-        </p>
-        <Button onClick={onNewSession} className="gap-1.5 cta-gradient rounded-xl px-5">
-          <Plus className="w-4 h-4" /> 开始新对话
-        </Button>
-      </div>
+      <div className="sig-kicker mb-2">// 问答演练场 / Q&A ARENA</div>
+      <h3 className="sig-display text-2xl mb-2">自由提问<span className="sig-accent-c">.</span></h3>
+      <p className="text-dim text-sm mb-6 max-w-sm">
+        自由提问，深入学习技术知识。AI 导师会记住你之前的学习内容，帮你建立完整的知识体系。
+      </p>
+      <Button onClick={onNewSession} variant="cta" className="gap-1.5 px-5">
+        <Plus className="w-4 h-4" /> 开始新对话
+      </Button>
     </div>
   );
 }
@@ -589,25 +676,22 @@ function EmptyWelcome({ onNewSession }: { onNewSession: () => void }) {
 function EmptyChat({ onSend }: { onSend: (q: string) => void }) {
   const questions = useMemo(() => pickRandomQuestions(ALL_SUGGESTED_QUESTIONS, SUGGESTED_COUNT), []);
   return (
-    <div className="max-w-3xl mx-auto flex flex-col items-center justify-center py-16 relative">
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[300px] h-[200px] rounded-full pointer-events-none opacity-25" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
-      <div className="relative">
-        <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 mx-auto">
-          <MessageSquare className="w-7 h-7 text-primary" />
-        </div>
-        <h3 className="text-base font-medium mb-1 text-center">有什么想问的？</h3>
-        <p className="text-dim text-sm mb-6 text-center">试试下面的问题，或者直接输入你的疑问</p>
-        <div className="grid gap-2 w-full max-w-md">
-          {questions.map((q, i) => (
-            <button
-              key={i}
-              className="text-left px-4 py-3 rounded-xl border border-border hover:bg-secondary/50 hover:border-primary/30 text-sm transition-all duration-200 hover:shadow-sm"
-              onClick={() => onSend(q)}
-            >
-              {q}
-            </button>
-          ))}
-        </div>
+    <div className="max-w-3xl mx-auto flex flex-col items-center justify-center py-16">
+      <div className="w-14 h-14 rounded-lg flex items-center justify-center mb-4 mx-auto" style={{ background: "color-mix(in srgb, var(--sig-accent) 10%, transparent)" }}>
+        <MessageSquare className="w-7 h-7" style={{ color: "var(--sig-accent)" }} />
+      </div>
+      <h3 className="text-base font-medium mb-1 text-center">有什么想问的？</h3>
+      <p className="text-dim text-sm mb-6 text-center">试试下面的问题，或者直接输入你的疑问</p>
+      <div className="grid gap-2 w-full max-w-md">
+        {questions.map((q, i) => (
+          <button
+            key={i}
+            className="sig-card sig-hover-lift text-left px-4 py-3 text-sm transition-all duration-200"
+            onClick={() => onSend(q)}
+          >
+            {q}
+          </button>
+        ))}
       </div>
     </div>
   );

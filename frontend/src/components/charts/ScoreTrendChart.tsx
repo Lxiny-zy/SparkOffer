@@ -5,10 +5,10 @@ import {
 import { ScoreHistoryEntry } from "../../types/api";
 
 const MODE_COLORS: Record<string, string> = {
-  resume: "var(--ai-glow)",
-  topic_drill: "var(--green)",
-  jd_prep: "#60a5fa",
-  recording: "#22d3ee",
+  resume: "var(--sig-chart-1)",
+  topic_drill: "var(--sig-chart-3)",
+  jd_prep: "var(--sig-chart-2)",
+  recording: "var(--sig-chart-6)",
 };
 
 const MODE_LABELS: Record<string, string> = {

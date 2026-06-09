@@ -1,7 +1,9 @@
-import { authHeaders } from "./client";
+import { authHeaders, handleStreamUnauthorized, iterSSEFrames } from "./client";
 
 export interface SSECallbacks {
   onProgress?: (message: string) => void;
+  /** 真流式：后端以 stream_content 模式推送 content 事件时，每段增量回调一次。 */
+  onContent?: (delta: string) => void;
 }
 
 // SSE 请求超时时间（毫秒）
@@ -9,6 +11,63 @@ export interface SSECallbacks {
 // validate+repair(60s) + 余量。早先用 120s 在复杂出题/网络抖动时会误杀
 // 正常请求，让用户看到 "network error"。后端有 30s SSE heartbeat 兜底真正的卡死。
 const SSE_TIMEOUT_MS = 360000;
+
+/** Map an AbortController abort into a localized 超时 error; pass other errors through. */
+function _timeoutError(error: any, timeoutMs: number): Error {
+  return error?.name === "AbortError"
+    ? new Error(`请求超时（${timeoutMs / 1000}秒）`)
+    : error;
+}
+
+/**
+ * Run an SSE fetch under the shared hard timeout: wires an AbortController,
+ * maps an abort into the localized 超时 message, and always clears the timer.
+ * `fn` receives the signal to hand to fetch(). For consumers that *yield* frames,
+ * use withSSETimeoutGen instead.
+ */
+export async function withSSETimeout<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  timeoutMs = SSE_TIMEOUT_MS,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fn(controller.signal);
+  } catch (error: any) {
+    throw _timeoutError(error, timeoutMs);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Generator form of withSSETimeout: delegates to an inner async generator with
+ * `yield*`, so frames propagate to the caller under the same abort/timeout/cleanup
+ * wrapper. Use for streaming consumers that yield SSE events.
+ */
+export async function* withSSETimeoutGen<T>(
+  fn: (signal: AbortSignal) => AsyncGenerator<T>,
+  timeoutMs = SSE_TIMEOUT_MS,
+  externalSignal?: AbortSignal,
+): AsyncGenerator<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  // Let a caller-supplied signal (e.g. component unmount) also abort the fetch
+  // so the stream/connection is released immediately rather than on next chunk.
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", onExternalAbort);
+  }
+  try {
+    yield* fn(controller.signal);
+  } catch (error: any) {
+    throw _timeoutError(error, timeoutMs);
+  } finally {
+    clearTimeout(timeoutId);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
+  }
+}
 
 /**
  * Fetch an endpoint that may return SSE or plain JSON.
@@ -21,14 +80,10 @@ export async function fetchSSE<T>(
   options: RequestInit,
   callbacks?: SSECallbacks,
 ): Promise<T> {
-  // 创建 AbortController 用于超时控制
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), SSE_TIMEOUT_MS);
-
-  try {
+  return withSSETimeout<T>(async (signal) => {
     const res = await fetch(url, {
       ...options,
-      signal: controller.signal,
+      signal,
       headers: {
         ...authHeaders(
           options.headers instanceof Headers
@@ -38,10 +93,7 @@ export async function fetchSSE<T>(
       },
     });
 
-    if (res.status === 401) {
-      localStorage.removeItem("token");
-      localStorage.removeItem("user");
-      window.location.href = "/login";
+    if (handleStreamUnauthorized(res)) {
       throw new Error("Unauthorized");
     }
 
@@ -55,44 +107,25 @@ export async function fetchSSE<T>(
       return res.json();
     }
 
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
     let result: T | null = null;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        try {
-          const event = JSON.parse(line.slice(6));
-          switch (event.type) {
-            case "progress":
-              callbacks?.onProgress?.(event.message);
-              break;
-            case "error":
-              throw new Error(event.message);
-            case "complete":
-              result = event.data as T;
-              break;
-          }
-        } catch (e: any) {
-          if (e.message && !e.message.includes("JSON")) throw e;
-        }
+    for await (const event of iterSSEFrames(res)) {
+      switch (event.type) {
+        case "progress":
+          callbacks?.onProgress?.(event.message);
+          break;
+        case "content":
+          callbacks?.onContent?.(event.delta);
+          break;
+        case "error":
+          throw new Error(event.message);
+        case "complete":
+          result = event.data as T;
+          break;
       }
     }
 
     if (!result) throw new Error("请求失败：未收到结果");
     return result;
-  } catch (error: any) {
-    clearTimeout(timeoutId);
-    if (error.name === "AbortError") {
-      throw new Error(`请求超时（${SSE_TIMEOUT_MS / 1000}秒）`);
-    }
-    throw error;
-  }
+  });
 }

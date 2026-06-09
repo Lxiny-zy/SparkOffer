@@ -97,7 +97,8 @@ export default function JobPrep() {
     <div className="flex-1 overflow-y-auto min-h-0 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
       <div className="w-full max-w-[860px]">
         <div className="mb-8 animate-fade-in">
-          <h1 className="text-2xl md:text-[28px] font-display font-bold mb-2 aurora-text">JD 定向备面</h1>
+          <div className="sig-kicker mb-2">// JD 定向备面 / JOB PREP</div>
+          <h1 className="sig-display text-2xl md:text-[28px] mb-2">定向备战<span className="sig-accent-c">.</span></h1>
           <p className="text-sm text-dim">贴入岗位 JD，AI 先拆解岗位重点，再结合你的简历和历史画像生成定向追问。</p>
         </div>
 
@@ -153,13 +154,13 @@ export default function JobPrep() {
         </Card>
 
         {error && (
-          <div className="mb-4 px-4 py-3 rounded-xl bg-red/10 border border-red/20 text-sm text-red animate-shake">
+          <div className="mb-4 px-4 py-3 rounded-md border text-sm animate-shake" style={{ borderColor: "color-mix(in srgb, var(--sig-danger) 35%, transparent)", background: "color-mix(in srgb, var(--sig-danger) 8%, transparent)", color: "var(--sig-danger)" }}>
             {error}
           </div>
         )}
 
         {previewStale && (
-          <div className="mb-4 px-4 py-3 rounded-xl bg-warning/10 border border-warning/20 text-sm text-warning animate-fade-in">
+          <div className="mb-4 px-4 py-3 rounded-md border text-sm animate-fade-in" style={{ borderColor: "color-mix(in srgb, var(--sig-warning) 35%, transparent)", background: "color-mix(in srgb, var(--sig-warning) 8%, transparent)", color: "var(--sig-warning)" }}>
             你修改了 JD 或岗位信息，请重新分析后再开始训练。
           </div>
         )}
@@ -303,14 +304,14 @@ export default function JobPrep() {
         <div className="h-24" />
 
         {/* Sticky action bar — always-visible Preview / Start CTA */}
-        <div className="sticky bottom-0 z-20 -mx-4 md:-mx-6 px-4 md:px-6 pb-4 pt-3 mt-2 bg-gradient-to-t from-bg via-bg/95 to-bg/0 backdrop-blur-md">
+        <div className="sticky bottom-0 z-20 -mx-4 md:-mx-6 px-4 md:px-6 pb-4 pt-3 mt-2" style={{ background: "linear-gradient(to top, var(--sig-bg), color-mix(in srgb, var(--sig-bg) 80%, transparent) 70%, transparent)" }}>
           <div className="max-w-[860px] mx-auto">
-            <div className="rounded-2xl glass-strong border border-border/50 p-3 shadow-[0_-4px_24px_rgba(0,0,0,0.08)]">
+            <div className="sig-card p-3 shadow-[0_-4px_24px_rgba(0,0,0,0.12)]">
               <div className="flex flex-col md:flex-row gap-2.5">
                 <Button
                   variant="default"
                   size="lg"
-                  className={cn("md:flex-1 transition-all", canPreview && !preview && "shadow-[0_0_18px_var(--glow-primary)]")}
+                  className="md:flex-1 transition-all"
                   disabled={!canPreview}
                   onClick={handlePreview}
                 >
@@ -321,10 +322,7 @@ export default function JobPrep() {
                 <Button
                   variant={canStart ? "default" : "outline"}
                   size="lg"
-                  className={cn(
-                    "md:w-[240px] transition-all",
-                    canStart && "shadow-[0_0_22px_var(--glow-accent)] cta-gradient"
-                  )}
+                  className="md:w-[240px] transition-all"
                   disabled={!canStart}
                   onClick={handleStart}
                 >

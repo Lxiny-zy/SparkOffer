@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     local_embedding_path: str = ""
     embedding_model: str = ""  # deprecated fallback for EMBEDDING_MODEL
 
+    # Reranker (Cross-Encoder re-ranking API)
+    reranker_api_base: str = ""
+    reranker_api_key: str = ""
+    reranker_api_model: str = ""
+
     # DashScope ASR (speech-to-text)
     dashscope_api_key: str = ""
     asr_model: str = "qwen3-asr-flash-filetrans"
@@ -52,6 +57,12 @@ class Settings(BaseSettings):
     # Redis (optional — empty string disables; falls back to in-memory LRU)
     redis_url: str = ""
 
+    # Vector store backend (记忆库) — numpy（默认，SQLite+numpy）| qdrant
+    vector_backend: str = ""                            # 空 → 按 qdrant_url 推断
+    qdrant_url: str = ""                                # e.g. http://localhost:6333；空则禁用
+    qdrant_api_key: str = ""
+    qdrant_memory_collection: str = "sparkoffer_memory"
+
     def user_data_dir(self, user_id: str) -> Path:
         return self.base_dir / "data" / "users" / user_id
 
@@ -82,6 +93,19 @@ class Settings(BaseSettings):
         if self.embedding_api_base or self.embedding_api_key:
             return "api"
         return "local"
+
+    def vector_backend_mode(self) -> str:
+        """记忆库向量后端：'numpy'（默认）或 'qdrant'。
+
+        与 embedding_backend_mode 同构：显式 VECTOR_BACKEND 优先；否则当
+        QDRANT_URL 已设时推断为 'qdrant'，再否则 'numpy'。
+        """
+        if self.vector_backend:
+            backend = self.vector_backend.strip().lower()
+            if backend in {"numpy", "qdrant"}:
+                return backend
+            raise ValueError("VECTOR_BACKEND must be 'numpy' or 'qdrant'")
+        return "qdrant" if self.qdrant_url else "numpy"
 
     def embedding_api_model_name(self) -> str:
         return self.embedding_api_model or self.embedding_model or DEFAULT_EMBEDDING_MODEL

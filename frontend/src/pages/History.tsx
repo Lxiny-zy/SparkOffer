@@ -84,13 +84,15 @@ export default function History() {
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
-      <div className="flex items-baseline justify-between mb-5 animate-fade-in relative">
-        <div className="absolute -top-6 -left-6 w-[180px] h-[120px] rounded-full pointer-events-none opacity-20" style={{ background: "radial-gradient(ellipse, var(--glow-accent), transparent 70%)" }} />
-        <div className="text-2xl md:text-[28px] font-display font-bold aurora-text relative">历史记录</div>
-        <div className="text-sm text-dim">共 {total} 条记录</div>
+      <div className="mb-5 animate-fade-in">
+        <div className="sig-kicker mb-2">// 历史记录 / HISTORY</div>
+        <div className="flex items-baseline justify-between">
+          <h1 className="sig-display text-2xl md:text-[28px]">训练历史<span className="sig-accent-c">.</span></h1>
+          <div className="sig-num text-sm text-dim">共 {total} 条</div>
+        </div>
       </div>
 
-      <div className="flex items-center gap-1 mb-4 p-1 rounded-full bg-card/50 border border-border w-fit">
+      <div className="flex items-center gap-1 mb-4 p-1 rounded-md w-fit border" style={{ borderColor: "var(--sig-line)" }}>
         {([
           { key: "completed", label: "已完成" },
           { key: "in_progress", label: "进行中" },
@@ -100,11 +102,10 @@ export default function History() {
             <button
               key={opt.key}
               onClick={() => setStatusFilter(opt.key)}
+              style={active ? { background: "var(--sig-accent)", color: "var(--sig-accent-fg)" } : undefined}
               className={cn(
-                "px-4 py-1.5 rounded-full text-[12px] font-medium transition-all duration-200 cursor-pointer",
-                active
-                  ? "bg-primary text-primary-foreground shadow-[0_0_12px_var(--glow-primary)]"
-                  : "text-dim hover:text-text"
+                "px-4 py-1.5 rounded text-[12px] font-medium transition-all duration-200 cursor-pointer",
+                !active && "text-dim hover:text-text"
               )}
             >
               {opt.label}
@@ -120,11 +121,10 @@ export default function History() {
             <button
               key={m.key}
               onClick={() => handleModeChange(m.key)}
+              style={active ? { background: "color-mix(in srgb, var(--sig-accent) 10%, transparent)", borderColor: "var(--sig-accent)", color: "var(--sig-accent)" } : undefined}
               className={cn(
-                "px-3.5 py-1.5 rounded-full text-[12px] font-medium transition-all duration-200 border cursor-pointer",
-                active
-                  ? "bg-primary/15 text-primary border-primary/30 ring-2 ring-primary/15 shadow-[0_0_12px_var(--glow-primary)]"
-                  : "bg-card/50 text-dim border-border hover:text-text hover:border-primary/40 hover:bg-card hover:-translate-y-px"
+                "px-3.5 py-1.5 rounded-md text-[12px] font-medium transition-all duration-200 border cursor-pointer",
+                !active && "text-dim border-[color:var(--sig-line)] hover:text-text hover:border-[color:var(--sig-line-2)] hover:-translate-y-px"
               )}
             >
               {m.label}
@@ -134,9 +134,9 @@ export default function History() {
 
         {modeFilter !== "resume" && modeFilter !== "jd_prep" && topics.length > 0 && (
           <>
-            <div className="w-px h-5 bg-border mx-1" />
+            <div className="w-px h-5 mx-1" style={{ background: "var(--sig-line)" }} />
             <select
-              className="px-3.5 py-1.5 rounded-full text-[12px] bg-card/50 text-text border border-border outline-none cursor-pointer hover:border-primary/40 transition-colors"
+              className="sig-field w-auto py-1.5 text-[12px] cursor-pointer"
               value={topicFilter}
               onChange={(e) => setTopicFilter(e.target.value)}
             >
@@ -165,7 +165,8 @@ export default function History() {
               return (
                 <Card
                   key={s.session_id}
-                  className="group cursor-pointer hover:border-primary/50 hover:-translate-y-px hover:shadow-[0_6px_20px_var(--glow-primary)] transition-all duration-300 overflow-hidden card-hover-lift"
+                  hoverLift
+                  className="group cursor-pointer overflow-hidden"
                   onClick={() => navigate(
                     statusFilter === "in_progress" ? `/interview/${s.session_id}` : `/review/${s.session_id}`
                   )}
@@ -203,7 +204,7 @@ export default function History() {
                       <div className="flex items-center gap-2 shrink-0">
                         <ScorePill score={s.avg_score} />
                         <button
-                          className="p-1.5 rounded-md text-dim opacity-0 group-hover:opacity-100 hover:text-red hover:bg-red/10 transition-all cursor-pointer"
+                          className="p-1.5 rounded-md text-dim opacity-0 group-hover:opacity-100 hover:text-[color:var(--sig-danger)] hover:bg-secondary transition-all cursor-pointer"
                           title="删除"
                           onClick={(e) => handleDelete(e, s.session_id)}
                         >

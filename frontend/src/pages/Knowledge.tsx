@@ -150,7 +150,9 @@ export default function Knowledge() {
   const handleCreateFile = async () => {
     const name = newFileName.trim();
     if (!name) return;
-    const fname = name.endsWith(".md") ? name : name + ".md";
+    const ALLOWED_EXTS = [".md", ".txt", ".py"];
+    const hasValidExt = ALLOWED_EXTS.some((ext) => name.endsWith(ext));
+    const fname = hasValidExt ? name : name + ".md";
     try {
       await createCoreKnowledge(selected!, fname, "");
       setNewFileName("");
@@ -343,9 +345,9 @@ export default function Knowledge() {
       </Button>
 
       <div className={cn(
-        "fixed inset-y-0 left-0 z-30 w-[200px] border-r border-border/50 bg-bg/80 backdrop-blur-sm p-4 flex flex-col transition-transform duration-200 md:static md:translate-x-0 md:shrink-0",
+        "fixed inset-y-0 left-0 z-30 w-[200px] border-r border-border/50 p-4 flex flex-col transition-transform duration-200 md:static md:translate-x-0 md:shrink-0",
         sidebarOpen ? "translate-x-0" : "-translate-x-full"
-      )}>
+      )} style={{ background: "var(--sig-bg)" }}>
         <div className="flex justify-between items-center mb-3 px-2">
           <div className="text-[13px] font-semibold text-dim">专项领域</div>
           <Button variant="ghost" size="icon" className="w-6 h-6 text-base" title="新增领域" onClick={() => setShowAddTopic(true)}>+</Button>
@@ -358,9 +360,10 @@ export default function Knowledge() {
               <div key={key} className="relative mb-0.5 group">
                 <button
                   className={cn(
-                    "w-full px-3 py-2.5 rounded-lg text-sm text-left flex items-center gap-2 transition-all cursor-pointer",
-                    isCurrent ? "bg-secondary text-text shadow-[inset_3px_0_0_var(--primary)]" : "text-dim hover:bg-secondary/60 hover:translate-x-0.5"
+                    "w-full px-3 py-2.5 rounded-md text-sm text-left flex items-center gap-2 transition-all cursor-pointer",
+                    isCurrent ? "bg-secondary text-text" : "text-dim hover:bg-secondary/60 hover:translate-x-0.5"
                   )}
+                  style={isCurrent ? { boxShadow: "inset 2px 0 0 var(--sig-accent)" } : undefined}
                   onClick={() => handleSelectTopic(key)}
                 >
                   <span className="text-dim">{getTopicIcon(topics[key]?.icon, 16)}</span>
@@ -374,7 +377,7 @@ export default function Knowledge() {
                   )}
                 </button>
                 <button
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-dim text-sm px-1.5 py-1 rounded opacity-0 group-hover:opacity-100 hover:text-red hover:bg-red/10 transition-all cursor-pointer"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-dim text-sm px-1.5 py-1 rounded opacity-0 group-hover:opacity-100 hover:text-[color:var(--sig-danger)] hover:bg-secondary transition-all cursor-pointer"
                   title="删除领域"
                   onClick={() => handleDeleteTopic(key)}
                 ><X size={14} /></button>
@@ -385,11 +388,11 @@ export default function Knowledge() {
       </div>
 
       {sidebarOpen && (
-        <div className="fixed inset-0 z-20 bg-black/40 backdrop-blur-sm md:hidden" onClick={() => setSidebarOpen(false)} />
+        <div className="fixed inset-0 z-20 md:hidden" style={{ background: "var(--sig-overlay)" }} onClick={() => setSidebarOpen(false)} />
       )}
 
       {showAddTopic && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 animate-fade-in" onClick={() => setShowAddTopic(false)}>
+        <div className="fixed inset-0 flex items-center justify-center z-50 animate-fade-in" style={{ background: "var(--sig-overlay)" }} onClick={() => setShowAddTopic(false)}>
           <Card className="w-[380px] max-w-[90vw] animate-bounce-in" onClick={(e: React.MouseEvent) => e.stopPropagation()}>
             <CardContent className="p-6 md:p-8">
               <div className="text-lg font-semibold mb-5">新增训练领域</div>
@@ -554,7 +557,7 @@ export default function Knowledge() {
 
               {/* ── 知识进化状态条 ── 用来验证自我进化与答题沉淀是否生效 ── */}
               {stats && (
-                <Card className="mb-4 border-primary/20 bg-gradient-to-br from-primary/5 via-card to-card">
+                <Card className="mb-4" style={{ borderColor: "color-mix(in srgb, var(--sig-accent) 25%, transparent)", background: "color-mix(in srgb, var(--sig-accent) 4%, transparent)" }}>
                   <CardContent className="p-3.5 md:p-4">
                     <div className="flex items-start gap-3 flex-wrap">
                       <div className="w-9 h-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center shrink-0">
@@ -621,12 +624,12 @@ export default function Knowledge() {
               {tab === "core" ? (
                 <div>
               <div className="text-[13px] text-dim mb-3">
-                AI 出题和评分的参考依据，编辑后影响该领域的题目质量。支持 Markdown 格式。
+                AI 出题和评分的参考依据，编辑后影响该领域的题目质量。支持 .md / .txt / .py 格式。
               </div>
               <div className="flex gap-2 mb-4">
                 {showNewFile ? (
                   <div className="flex gap-2 flex-1">
-                    <Input className="flex-1" placeholder="文件名 (例: 装饰器.md)" value={newFileName} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewFileName(e.target.value)} onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === "Enter" && handleCreateFile()} />
+                    <Input className="flex-1" placeholder="文件名 (例: 装饰器.md, notes.txt)" value={newFileName} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewFileName(e.target.value)} onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => e.key === "Enter" && handleCreateFile()} />
                     <Button variant="default" size="sm" onClick={handleCreateFile}>创建</Button>
                     <Button variant="outline" size="sm" onClick={() => { setShowNewFile(false); setNewFileName(""); }}>取消</Button>
                   </div>
@@ -701,7 +704,6 @@ export default function Knowledge() {
                               size="sm"
                               onClick={() => handleSaveCore(f.filename)}
                               disabled={!fileDirty}
-                              className={fileDirty ? "shadow-[0_0_12px_var(--glow-primary)]" : ""}
                             >
                               保存
                             </Button>

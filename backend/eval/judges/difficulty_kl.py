@@ -59,11 +59,19 @@ def _produced_dist(questions: list[dict]) -> dict[int, float]:
 
 
 def _kl(p: dict[int, float], q: dict[int, float]) -> float:
-    """KL(p || q) with Laplace smoothing on both."""
+    """KL(p || q) with Laplace smoothing, renormalized to valid distributions.
+
+    Smoothing adds α to each of the 5 buckets, so the smoothed vectors sum to
+    1 + 5α, not 1. Without renormalizing, KL between two non-distributions can go
+    negative and a perfect match scores < 1. Divide each term by its post-smoothing
+    sum to restore proper probability distributions.
+    """
+    p_sum = sum(p.get(k, 0.0) + LAPLACE_ALPHA for k in range(1, 6))
+    q_sum = sum(q.get(k, 0.0) + LAPLACE_ALPHA for k in range(1, 6))
     total = 0.0
     for k in range(1, 6):
-        p_k = p.get(k, 0.0) + LAPLACE_ALPHA
-        q_k = q.get(k, 0.0) + LAPLACE_ALPHA
+        p_k = (p.get(k, 0.0) + LAPLACE_ALPHA) / p_sum
+        q_k = (q.get(k, 0.0) + LAPLACE_ALPHA) / q_sum
         total += p_k * math.log(p_k / q_k)
     return total
 

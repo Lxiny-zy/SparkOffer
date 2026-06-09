@@ -7,7 +7,7 @@ import { onSessionExpired, resetSessionExpired } from "./api/client";
 import Sidebar from "./components/Sidebar";
 import FloatingAssistant from "./components/FloatingAssistant";
 import ErrorBoundary from "./components/ErrorBoundary";
-import GeometricNetwork from "./components/GeometricNetwork";
+import PointerFX from "./components/PointerFX";
 import Landing from "./pages/Landing";
 import Login from "./pages/Login";
 import Home from "./pages/Home";
@@ -27,14 +27,15 @@ const AlgorithmSolver = lazy(() => import("./pages/AlgorithmSolver"));
 const AlgorithmCollection = lazy(() => import("./pages/AlgorithmCollection"));
 const Settings = lazy(() => import("./pages/Settings"));
 const QAArena = lazy(() => import("./pages/QAArena"));
+const RAGDashboard = lazy(() => import("./pages/RAGDashboard"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
 function AppBootScreen() {
   return (
-    <div className="min-h-screen bg-bg flex items-center justify-center">
-      <div className="flex flex-col items-center gap-3 text-muted-foreground">
-        <Loader2 className="w-6 h-6 animate-spin text-primary" />
-        <p className="text-sm">正在恢复会话...</p>
+    <div className="sig-root min-h-screen flex items-center justify-center">
+      <div className="flex flex-col items-center gap-3 text-[color:var(--sig-dim)]">
+        <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--sig-accent)" }} />
+        <p className="sig-kicker">正在恢复会话…</p>
       </div>
     </div>
   );
@@ -68,24 +69,20 @@ function AuthPage() {
 
 function AppShell({ children }: { children: ReactNode }) {
   return (
-    <div className="flex flex-col md:flex-row h-screen bg-bg">
+    <div className="sig-root flex flex-col md:flex-row h-screen">
       <Sidebar />
-      <main className="flex-1 overflow-hidden flex flex-col md:m-3 md:ml-0 md:rounded-3xl md:bg-surface relative">
-        {/* Sticky wrapper (height 0, doesn't push content) so the absolute decor layer stays glued to viewport while content scrolls */}
+      <main className="flex-1 overflow-hidden flex flex-col relative">
+        {/* Sticky wrapper (height 0) keeps the static blueprint grid glued to the
+            viewport while content scrolls — no parallax, no particle animation. */}
         <div className="hidden md:block sticky top-0 left-0 h-0 w-full z-0 pointer-events-none">
-          <div className="absolute top-0 left-0 right-0 h-screen overflow-hidden md:rounded-3xl">
-            {/* Subtle grid floor */}
-            <div className="absolute inset-0 bg-grid opacity-25" />
-            {/* Geometric network — nodes drift and connect by distance */}
-            <GeometricNetwork />
-            {/* Noise overlay for grain */}
-            <div className="absolute inset-0 bg-noise" />
+          <div className="absolute top-0 left-0 right-0 h-screen overflow-hidden">
+            <div className="sig-grid absolute inset-0 opacity-70" />
           </div>
         </div>
         <div className="relative z-[1] flex-1 flex flex-col min-h-0">
           <Suspense fallback={
             <div className="flex-1 flex items-center justify-center">
-              <Loader2 className="w-6 h-6 animate-spin text-primary" />
+              <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--sig-accent)" }} />
             </div>
           }>
             {children}
@@ -122,6 +119,7 @@ function AppRoutes() {
                 <Route path="/algorithm/collection" element={<AlgorithmCollection />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/qa-arena" element={<QAArena />} />
+                <Route path="/rag-dashboard" element={<RAGDashboard />} />
                 <Route path="*" element={<NotFound />} />
               </Routes>
             </AppShell>
@@ -151,17 +149,14 @@ function SessionExpiredModal() {
   if (!show) return null;
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <div className="bg-card border border-border rounded-2xl p-6 max-w-sm mx-4 shadow-2xl animate-fade-in text-center space-y-4">
-        <div className="w-12 h-12 rounded-full bg-orange/10 flex items-center justify-center mx-auto">
-          <AlertTriangle className="w-6 h-6 text-orange" />
+    <div className="sig-root fixed inset-0 z-[100] flex items-center justify-center p-4" style={{ background: "var(--sig-overlay)" }}>
+      <div className="sig-card max-w-sm w-full p-6 animate-fade-in text-center space-y-4">
+        <div className="w-12 h-12 rounded-full flex items-center justify-center mx-auto" style={{ background: "color-mix(in srgb, var(--sig-warning) 14%, transparent)" }}>
+          <AlertTriangle className="w-6 h-6" style={{ color: "var(--sig-warning)" }} />
         </div>
         <h3 className="text-lg font-semibold">登录已过期</h3>
-        <p className="text-sm text-dim">你的登录状态已失效，请重新登录。当前页面内容不会丢失。</p>
-        <button
-          onClick={handleReLogin}
-          className="w-full px-4 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
-        >
+        <p className="text-sm text-[color:var(--sig-dim)]">你的登录状态已失效，请重新登录。当前页面内容不会丢失。</p>
+        <button onClick={handleReLogin} className="sig-btn sig-btn-accent w-full justify-center">
           重新登录
         </button>
       </div>
@@ -174,6 +169,7 @@ function App() {
     <AuthProvider>
       <BrowserRouter>
         <ErrorBoundary>
+          <PointerFX />
           <SessionExpiredModal />
           <AppRoutes />
           <Toaster position="top-right" richColors closeButton expand={false} duration={3500} />
