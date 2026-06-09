@@ -156,6 +156,22 @@ export async function generateQASummary(
   return result;
 }
 
+export async function ingestQACardToKnowledge(
+  sessionId: string,
+  content: string,
+): Promise<{ ok: boolean; topic: string | null; reason: string }> {
+  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/ingest-knowledge`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "收录失败");
+  }
+  return res.json();
+}
+
 export function downloadMarkdown(content: string, filename: string) {
   const blob = new Blob([content], { type: "text/markdown; charset=utf-8" });
   const url = URL.createObjectURL(blob);

@@ -513,17 +513,17 @@ def schedule_index_rebuild(topic: str, user_id: str, file_count: int = 0,
     return task_id
 
 
-def schedule_incremental_insert(topic: str, user_id: str, text: str):
+def schedule_incremental_insert(topic: str, user_id: str, text: str, source: str = "auto_evolution"):
     """Schedule an incremental index insert in background."""
     # Hash the full text (not hash(text) % 10000): the modulo bucketed distinct
     # fragments into 10k slots, so two different texts for the same (user, topic)
     # could collide and the second was silently dropped as a "duplicate".
     text_key = hashlib.md5(text.encode("utf-8")).hexdigest()[:16]
-    task_id = f"insert:{user_id}:{topic}:{text_key}"
+    task_id = f"insert:{user_id}:{topic}:{source}:{text_key}"
     _task_queue.submit(
         task_id,
         _do_incremental_insert,
-        topic, user_id, text,
+        topic, user_id, text, source,
         priority=TaskPriority.HIGH,
         max_retries=3,
     )
@@ -570,10 +570,10 @@ def _do_index_rebuild(topic: str, user_id: str):
     logger.info(f"Background index rebuild completed: topic={topic}, user={user_id}")
 
 
-def _do_incremental_insert(topic: str, user_id: str, text: str):
+def _do_incremental_insert(topic: str, user_id: str, text: str, source: str = "auto_evolution"):
     """Synchronous incremental insert (runs in thread pool)."""
     from backend.indexer import incremental_insert_to_index
-    incremental_insert_to_index(topic, user_id, text)
+    incremental_insert_to_index(topic, user_id, text, source=source)
 
 
 def _do_profile_vector_rebuild(user_id: str):

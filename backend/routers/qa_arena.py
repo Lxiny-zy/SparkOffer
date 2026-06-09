@@ -100,6 +100,30 @@ def summary(session_id: str, effort: str = "", user_id: str = Depends(get_curren
     )
 
 
+@router.post("/sessions/{session_id}/ingest-knowledge")
+async def ingest_knowledge(session_id: str, body: dict = None, user_id: str = Depends(get_current_user)):
+    """收录这次问答生成的知识卡片进 RAG 知识库（用户确认收录，人在环中）。
+
+    取 body.content（前端传当前预览的卡片）；为空时回退读已保存的总结文件。
+    分类 + 事实化清洗 + 写入用户知识库 + 增量嵌入，返回 {ok, topic, reason}。
+    """
+    if not store.get_session(session_id, user_id):
+        raise HTTPException(404, "会话不存在")
+
+    body = body or {}
+    content = (body.get("content") or "").strip()
+    if not content:
+        from backend.qa_arena import get_summary_file
+        saved = get_summary_file(session_id, user_id)
+        if saved:
+            content = saved[0]
+    if not content:
+        raise HTTPException(400, "没有可收录的卡片内容，请先生成知识卡片")
+
+    from backend.knowledge_evolution import ingest_qa_card_to_knowledge
+    return await ingest_qa_card_to_knowledge(content, user_id)
+
+
 @router.get("/sessions/{session_id}/summary/download")
 def download_summary(session_id: str, user_id: str = Depends(get_current_user)):
     from backend.qa_arena import get_summary_file

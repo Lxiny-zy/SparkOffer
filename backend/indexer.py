@@ -402,18 +402,22 @@ def invalidate_topic_index(topic: str, user_id: str):
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 
-def incremental_insert_to_index(topic: str, user_id: str, new_text: str):
+def incremental_insert_to_index(topic: str, user_id: str, new_text: str, source: str = "auto_evolution"):
     """Insert new content into an existing topic index WITHOUT full rebuild.
 
     This leverages the existing cached index (memory or disk) and only embeds
     the new content, avoiding the expensive full-directory re-indexing.
     Falls back to invalidation if the index doesn't exist yet.
+
+    ``source`` tags the node metadata ("auto_evolution" for drill writeback,
+    "qa_ingest" for user-confirmed QA-card ingestion) so retrieval/eval can later
+    distinguish or down-weight user-deposited knowledge from curated seed docs.
     """
     cache_key = (user_id, topic)
     try:
         index = build_topic_index(topic, user_id)
         # Create a Document from the new text and insert into existing index
-        doc = Document(text=new_text, metadata={"source": "auto_evolution", "topic": topic})
+        doc = Document(text=new_text, metadata={"source": source, "topic": topic})
         index.insert(doc)  # qdrant-backed 时自动推送到 Qdrant，无需本地 persist
         # 持久化判定按「实际是否 Qdrant 后端」而非「是否配置 Qdrant」：Qdrant 降级到
         # 本地时，insert 后必须 persist 到磁盘，否则缓存淘汰后新内容丢失。

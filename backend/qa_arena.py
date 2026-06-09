@@ -218,6 +218,11 @@ SUMMARY_REGEN_INTERVAL = 10
 IDLE_HEARTBEAT_SECONDS = 30
 MAX_RESPONSE_STORE_LENGTH = 16000
 
+# TEMP DIAGNOSTIC: log the raw shape of the first few streamed chunks so we can see what
+# the gateway actually sends (does reasoning arrive? under which additional_kwargs key?).
+# Capped across the process; remove once the reasoning channel is understood.
+_DIAG_CHUNKS = {"n": 0, "limit": 12}
+
 COMPRESS_PROMPT = (
     "请将以下对话内容压缩为一段简要摘要（200字以内），保留关键技术概念、"
     "用户的理解程度和讨论结论。只输出摘要，不要其他内容。\n\n{conversation}"
@@ -315,6 +320,15 @@ async def _stream_chat_answer(
         while True:
             try:
                 chunk = await asyncio.wait_for(aiter.__anext__(), timeout=IDLE_HEARTBEAT_SECONDS)
+                if _DIAG_CHUNKS["n"] < _DIAG_CHUNKS["limit"]:
+                    _DIAG_CHUNKS["n"] += 1
+                    _c = getattr(chunk, "content", None)
+                    logger.warning(
+                        "QA chunk diag #%d: content_type=%s content=%.60r akw_keys=%s meta_keys=%s",
+                        _DIAG_CHUNKS["n"], type(_c).__name__, _c,
+                        list(getattr(chunk, "additional_kwargs", {}) or {}),
+                        list(getattr(chunk, "response_metadata", {}) or {}),
+                    )
                 reasoning = _chunk_reasoning(chunk)
                 if reasoning:
                     had_reasoning = True

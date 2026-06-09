@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, memo, useMemo } from "react";
 import {
   Plus, Trash2, Send, Download, FileText, Loader2,
-  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square, RefreshCw, AlertCircle, Brain,
+  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square, RefreshCw, AlertCircle, Brain, BookPlus,
 } from "lucide-react";
 import { Markdown } from "../components/ChatBubble";
 import { cn } from "@/lib/utils";
@@ -16,6 +16,7 @@ import {
   streamQAChat,
   regenerateQAChat,
   generateQASummary,
+  ingestQACardToKnowledge,
   downloadMarkdown,
   type QASession,
   type QAMessage,
@@ -65,6 +66,8 @@ export default function QAArena() {
   const [summaryEffort, setSummaryEffort] = useState("");
   const [summaryResult, setSummaryResult] = useState<QASummaryResult | null>(null);
   const [showSummary, setShowSummary] = useState(false);
+  const [ingesting, setIngesting] = useState(false);
+  const [ingestResult, setIngestResult] = useState<{ ok: boolean; topic: string | null; reason: string } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
@@ -290,6 +293,7 @@ export default function QAArena() {
   const handleGenerateSummary = async () => {
     if (!activeId || isSummarizing) return;
     setIsSummarizing(true);
+    setIngestResult(null);
     setSummaryProgress("正在分析对话内容...");
     try {
       const result = await generateQASummary(activeId, (msg) => setSummaryProgress(msg), summaryEffort);
@@ -300,6 +304,22 @@ export default function QAArena() {
     } finally {
       setIsSummarizing(false);
       setSummaryProgress("");
+    }
+  };
+
+  // Promote the generated card into the RAG knowledge base (user-confirmed; the backend
+  // classifies a topic + factualizes before indexing). One-shot per card.
+  const handleIngestKnowledge = async () => {
+    if (!activeId || !summaryResult || ingesting || ingestResult?.ok) return;
+    setIngesting(true);
+    setIngestResult(null);
+    try {
+      const r = await ingestQACardToKnowledge(activeId, summaryResult.content);
+      setIngestResult(r);
+    } catch (e: any) {
+      setIngestResult({ ok: false, topic: null, reason: e.message || "收录失败" });
+    } finally {
+      setIngesting(false);
     }
   };
 
@@ -628,6 +648,17 @@ export default function QAArena() {
                   variant="outline"
                   size="sm"
                   className="gap-1"
+                  onClick={handleIngestKnowledge}
+                  disabled={ingesting || !!ingestResult?.ok}
+                  title="把卡片中确定的知识清洗后收录进知识库，供今后出题检索（自我进化）"
+                >
+                  {ingesting ? <Loader2 className="w-4 h-4 animate-spin" /> : <BookPlus className="w-4 h-4" />}
+                  {ingestResult?.ok ? "已收录" : "收录进知识库"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1"
                   onClick={() => downloadMarkdown(summaryResult.content, summaryResult.filename)}
                 >
                   <Download className="w-4 h-4" /> 下载 Markdown
@@ -637,6 +668,16 @@ export default function QAArena() {
                 </button>
               </div>
             </div>
+            {ingestResult && (
+              <div
+                className="px-5 py-2 text-xs border-b border-border/50"
+                style={{ color: ingestResult.ok ? "var(--sig-accent)" : "var(--sig-fg-dim, #888)" }}
+              >
+                {ingestResult.ok
+                  ? `✓ 已收录到「${ingestResult.topic}」知识库，下次出题即可检索到`
+                  : `· ${ingestResult.reason}`}
+              </div>
+            )}
             <div className="px-5 py-4 flex-1">
               <div className="md-content text-sm leading-[1.8]">
                 <Markdown>{summaryResult.content}</Markdown>

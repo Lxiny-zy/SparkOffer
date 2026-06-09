@@ -59,27 +59,51 @@ def chunk_text(chunk) -> str:
     return ""
 
 
+def _coerce_reasoning(val) -> str:
+    """Best-effort pull a reasoning string out of whatever shape the gateway used."""
+    if isinstance(val, str):
+        return val
+    if isinstance(val, dict):
+        t = val.get("text") or val.get("content") or val.get("summary")
+        return t if isinstance(t, str) else ""
+    if isinstance(val, list):
+        parts: list[str] = []
+        for b in val:
+            if isinstance(b, str):
+                parts.append(b)
+            elif isinstance(b, dict):
+                t = b.get("text") or b.get("content") or b.get("summary")
+                if isinstance(t, str):
+                    parts.append(t)
+        return "".join(parts)
+    return ""
+
+
 def chunk_reasoning(chunk) -> str:
     """Extract the *thinking* (reasoning) delta from a streamed chunk, if the model emits one.
 
     Reasoning models (gpt-5.x / o-series / DeepSeek-R1) served through an OpenAI-compatible
     gateway stream their thinking in a side channel LangChain drops into ``additional_kwargs``
     (never ``content``) — usually ``reasoning_content`` (DeepSeek-style) or ``reasoning``.
-    Forwarding it keeps the SSE stream alive during long thinking and lets the UI show
-    progress. Never raises.
+    NOTE: OpenAI reasoning models do NOT expose raw reasoning by default; you only get a
+    delta here if the gateway forwards a reasoning summary. Forwarding it keeps the SSE
+    stream alive during long thinking and lets the UI show progress. Never raises.
     """
     kw = getattr(chunk, "additional_kwargs", None)
     if not isinstance(kw, dict):
         return ""
     for key in ("reasoning_content", "reasoning"):
-        val = kw.get(key)
-        if isinstance(val, str):
-            if val:
-                return val
-        elif isinstance(val, dict):
-            t = val.get("text") or val.get("content")
-            if isinstance(t, str) and t:
-                return t
+        s = _coerce_reasoning(kw.get(key))
+        if s:
+            return s
+    # Defensive: some gateways use a slightly different key (reasoning_text, thinking,
+    # thought, ...). Scan for any reasoning-like key carrying text.
+    for k, v in kw.items():
+        lk = str(k).lower()
+        if "reason" in lk or "think" in lk or "thought" in lk:
+            s = _coerce_reasoning(v)
+            if s:
+                return s
     return ""
 
 
