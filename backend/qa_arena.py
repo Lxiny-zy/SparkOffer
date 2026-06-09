@@ -250,21 +250,48 @@ async def _get_or_create_summary(
     return summary
 
 
-async def stream_qa_chat(
-    session_id: str, message: str, user_id: str
+def _chunk_text(chunk) -> str:
+    """Extract visible answer text from a streamed LangChain chunk, robust to provider quirks.
+
+    ``chunk.content`` is not always a plain string: OpenAI-compatible / reasoning gateways
+    stream it as a list of content blocks (``[{"type": "text", "text": ...}]`` or bare
+    strings), or as an empty list while the real answer is carried elsewhere. The old
+    ``chunk.content if hasattr(...)`` extraction returned the list verbatim — ``content += list``
+    then raised ``TypeError`` (swallowed by the outer handler) or, for empty lists, silently
+    appended nothing → blank reply. Reasoning-only deltas (answer in ``additional_kwargs``)
+    yield "" here by design; the visible answer is what we render. Never raises.
+    """
+    content = getattr(chunk, "content", None)
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                t = block.get("text") or block.get("content") or ""
+                if isinstance(t, str):
+                    parts.append(t)
+        return "".join(parts)
+    return ""
+
+
+async def _stream_chat_answer(
+    session_id: str, user_id: str, history: list[dict], prompt: str
 ) -> AsyncGenerator[str, None]:
-    """Stream SSE events for a QA arena chat turn."""
-    history = store.load_messages(session_id, user_id, limit=50)
-    store.save_message(session_id, user_id, "user", message)
+    """Core QA streaming, shared by first-send and regenerate.
 
-    # Auto-title on first user message
-    if not history:
-        title = message[:20].strip()
-        if len(message) > 20:
-            title += "..."
-        store.update_session_title(session_id, user_id, title)
-
-    memory_ctx = await _build_memory_context(message, user_id)
+    ``history`` is the prior conversation (NOT including ``prompt``); ``prompt`` is the
+    current user question to answer. Persists the assistant reply itself so callers stay
+    thin. Three mutually-exclusive terminal states:
+      - non-empty content, clean finish     → save assistant + ``done``
+      - non-empty content, mid-stream error → save partial  + ``error`` (no ``done``)
+      - empty content (any reason)          → persist nothing + ``error``
+    """
+    memory_ctx = await _build_memory_context(prompt, user_id)
 
     # Keep QA_ARENA_SYSTEM as a STABLE prefix so the channel's automatic prompt-prefix
     # cache can hit across turns. Dynamic content (retrieved memory, rolling summary)
@@ -287,16 +314,17 @@ async def stream_qa_chat(
     if memory_ctx:
         lc_messages.append({"role": "system", "content": memory_ctx})
 
-    lc_messages.append({"role": "user", "content": message})
+    lc_messages.append({"role": "user", "content": prompt})
 
     content = ""
+    stream_error = False
     try:
         llm = get_langchain_llm()
         aiter = llm.astream(lc_messages).__aiter__()
         while True:
             try:
                 chunk = await asyncio.wait_for(aiter.__anext__(), timeout=IDLE_HEARTBEAT_SECONDS)
-                token = chunk.content if hasattr(chunk, "content") else ""
+                token = _chunk_text(chunk)
                 if token:
                     content += token
                     yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
@@ -305,27 +333,83 @@ async def stream_qa_chat(
             except StopAsyncIteration:
                 break
     except Exception as e:
+        # astream can't fail over once the first chunk is out, so a mid-stream drop
+        # propagates here. Whatever streamed before the drop is preserved below.
         logger.error("QA arena LLM call failed: %s", e)
-        if not content:
-            content = "抱歉，AI 服务暂时不可用，请稍后重试。"
-            yield f"data: {json.dumps({'type': 'token', 'content': content}, ensure_ascii=False)}\n\n"
+        stream_error = True
 
-    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+    content = content.strip()
 
+    # Empty completion — channel cooldown/failover, content filter, a reasoning model
+    # that produced no visible answer, or a provider that streamed content in a field we
+    # don't read. The backend call "succeeded" yet there is nothing to show. Don't persist
+    # a blank turn or send a silent ``done`` (which renders an empty bubble): surface a
+    # retry so the user can regenerate — a fresh attempt / channel often succeeds. Mirrors
+    # the guard already on the summary path.
+    if not content:
+        logger.warning("QA arena produced empty content for session %s", session_id)
+        yield f"data: {json.dumps({'type': 'error', 'message': '模型暂时无响应，请点击重新生成'}, ensure_ascii=False)}\n\n"
+        return
+
+    # Persist whatever we got (full or partial) so a reload shows it and regenerate can
+    # cleanly replace it.
     store.save_message(session_id, user_id, "assistant", content[:MAX_RESPONSE_STORE_LENGTH])
 
-    # Lightweight profile evolution: track QA activity for learning insights
-    # This runs in background to avoid blocking the response stream
+    if stream_error:
+        yield f"data: {json.dumps({'type': 'error', 'message': '回复被中断，可能不完整，请点击重新生成'}, ensure_ascii=False)}\n\n"
+    else:
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    # Lightweight profile evolution: track QA activity for learning insights.
+    # Runs after the stream so it never blocks the response.
     try:
         from backend.memory import update_profile_realtime
         update_profile_realtime(
             mode="qa_arena",
             topic=None,
             user_id=user_id,
-            score_entry={"score": None, "question": message[:80]},
+            score_entry={"score": None, "question": prompt[:80]},
         )
     except Exception:
         pass  # Non-critical, don't break the chat flow
+
+
+async def stream_qa_chat(
+    session_id: str, message: str, user_id: str
+) -> AsyncGenerator[str, None]:
+    """Stream SSE events for a new QA arena chat turn (saves the user message)."""
+    history = store.load_messages(session_id, user_id, limit=50)
+    store.save_message(session_id, user_id, "user", message)
+
+    # Auto-title on first user message
+    if not history:
+        title = message[:20].strip()
+        if len(message) > 20:
+            title += "..."
+        store.update_session_title(session_id, user_id, title)
+
+    async for event in _stream_chat_answer(session_id, user_id, history, message):
+        yield event
+
+
+async def stream_qa_regenerate(
+    session_id: str, user_id: str
+) -> AsyncGenerator[str, None]:
+    """Re-answer the last user question, replacing any prior broken/partial/empty reply.
+
+    The user message is NOT re-saved; the trailing assistant message (if any) is dropped
+    so the regenerated answer cleanly replaces it. Shares the same context window as
+    ``stream_qa_chat`` so the regenerated answer sees the same history.
+    """
+    store.delete_last_message_if_assistant(session_id, user_id)
+    messages = store.load_messages(session_id, user_id, limit=50)
+    if not messages or messages[-1]["role"] != "user":
+        yield f"data: {json.dumps({'type': 'error', 'message': '没有可重新生成的提问'}, ensure_ascii=False)}\n\n"
+        return
+    prompt = messages[-1]["content"]
+    history = messages[:-1]
+    async for event in _stream_chat_answer(session_id, user_id, history, prompt):
+        yield event
 
 
 SINGLE_PASS_BUDGET = 40000  # formatted-conversation chars that still fit one summary call
@@ -413,7 +497,7 @@ async def stream_generate_summary(
         while True:
             try:
                 chunk = await asyncio.wait_for(aiter.__anext__(), timeout=IDLE_HEARTBEAT_SECONDS)
-                token = chunk.content if hasattr(chunk, "content") else ""
+                token = _chunk_text(chunk)
                 if token:
                     content += token
                     chars_since_heartbeat += len(token)

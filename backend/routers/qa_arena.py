@@ -69,6 +69,24 @@ def chat(session_id: str, body: dict, user_id: str = Depends(get_current_user)):
     )
 
 
+@router.post("/sessions/{session_id}/regenerate")
+def regenerate(session_id: str, user_id: str = Depends(get_current_user)):
+    """Re-answer the last user question (e.g. after a cut-off or empty reply).
+
+    No request body: the prompt is the last stored user message. Any trailing
+    assistant reply is dropped and replaced by the fresh answer.
+    """
+    if not store.get_session(session_id, user_id):
+        raise HTTPException(404, "会话不存在")
+
+    from backend.qa_arena import stream_qa_regenerate
+    return StreamingResponse(
+        stream_qa_regenerate(session_id, user_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.post("/sessions/{session_id}/summary")
 def summary(session_id: str, effort: str = "", user_id: str = Depends(get_current_user)):
     if not store.get_session(session_id, user_id):

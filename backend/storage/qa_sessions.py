@@ -92,6 +92,25 @@ def clear_messages(session_id: str, user_id: str) -> bool:
     return True
 
 
+def delete_last_message_if_assistant(session_id: str, user_id: str) -> bool:
+    """Delete the most recent message iff it is an assistant turn.
+
+    Used by the regenerate flow to drop a broken/partial/empty AI reply before
+    re-answering the same user question — without touching the user message.
+    Returns True if a row was deleted.
+    """
+    conn = get_db()
+    row = conn.execute(
+        "SELECT id, role FROM qa_messages WHERE session_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
+        (session_id, user_id),
+    ).fetchone()
+    if not row or row["role"] != "assistant":
+        return False
+    conn.execute("DELETE FROM qa_messages WHERE id = ?", (row["id"],))
+    conn.commit()
+    return True
+
+
 def message_count(session_id: str, user_id: str) -> int:
     conn = get_db()
     return conn.execute(

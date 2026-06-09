@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, memo, useMemo } from "react";
 import {
   Plus, Trash2, Send, Download, FileText, Loader2,
-  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square,
+  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square, RefreshCw, AlertCircle,
 } from "lucide-react";
 import { Markdown } from "../components/ChatBubble";
 import { cn } from "@/lib/utils";
@@ -14,6 +14,7 @@ import {
   loadQAMessages,
   clearQAMessages,
   streamQAChat,
+  regenerateQAChat,
   generateQASummary,
   downloadMarkdown,
   type QASession,
@@ -57,6 +58,7 @@ export default function QAArena() {
   const [messages, setMessages] = useState<QAMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [summaryProgress, setSummaryProgress] = useState("");
   const [summaryEffort, setSummaryEffort] = useState("");
@@ -103,6 +105,7 @@ export default function QAArena() {
     setActiveId(id);
     setSummaryResult(null);
     setShowSummary(false);
+    setStreamError(null);
     const msgs = await loadQAMessages(id);
     // Guard against out-of-order responses: if the user switched again while this
     // load was in flight, don't clobber the newer session's messages.
@@ -116,6 +119,7 @@ export default function QAArena() {
     setMessages([]);
     setSummaryResult(null);
     setShowSummary(false);
+    setStreamError(null);
     inputRef.current?.focus();
   };
 
@@ -144,26 +148,20 @@ export default function QAArena() {
     setEditingId(null);
   };
 
-  const handleSend = async (overrideText?: string) => {
-    const text = (overrideText || input).trim();
-    if (!text || isStreaming || !activeId) return;
-
-    const userMsg: QAMessage = { role: "user", content: text, created_at: new Date().toISOString() };
-    setMessages((prev) => [...prev, userMsg]);
-    setInput("");
-    // Reset textarea height
-    if (inputRef.current) {
-      inputRef.current.style.height = "auto";
-    }
+  // Shared streaming consumer for both first-send and regenerate. `makeStream` receives
+  // the abort signal so handleStop can cancel the underlying fetch. Assumes the LAST
+  // message in state is the assistant placeholder to fill.
+  const consumeStream = useCallback(async (makeStream: (signal: AbortSignal) => AsyncGenerator<any>) => {
     setIsStreaming(true);
     isStreamingRef.current = true;
+    setStreamError(null);
 
     const controller = new AbortController();
     abortRef.current = controller;
 
     let assistantContent = "";
     let pendingUpdate = false;
-    setMessages((prev) => [...prev, { role: "assistant", content: "", created_at: "" }]);
+    let errMsg: string | null = null;
 
     const flushUpdate = () => {
       rafRef.current = null;
@@ -180,20 +178,25 @@ export default function QAArena() {
     };
 
     try {
-      for await (const event of streamQAChat(activeId, text, controller.signal)) {
+      for await (const event of makeStream(controller.signal)) {
         if (event.type === "token") {
           assistantContent += event.content;
           if (!pendingUpdate) {
             pendingUpdate = true;
             rafRef.current = requestAnimationFrame(flushUpdate);
           }
+        } else if (event.type === "error") {
+          // Backend surfaced an empty / interrupted completion. Keep whatever streamed
+          // (if anything) and show a retry hint instead of a silent blank bubble.
+          errMsg = event.message || "生成失败，请点击重新生成";
+          break;
         } else if (event.type === "done") {
           break;
         }
       }
     } catch (err: any) {
       if (err.name !== "AbortError") {
-        assistantContent += assistantContent ? "\n\n[出错了: " + err.message + "]" : `出错了: ${err.message}`;
+        errMsg = err.message || "网络异常，请点击重新生成";
       }
     } finally {
       // Cancel any pending RAF and do a final flush
@@ -209,8 +212,49 @@ export default function QAArena() {
       abortRef.current = null;
       isStreamingRef.current = false;
       setIsStreaming(false);
+      if (errMsg) setStreamError(errMsg);
       listQASessions().then((data) => setSessions(data.sessions));
     }
+  }, []);
+
+  const handleSend = async (overrideText?: string) => {
+    const text = (overrideText || input).trim();
+    if (!text || isStreaming || !activeId) return;
+    const sid = activeId;
+
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", content: text, created_at: new Date().toISOString() },
+      { role: "assistant", content: "", created_at: "" },
+    ]);
+    setInput("");
+    // Reset textarea height
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
+
+    await consumeStream((signal) => streamQAChat(sid, text, signal));
+  };
+
+  // Re-answer the last user question without re-typing it. Replaces the trailing
+  // assistant bubble (broken / partial / empty) with a freshly streamed answer.
+  const handleRegenerate = async () => {
+    if (!activeId || isStreaming || messages.length === 0) return;
+    const sid = activeId;
+
+    setMessages((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.role === "assistant") {
+        const updated = [...prev];
+        updated[updated.length - 1] = { role: "assistant", content: "", created_at: "" };
+        return updated;
+      }
+      // Last turn left no assistant reply (e.g. a prior empty completion) — add a slot.
+      return [...prev, { role: "assistant", content: "", created_at: "" }];
+    });
+
+    await consumeStream((signal) => regenerateQAChat(sid, signal));
   };
 
   const handleStop = () => {
@@ -223,6 +267,7 @@ export default function QAArena() {
     if (!activeId) return;
     await clearQAMessages(activeId);
     setMessages([]);
+    setStreamError(null);
   };
 
   const handleGenerateSummary = async () => {
@@ -471,11 +516,29 @@ export default function QAArena() {
           ) : (
             <div className="max-w-3xl mx-auto space-y-6">
               {messages.map((m, i) => (
-                <ChatMessage key={i} role={m.role} content={m.content} />
+                <ChatMessage
+                  key={i}
+                  role={m.role}
+                  content={m.content}
+                  emptyHint={m.role === "assistant" && !m.content && !isStreaming && i === messages.length - 1}
+                />
               ))}
               {isStreaming && messages[messages.length - 1]?.content === "" && (
                 <div className="flex items-center gap-2 text-dim text-sm">
                   <Loader2 className="w-4 h-4 animate-spin" /> 思考中...
+                </div>
+              )}
+              {!isStreaming && messages.length > 0 && (
+                <div className="flex">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-dim h-7 px-2 text-xs gap-1"
+                    onClick={handleRegenerate}
+                    title="重新生成上一条回复（无需重新输入问题）"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> 重新生成
+                  </Button>
                 </div>
               )}
             </div>
@@ -485,6 +548,12 @@ export default function QAArena() {
         {/* Input */}
         {activeId && (
           <div className="px-3 md:px-8 py-3 border-t border-border/50 safe-area-bottom" style={{ background: "var(--sig-bg)" }}>
+            {streamError && !isStreaming && (
+              <div className="max-w-3xl mx-auto mb-2 flex items-center gap-1.5 text-xs text-dim">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--sig-accent)" }} />
+                <span>{streamError}</span>
+              </div>
+            )}
             <div className="max-w-3xl mx-auto flex items-end gap-2">
               <textarea
                 ref={inputRef}
@@ -561,7 +630,7 @@ export default function QAArena() {
   );
 }
 
-const ChatMessage = memo(function ChatMessage({ role, content }: { role: string; content: string }) {
+const ChatMessage = memo(function ChatMessage({ role, content, emptyHint }: { role: string; content: string; emptyHint?: boolean }) {
   if (role === "user") {
     return (
       <div className="flex justify-end animate-fade-in">
@@ -575,7 +644,11 @@ const ChatMessage = memo(function ChatMessage({ role, content }: { role: string;
     <div className="flex flex-col animate-fade-in">
       <div className="sig-card max-w-full leading-[1.8] text-[15px] text-text rounded-lg rounded-tl-sm px-4 py-3">
         <div className="md-content">
-          <Markdown>{content}</Markdown>
+          {content ? (
+            <Markdown>{content}</Markdown>
+          ) : emptyHint ? (
+            <span className="text-dim text-sm italic">（本次回复为空，请点击下方"重新生成"）</span>
+          ) : null}
         </div>
       </div>
     </div>

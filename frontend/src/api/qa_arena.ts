@@ -95,6 +95,26 @@ export async function* streamQAChat(sessionId: string, message: string, signal?:
   }
 }
 
+// Re-answer the last user question (regenerate). No body: the backend re-uses the
+// last stored user message and drops any trailing (broken/partial/empty) AI reply.
+export async function* regenerateQAChat(sessionId: string, signal?: AbortSignal): AsyncGenerator<any> {
+  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/regenerate`, {
+    method: "POST",
+    headers: authHeaders(),
+    signal,
+  });
+
+  if (handleStreamUnauthorized(res)) {
+    return;
+  }
+
+  if (!res.ok) throw new Error(`重新生成失败: ${res.status}`);
+
+  for await (const event of iterSSEFrames(res)) {
+    yield event;
+  }
+}
+
 // ── Summary ──
 
 export async function generateQASummary(
