@@ -96,19 +96,15 @@ export default function Interview() {
         });
         if (sess.questions?.length) setQuestions(sess.questions);
         if (progress.partial_answers) {
-          const parsed: Record<number, string> = {};
-          for (const [k, v] of Object.entries(progress.partial_answers)) {
-            parsed[Number(k)] = v as string;
-          }
-          setAnswers(parsed);
+          // Keys are question IDs verbatim. They can be strings like "Q2"
+          // (the LLM emits string ids), so do NOT Number() them — that yields
+          // NaN and collapses every answer into one key, which is exactly the
+          // "answers all gone after resume" bug.
+          setAnswers({ ...progress.partial_answers });
         }
         if (typeof progress.current_index === "number") setCurrentIndex(progress.current_index);
         if (progress.hints) {
-          const parsedH: Record<number, HintState> = {};
-          for (const [k, v] of Object.entries(progress.hints)) {
-            parsedH[Number(k)] = v as HintState;
-          }
-          setHints(parsedH);
+          setHints({ ...progress.hints });
         }
         // Restore last typed draft into drillInput
         const restoredAnswers = progress.partial_answers || {};
@@ -135,11 +131,7 @@ export default function Interview() {
             if (raw) {
               const local = JSON.parse(raw);
               if (local.partial_answers && Object.keys(local.partial_answers).length) {
-                const parsed: Record<number, string> = {};
-                for (const [k, v] of Object.entries(local.partial_answers)) {
-                  parsed[Number(k)] = v as string;
-                }
-                setAnswers(parsed);
+                setAnswers({ ...local.partial_answers });
                 if (typeof local.current_index === "number") setCurrentIndex(local.current_index);
                 toast.info("已从本地缓存恢复未同步的草稿");
               }
