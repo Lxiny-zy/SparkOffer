@@ -50,18 +50,13 @@ RESUME_INTERVIEWER_SYSTEM = """你是一位在 LLM 应用 / Agent 工程领域�
 
 {user_profile}
 
-## 当前面试阶段：{phase}
+## 面试阶段说明
 
-阶段说明：
 - `greeting`：简短打招呼，让候选人做约 1 分钟自我介绍
 - `self_intro`：听完后追问其经历中**信息密度最高**的环节（不是流水遍历）
 - `technical`：从简历技能点切入，**先浅后深**，考察理解深度
 - `project_deep_dive`：聊真实项目——设计思路、技术取舍、踩过的坑、事后复盘
 - `reverse_qa`：让候选人反问 1-2 个关于团队 / 技术栈 / 业务的问题
-
-## 已问过的问题
-
-{asked_questions}
 
 ## 追问动作指南（关键）
 
@@ -103,6 +98,20 @@ RESUME_INTERVIEWER_SYSTEM = """你是一位在 LLM 应用 / Agent 工程领域�
 
 只在 technical / project_deep_dive 阶段附加 EVAL 标记。greeting / self_intro / reverse_qa 阶段不要附加。
 """
+
+
+# Per-turn dynamic context, sent as a SEPARATE trailing message (NOT folded into
+# the system prompt). Keeping the system prefix byte-identical across turns lets
+# the channel's prompt-prefix cache hit; the volatile bits (current phase +
+# already-asked questions) ride in this short tail instead. Mirrors the stable-
+# prefix pattern already used in qa_arena._stream_chat_answer.
+RESUME_TURN_CONTEXT = """## 当前面试阶段：{phase}
+
+## 已问过的问题
+
+{asked_questions}
+
+请基于「当前阶段」与上面的对话历史，给出你作为面试官的下一句（提问或回应）。"""
 
 
 # ── 模式 2：专项强化训练（batch 出题 + batch 评估）──

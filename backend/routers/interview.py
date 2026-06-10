@@ -26,10 +26,37 @@ from backend.live_store import (
     graphs, drill_sessions, job_prep_sessions,
     save_live, get_live, del_live,
 )
+from backend.storage.live_sessions import save_live_session, load_live_session
 from backend.utils.sse_helpers import sse_event, streaming_response
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api")
+
+
+def _get_resume_graph(session_id: str, user_id: str) -> dict | None:
+    """Return the in-memory resume-graph entry, rehydrating on a cache miss.
+
+    The graph object can't be persisted, but its state lives in the SqliteSaver
+    keyed by ``thread_id=session_id``. On a miss (restart / different worker /
+    TTL eviction) we reload the session meta from ``live_sessions``, recompile
+    the graph bound to the same user, and the checkpoint replays automatically
+    on the next ``invoke``/``get_state``. Returns None when no such session
+    exists (caller raises 404).
+    """
+    if session_id in graphs:
+        return graphs[session_id]
+    meta = load_live_session(session_id, user_id)
+    if not meta:
+        return None
+    entry = {
+        "graph": compile_resume_interview(meta["user_id"]),
+        "config": {"configurable": {"thread_id": session_id}},
+        "mode": InterviewMode(meta.get("mode", InterviewMode.RESUME.value)),
+        "topic": meta.get("topic"),
+        "user_id": meta["user_id"],
+    }
+    graphs[session_id] = entry
+    return entry
 
 
 @router.get("/interview/rag-metrics")
@@ -106,6 +133,11 @@ async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get
                     "mode": req.mode, "topic": req.topic,
                     "user_id": user_id,
                 }
+                # Persist session meta (NOT the graph object) so a restart /
+                # different worker can recompile and replay the checkpoint.
+                save_live_session(session_id, "resume", user_id, {
+                    "mode": req.mode.value, "topic": req.topic, "user_id": user_id,
+                })
                 yield sse_event({"type": "complete", "data": {
                     "session_id": session_id, "mode": req.mode.value,
                     "topic": req.topic, "message": ai_message,
@@ -142,10 +174,9 @@ async def start_interview_stream(req: StartInterviewRequest, user_id: str = Depe
 
 @router.post("/interview/chat")
 async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
-    if req.session_id not in graphs:
-        raise HTTPException(404, "Session not found. It may have expired (in-memory only).")
-
-    entry = graphs[req.session_id]
+    entry = _get_resume_graph(req.session_id, user_id)
+    if entry is None:
+        raise HTTPException(404, "Session not found. It may have expired.")
     if entry.get("user_id") != user_id:
         raise HTTPException(403, "Access denied.")
 
@@ -422,10 +453,9 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         return streaming_response(_stream_job_prep())
 
     # -- Resume mode --
-    if session_id not in graphs:
+    entry = _get_resume_graph(session_id, user_id)
+    if entry is None:
         raise HTTPException(404, "Session not found.")
-
-    entry = graphs[session_id]
     if entry.get("user_id") != user_id:
         raise HTTPException(403, "Access denied.")
 

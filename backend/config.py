@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     knowledge_path: Path = Path(__file__).resolve().parent.parent / "data" / "knowledge"
     high_freq_path: Path = Path(__file__).resolve().parent.parent / "data" / "high_freq"
     db_path: Path = Path(__file__).resolve().parent.parent / "data" / "interviews.db"
+    # LangGraph checkpoint store — separate file so its connection doesn't
+    # contend with interviews.db's WAL. Holds resume-interview graph state so an
+    # in-flight interview survives restarts / multiple workers.
+    checkpoint_db_path: Path = Path(__file__).resolve().parent.parent / "data" / "checkpoints.db"
 
     # Auth
     jwt_secret: str = "change-me-in-production"
@@ -53,6 +57,11 @@ class Settings(BaseSettings):
     # Interview settings
     max_questions_per_phase: int = 5
     max_drill_questions: int = 15
+
+    # Context budgeting (context_assembler.py) — fallback input window in tokens
+    # when no LLM channel declares an explicit `context_window`. 32k is a safe
+    # floor across modern OpenAI-compatible models.
+    default_context_window: int = 32768
 
     # Redis (optional — empty string disables; falls back to in-memory LRU)
     redis_url: str = ""

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
 from backend.storage import qa_sessions as store
+from backend.context_assembler import resolve_input_budget, count_tokens, pack_messages
 from backend.utils.sse_helpers import chunk_text as _chunk_text, chunk_reasoning as _chunk_reasoning
 
 logger = logging.getLogger("uvicorn")
@@ -228,32 +229,71 @@ COMPRESS_PROMPT = (
     "用户的理解程度和讨论结论。只输出摘要，不要其他内容。\n\n{conversation}"
 )
 
+# Incremental variant: fold NEW turns into the existing rolling summary instead
+# of re-summarizing the whole history from scratch. Cost is O(new turns) and old
+# context survives in compressed form. Output stays bounded (≤ ~600 chars).
+INCREMENTAL_COMPRESS_PROMPT = (
+    "下面是一段技术对话的【已有摘要】，以及在它之后【新增的对话】。"
+    "请把新增对话中的关键技术概念、用户理解程度和讨论结论，融合进已有摘要，"
+    "输出一段更新后的完整摘要（300字以内）。保留已有摘要中仍然重要的信息，"
+    "去掉冗余。只输出更新后的摘要，不要其他内容。\n\n"
+    "## 已有摘要\n{prev_summary}\n\n## 新增的对话\n{conversation}"
+)
+
 
 async def _get_or_create_summary(
-    session_id: str, user_id: str, old_messages: list[dict], total_count: int,
-) -> str:
-    """Return cached summary or generate a new one."""
-    cached = store.get_context_summary(session_id, user_id)
-    if cached:
-        summary_text, summary_count = cached
-        if total_count - summary_count < SUMMARY_REGEN_INTERVAL:
-            return summary_text
+    session_id: str, user_id: str, history: list[dict], total_count: int,
+) -> tuple[str, int]:
+    """Return ``(rolling_summary, covered)`` where ``covered`` is how many of the
+    OLDEST messages are folded into the summary.
 
-    # Compression target is ~200 chars, so modest per-message caps keep token cost low.
-    conversation = _format_conversation(old_messages, user_cap=800, assistant_cap=1500)
+    Incremental: reuses the cached summary and only folds in the turns added
+    since it was last built (prev_summary + new turns → updated summary), instead
+    of re-summarizing the whole history from scratch each time. Cost is O(new
+    turns); older context is preserved in compressed form rather than re-read. The
+    raw tail the caller still sends verbatim is ``history[covered:]``.
+    """
+    target_cover = total_count - KEEP_RECENT
+    if target_cover <= 0:
+        return "", 0
+
+    cached = store.get_context_summary(session_id, user_id)
+    prev_summary, covered = "", 0
+    if cached:
+        prev_summary, covered = cached
+        # Legacy rows stored len(history)-at-summary-time, not a cover count; if
+        # that exceeds the cover target the semantics don't line up — rebuild.
+        if covered > target_cover:
+            prev_summary, covered = "", 0
+        elif target_cover - covered < SUMMARY_REGEN_INTERVAL:
+            return prev_summary, covered  # fresh enough; reuse as-is
+
+    new_msgs = history[covered:target_cover]
+    if not new_msgs:
+        return prev_summary, covered
+
+    # Modest per-message caps keep the incremental call cheap (target ~300 chars).
+    conversation = _format_conversation(new_msgs, user_cap=800, assistant_cap=1500)
     llm = get_langchain_llm()
     try:
+        if prev_summary:
+            user_content = INCREMENTAL_COMPRESS_PROMPT.format(
+                prev_summary=prev_summary, conversation=conversation,
+            )
+        else:
+            user_content = COMPRESS_PROMPT.format(conversation=conversation)
         resp = await llm.ainvoke([
             {"role": "system", "content": "你是对话摘要助手。"},
-            {"role": "user", "content": COMPRESS_PROMPT.format(conversation=conversation)},
+            {"role": "user", "content": user_content},
         ])
-        summary = (resp.content or "").strip()[:500]
+        summary = (resp.content or "").strip()[:600]
     except Exception as e:
         logger.warning("Context compression failed: %s", e)
-        summary = conversation[:300]
+        # Keep the prior summary if we have one; else a raw excerpt of the new turns.
+        summary = prev_summary or conversation[:300]
 
-    store.save_context_summary(session_id, user_id, summary, total_count)
-    return summary
+    store.save_context_summary(session_id, user_id, summary, target_cover)
+    return summary, target_cover
 
 
 def _sse(payload: dict) -> str:
@@ -288,17 +328,37 @@ async def _stream_chat_answer(
     # every turn and defeat caching. They go in as separate messages after the prefix.
     lc_messages: list[dict] = [{"role": "system", "content": QA_ARENA_SYSTEM}]
 
-    # Context compression for long conversations
+    # Context compression for long conversations. The rolling summary is built
+    # incrementally; the raw tail we still send verbatim is everything AFTER the
+    # part the summary already covers (not a fixed last-N), so the middle is never
+    # lost between the summary and the recent window.
     if len(history) > COMPRESSION_THRESHOLD:
-        old_messages = history[:-KEEP_RECENT]
-        recent_messages = history[-KEEP_RECENT:]
-        summary = await _get_or_create_summary(session_id, user_id, old_messages, len(history))
-        lc_messages.append({"role": "system", "content": f"## 之前的对话摘要\n{summary}\n\n（以下是最近的对话记录）"})
-        for m in recent_messages:
-            lc_messages.append({"role": m["role"], "content": m["content"]})
+        summary, covered = await _get_or_create_summary(session_id, user_id, history, len(history))
+        raw_tail = history[covered:]
+        summary_block = (
+            f"## 之前的对话摘要\n{summary}\n\n（以下是最近的对话记录）" if summary else ""
+        )
     else:
-        for m in history:
-            lc_messages.append({"role": m["role"], "content": m["content"]})
+        summary_block = ""
+        raw_tail = history
+
+    # #4 token budgeting: the system prefix, rolling summary, retrieved memory and
+    # the user prompt are all bounded and kept whole; budget only the raw tail
+    # (the part that grows) so a very long recent window can't overflow the input
+    # window. pack_messages drops the OLDEST tail turns first, always keeping the
+    # latest two.
+    budget = resolve_input_budget()
+    reserved = (
+        count_tokens(QA_ARENA_SYSTEM) + count_tokens(prompt)
+        + count_tokens(summary_block) + count_tokens(memory_ctx)
+    )
+    hist_budget = max(1000, budget - reserved)
+    kept_tail, _tail_report = pack_messages(raw_tail, hist_budget, keep_last=2)
+
+    if summary_block:
+        lc_messages.append({"role": "system", "content": summary_block})
+    for m in kept_tail:
+        lc_messages.append({"role": m["role"], "content": m["content"]})
 
     if memory_ctx:
         lc_messages.append({"role": "system", "content": memory_ctx})

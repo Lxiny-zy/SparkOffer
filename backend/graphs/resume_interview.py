@@ -5,14 +5,15 @@ import re
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import MemorySaver
 
 from backend.models import ResumeInterviewState, InterviewPhase
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
+from backend.graphs.checkpointer import get_checkpointer
 from backend.indexer import query_resume, gather_topic_contexts, load_topics
 from backend.memory import get_profile_summary
-from backend.prompts.interviewer import RESUME_INTERVIEWER_SYSTEM
+from backend.context_assembler import resolve_input_budget, count_tokens
+from backend.prompts.interviewer import RESUME_INTERVIEWER_SYSTEM, RESUME_TURN_CONTEXT
 
 logger = logging.getLogger("uvicorn")
 
@@ -95,15 +96,17 @@ def _parse_inline_eval(content: str) -> tuple[str, dict | None]:
 def _make_init_interview(user_id: str):
     """Create init_interview node bound to a specific user."""
     def init_interview(state: ResumeInterviewState) -> dict:
-        """Load resume context and prepare the opening."""
+        """Load resume context, freeze the stable system prefix, prepare the opening."""
         resume_ctx = query_resume("列出候选人的所有项目经历、技能和教育背景", user_id)
         knowledge_ctx = _retrieve_all_topic_knowledge(user_id)
 
+        # Build the STABLE system prefix ONCE. It holds only data fixed for the
+        # whole interview (resume / knowledge / long-term profile); the per-turn
+        # phase + asked-questions ride in RESUME_TURN_CONTEXT instead, so this
+        # prefix stays byte-identical across turns → prompt-prefix cache hits.
         system_prompt = RESUME_INTERVIEWER_SYSTEM.format(
             resume_context=resume_ctx,
             knowledge_context=knowledge_ctx or "（暂无知识库数据）",
-            phase=InterviewPhase.GREETING.value,
-            asked_questions="无",
             user_profile=get_profile_summary(user_id),
         )
 
@@ -115,6 +118,7 @@ def _make_init_interview(user_id: str):
 
         return {
             "messages": [response],
+            "system_prompt": system_prompt,
             "resume_context": resume_ctx,
             "knowledge_context": knowledge_ctx,
             "phase": InterviewPhase.GREETING.value,
@@ -133,19 +137,42 @@ def _make_interviewer_ask(user_id: str):
         asked = state.get("questions_asked", [])
         asked_str = "\n".join(f"- {q}" for q in asked) if asked else "无"
 
-        # Knowledge was retrieved once at init and cached in state — the query is
-        # fixed, so re-retrieving every turn returns identical chunks.
-        knowledge_ctx = state.get("knowledge_context", "")
-        system_prompt = RESUME_INTERVIEWER_SYSTEM.format(
-            resume_context=state.get("resume_context", ""),
-            knowledge_context=knowledge_ctx or "（暂无知识库数据）",
+        # STABLE system prefix was frozen at init (resume / knowledge / profile).
+        # Rebuild only as a fallback for sessions checkpointed before this field
+        # existed.
+        stable = state.get("system_prompt")
+        if not stable:
+            stable = RESUME_INTERVIEWER_SYSTEM.format(
+                resume_context=state.get("resume_context", ""),
+                knowledge_context=state.get("knowledge_context", "") or "（暂无知识库数据）",
+                user_profile=get_profile_summary(user_id),
+            )
+
+        # Per-turn volatile context (phase + asked) rides in a trailing message so
+        # `stable` never changes across turns.
+        turn_ctx = RESUME_TURN_CONTEXT.format(
             phase=state.get("phase", "technical"),
             asked_questions=asked_str,
-            user_profile=get_profile_summary(user_id),
         )
 
+        # Budget the history: keep the newest turns that fit after reserving room
+        # for the stable prefix + turn context. Full history stays in state; we
+        # only trim what we send the model this turn (always keep the latest turn).
+        budget = resolve_input_budget()
+        hist_budget = max(2000, budget - count_tokens(stable) - count_tokens(turn_ctx))
+        history = list(state.get("messages", []))
+        kept: list = []
+        used = 0
+        for m in reversed(history):
+            t = count_tokens(getattr(m, "content", "") or "") + 4
+            if kept and used + t > hist_budget:
+                break
+            kept.append(m)
+            used += t
+        kept.reverse()
+
         llm = get_langchain_llm()
-        messages = [SystemMessage(content=system_prompt)] + list(state.get("messages", []))
+        messages = [SystemMessage(content=stable)] + kept + [SystemMessage(content=turn_ctx)]
         response = llm.invoke(messages)
 
         # Parse and strip inline eval from response
@@ -254,6 +281,6 @@ def compile_resume_interview(user_id: str):
     })
 
     return graph.compile(
-        checkpointer=MemorySaver(),
+        checkpointer=get_checkpointer(),
         interrupt_before=["wait"],
     )

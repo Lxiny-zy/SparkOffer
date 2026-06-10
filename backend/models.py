@@ -30,6 +30,7 @@ class InterviewPhase(str, Enum):
 class ResumeInterviewState(TypedDict, total=False):
     messages: Annotated[list, add_messages]
     phase: str           # InterviewPhase value
+    system_prompt: str   # frozen STABLE system prefix (built once at init) → prompt-prefix cache hits
     resume_context: str
     knowledge_context: str   # cached at init; reused every ask (query is fixed)
     questions_asked: list[str]

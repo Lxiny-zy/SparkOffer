@@ -38,6 +38,7 @@ from backend.graphs.validators import (
 )
 from backend.indexer import safe_retrieve_topic_context
 from backend.llm_provider import get_langchain_llm
+from backend.context_assembler import ContextBudget, Section, resolve_input_budget, count_tokens
 from backend.live_store import drill_sessions, save_live
 from backend.memory import get_profile_summary_for_drill, get_topic_context_for_drill, _load_profile
 from backend.prompts.interviewer import (
@@ -152,9 +153,15 @@ class DrillPipeline:
             return f"{queries} 次检索 · {n} 个去重后片段"
         if stage == "generate":
             seed = self.ctx.get("seed_count", 0)
+            rep = self.ctx.get("context_report")
+            ctx_seg = ""
+            if rep:
+                ctx_seg = f" · ctx {rep['used']}/{rep['budget']} tok"
+                if rep.get("truncated"):
+                    ctx_seg += f"（截断 {','.join(rep['truncated'])}）"
             if seed:
-                return f"生成 {len(self.questions)} 题（{seed} 种子 + {len(self.questions) - seed} LLM）"
-            return f"生成 {len(self.questions)} 题"
+                return f"生成 {len(self.questions)} 题（{seed} 种子 + {len(self.questions) - seed} LLM）{ctx_seg}"
+            return f"生成 {len(self.questions)} 题{ctx_seg}"
         if stage == "validate":
             summaries = self.ctx.get("validator_summary") or []
             outcome = self.ctx.get("repair_outcome")
@@ -171,13 +178,16 @@ class DrillPipeline:
     # ── Stage 1: prepare ──
 
     async def _stage_prepare(self) -> AsyncGenerator[str, None]:
-        # Cheap, blocking-ish work — kept inline (no thread offload) because
-        # it's mostly disk + memory reads.
+        # Mostly disk + memory reads, EXCEPT get_topic_context_for_drill, which
+        # runs a semantic memory search (an embedding API round-trip) under the
+        # hood. That sync network call must be offloaded — calling it inline here
+        # would block the event loop for the whole round-trip (no SSE heartbeats
+        # could flush meanwhile).
         init_sr_for_existing_points(self.user_id)
         topic_display = _get_topic_display(self.user_id)
         topic_name = topic_display.get(self.topic, self.topic)
 
-        drill_ctx = get_topic_context_for_drill(self.topic, self.user_id)
+        drill_ctx = await asyncio.to_thread(get_topic_context_for_drill, self.topic, self.user_id)
 
         due_reviews = get_due_reviews(self.user_id, self.topic)
         due_points = [wp["point"] for wp in due_reviews[:5]]
@@ -264,7 +274,10 @@ class DrillPipeline:
             logger.warning("Phase 3 RAG failed (%s); falling back to empty context", exc)
             chunks, stats = [], None
 
-        knowledge_ctx = "\n\n---\n\n".join(chunks)[:5000]
+        # Join with a generous char safety ceiling only — the real bound is the
+        # token budget applied in _stage_generate (ContextBudget), so the model's
+        # actual input window governs how much knowledge survives, not a fixed cut.
+        knowledge_ctx = "\n\n---\n\n".join(chunks)[:12000]
         self.ctx["knowledge_ctx"] = knowledge_ctx
         self.ctx["knowledge_chunks"] = len(chunks)
         self.ctx["retrieval_queries"] = stats.queries if stats else 0
@@ -417,16 +430,42 @@ class DrillPipeline:
             )
             question_strategy = question_strategy + seed_hint
 
+        profile_summary = get_profile_summary_for_drill(self.user_id)
+        weak_points_text = "\n".join(weak_lines) or "暂无"
+        recent_text = "\n".join(f"- {q}" for q in drill_ctx["recent_questions"][-10:]) or "暂无"
+        knowledge_text = self.ctx.get("knowledge_ctx", "")
+
+        # #4 ContextAssembler: replace the old knowledge_ctx[:5000] hard cut with a
+        # token budget. Measure the template's fixed cost (small fields filled, the
+        # three big variable fields blank), then hand the remainder to
+        # knowledge / recent / insights by priority — knowledge carries the most
+        # value (p3) but the cheaper recent-question list (p2) wins ties on a tight
+        # budget because it guards against repeats.
+        fixed_prompt = DRILL_QUESTION_GEN_PROMPT.format(
+            topic_name=topic_name, knowledge_context="",
+            rag_quality_hint=self._rag_quality_hint(), user_profile=profile_summary,
+            mastery_info=drill_ctx["mastery_info"], weak_points=weak_points_text,
+            high_freq_questions=high_freq, recent_questions="", past_insights="",
+            question_strategy=question_strategy, diff_min=diff_min, diff_max=diff_max,
+        )
+        ctx_budget = max(1000, resolve_input_budget() - count_tokens(fixed_prompt))
+        packed = ContextBudget(ctx_budget).pack([
+            Section("recent", recent_text, priority=2),
+            Section("knowledge", knowledge_text, priority=3, min_tokens=200),
+            Section("insights", past_insights_text, priority=4, min_tokens=100),
+        ])
+        self.ctx["context_report"] = packed.report
+
         prompt = DRILL_QUESTION_GEN_PROMPT.format(
             topic_name=topic_name,
-            knowledge_context=self.ctx.get("knowledge_ctx", ""),
+            knowledge_context=packed.get("knowledge"),
             rag_quality_hint=self._rag_quality_hint(),
-            user_profile=get_profile_summary_for_drill(self.user_id),
+            user_profile=profile_summary,
             mastery_info=drill_ctx["mastery_info"],
-            weak_points="\n".join(weak_lines) or "暂无",
+            weak_points=weak_points_text,
             high_freq_questions=high_freq,
-            recent_questions="\n".join(f"- {q}" for q in drill_ctx["recent_questions"][-10:]) or "暂无",
-            past_insights=past_insights_text,
+            recent_questions=packed.get("recent") or "暂无",
+            past_insights=packed.get("insights") or "暂无历史数据",
             question_strategy=question_strategy,
             diff_min=diff_min,
             diff_max=diff_max,

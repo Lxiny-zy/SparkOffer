@@ -2,6 +2,13 @@
 langchain>=0.3.0
 langchain-openai>=0.2.0
 langgraph>=0.2.0
+# Persistent LangGraph checkpointer (resume-interview state survives restarts /
+# multiple workers). Provides langgraph.checkpoint.sqlite.SqliteSaver.
+langgraph-checkpoint-sqlite>=2.0.0
+# Token counting for context budgeting (context_assembler.py). Already pulled in
+# transitively by langchain-openai; pinned here so the budgeter never silently
+# falls back to the char heuristic.
+tiktoken>=0.7.0
 
 # LlamaIndex
 llama-index>=0.11.0

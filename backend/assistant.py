@@ -8,6 +8,7 @@ from typing import AsyncGenerator
 
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
+from backend.context_assembler import resolve_input_budget, count_tokens, pack_messages
 from backend.memory import get_profile, get_profile_summary, _load_profile, _save_profile
 from backend.storage.sessions import list_sessions, list_distinct_topics, get_session, list_sessions_by_topic
 from backend.storage.favorites import list_favorites, get_favorite_tags
@@ -748,8 +749,18 @@ async def stream_assistant_chat(
 
 **重要：** 你已经了解这位同学的情况，回复时要体现你对 ta 的了解。比如知道 ta 的薄弱点可以主动关心进展，知道 ta 的强项可以适时肯定。不要重复告诉用户你知道他们的画像，自然地融入对话即可。"""
 
-    # ── Load history server-side ──
+    # ── Load history server-side, budgeted to the input window ──
     history = load_history(user_id, limit=30)
+    # Reserve room for the system prompt, the bound tool schemas (~14 tools carry
+    # a non-trivial fixed cost the model always sees), and the user message; the
+    # rest is the budget for prior turns. pack_messages drops oldest turns first.
+    _TOOLS_TOKEN_RESERVE = 4000
+    hist_budget = max(
+        1000,
+        resolve_input_budget() - count_tokens(dynamic_prompt) - count_tokens(message) - _TOOLS_TOKEN_RESERVE,
+    )
+    history, _hist_report = pack_messages(history, hist_budget, keep_last=2)
+
     lc_messages = [{"role": "system", "content": dynamic_prompt}]
     for m in history:
         lc_messages.append({"role": m["role"], "content": m["content"]})
