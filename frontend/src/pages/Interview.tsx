@@ -4,7 +4,7 @@ import { Markdown } from "../components/ChatBubble";
 import { Check, Minus, Star, Lightbulb, Eye, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import ChatBubble from "../components/ChatBubble";
-import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics } from "../api/interview";
+import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics, type DrillProgressPayload } from "../api/interview";
 import useVoiceInput from "../hooks/useVoiceInput";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -200,6 +200,46 @@ export default function Interview() {
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     };
   }, [currentIndex, answers, hints, sessionId, isBatchMode, restoring, finished, draftKey]);
+
+  // Snapshot of the latest savable state, read by the flush handlers below.
+  // Kept in a ref so the pagehide / unmount listeners never see a stale closure.
+  const saveSnapshotRef = useRef<{ enabled: boolean; payload: DrillProgressPayload | null }>({
+    enabled: false,
+    payload: null,
+  });
+  useEffect(() => {
+    saveSnapshotRef.current = {
+      enabled: isBatchMode && !!sessionId && !restoring && !finished,
+      payload: { current_index: currentIndex, partial_answers: answers, hints },
+    };
+  }, [isBatchMode, sessionId, restoring, finished, currentIndex, answers, hints]);
+
+  // Force an immediate (non-debounced) save. Critical for the "answer half, then
+  // exit" flow: the 400ms debounce is cleared on unmount without firing, so
+  // without this flush every input made since the last debounce tick is lost.
+  // keepalive ensures the POST still goes out while the page is being torn down.
+  const flushProgress = useCallback(() => {
+    const snap = saveSnapshotRef.current;
+    if (!snap.enabled || !snap.payload || !sessionId) return;
+    if (draftKey) {
+      try {
+        localStorage.setItem(draftKey, JSON.stringify({ ...snap.payload, savedAt: Date.now() }));
+      } catch { /* quota / private mode */ }
+    }
+    saveDrillProgress(sessionId, snap.payload, { keepalive: true }).catch(() => { /* localStorage still holds it */ });
+  }, [sessionId, draftKey]);
+
+  useEffect(() => {
+    const onVisibility = () => { if (document.visibilityState === "hidden") flushProgress(); };
+    window.addEventListener("pagehide", flushProgress);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flushProgress);
+      document.removeEventListener("visibilitychange", onVisibility);
+      // Route change / unmount — flush whatever is pending before the component dies.
+      flushProgress();
+    };
+  }, [flushProgress]);
 
   // Sync drillInput → answers so the draft survives refresh
   useEffect(() => {

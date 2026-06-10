@@ -239,12 +239,22 @@ export interface DrillProgressPayload {
   hints: Record<string | number, any>;
 }
 
-export async function saveDrillProgress(sessionId: string, payload: DrillProgressPayload): Promise<void> {
-  await authFetch(`${API_BASE}/interview/session/${sessionId}/progress`, {
+export async function saveDrillProgress(
+  sessionId: string,
+  payload: DrillProgressPayload,
+  opts: { keepalive?: boolean } = {},
+): Promise<void> {
+  const res = await authFetch(`${API_BASE}/interview/session/${sessionId}/progress`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    // keepalive lets the request survive page unload (pagehide / tab close),
+    // so the final flush isn't dropped when the user exits mid-drill.
+    keepalive: opts.keepalive,
   });
+  // Surface backend failures (404/4xx) instead of silently resolving — the
+  // caller's catch keeps the localStorage fallback + shows the retry toast.
+  if (!res.ok) throw new Error(await res.text());
 }
 
 export async function deleteSession(sessionId: string): Promise<any> {
