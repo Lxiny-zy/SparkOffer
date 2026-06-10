@@ -201,7 +201,7 @@ export async function getReferenceAnswer(
   topic: string,
   question: string,
   sessionId: string | null = null,
-  questionId: number | null = null,
+  questionId: number | string | null = null,
   force: boolean = false,
   mode: string = "full",
   callbacks?: SSECallbacks,

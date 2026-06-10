@@ -219,7 +219,9 @@ def generate_job_prep_questions(
         if not isinstance(q, dict):
             continue
         normalized.append({
-            "id": q.get("id", i),
+            # Force integer id — don't trust LLM-provided ids (it emits strings
+            # like "Q2", which break the frontend's per-question persistence).
+            "id": i,
             "question": q.get("question", "").strip(),
             "difficulty": int(q.get("difficulty", 3) or 3),
             "focus_area": q.get("focus_area", "").strip(),
@@ -400,7 +402,9 @@ async def stream_generate_job_prep_questions(
         if not isinstance(q, dict):
             continue
         normalized.append({
-            "id": q.get("id", i),
+            # Force integer id — don't trust LLM-provided ids (it emits strings
+            # like "Q2", which break the frontend's per-question persistence).
+            "id": i,
             "question": q.get("question", "").strip(),
             "difficulty": int(q.get("difficulty", 3) or 3),
             "focus_area": q.get("focus_area", "").strip(),

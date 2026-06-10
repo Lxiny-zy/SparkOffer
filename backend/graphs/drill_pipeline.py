@@ -393,8 +393,12 @@ class DrillPipeline:
 
         # Phase 7c: emit seed questions up-front so the user sees instant
         # progress while the LLM still has to generate the remainder.
+        # Force contiguous integer ids (1..len) — seed-pool rows carry string
+        # ids like "py-gil-01", which must not leak to the client/persistence
+        # (they break numeric assumptions and the LLM-question id offset below).
         if seed_questions:
-            for q in seed_questions:
+            for i, q in enumerate(seed_questions):
+                q["id"] = i + 1
                 yield sse_event({"type": "question", "data": q})
 
         past_insights_text = "\n".join(
@@ -563,8 +567,9 @@ class DrillPipeline:
             objects, _ = extract_complete_objects(accumulated)
             while emitted_count < len(objects):
                 q = objects[emitted_count]
-                if "id" not in q:
-                    q["id"] = emitted_count + 1
+                # Force a contiguous integer id — never trust the LLM-provided
+                # id (it emits strings like "Q2", which break persistence).
+                q["id"] = emitted_count + 1
                 emitted_count += 1
                 yield sse_event({"type": "question", "data": q})
 
@@ -578,8 +583,7 @@ class DrillPipeline:
                 raise RuntimeError(f"冷启动出题失败: {exc}")
 
         for i, q in enumerate(all_objects):
-            if "id" not in q:
-                q["id"] = i + 1
+            q["id"] = i + 1
         self.questions = all_objects[:10]
 
     # ── Stage 4: validate ──

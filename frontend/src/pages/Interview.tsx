@@ -351,7 +351,9 @@ export default function Interview() {
     setHintLoading(true);
     try {
       const topic = effectiveInit.topic || "";
-      const data = await getReferenceAnswer(topic, currentQ.question, sessionId, Number(qid), false, nextMode);
+      // Pass the question id verbatim — ids may be strings like "Q2", and
+      // Number("Q2") = NaN would break reference-answer caching on the backend.
+      const data = await getReferenceAnswer(topic, currentQ.question, sessionId, qid, false, nextMode);
       setHints((p) => ({
         ...p,
         [qid]: { ...p[qid], [nextMode]: data.reference_answer, stage: nextMode },
@@ -781,7 +783,7 @@ export default function Interview() {
             </h3>
             <p className="text-sm text-dim">
               {isBatchMode
-                ? `已完成 ${Object.keys(answers).filter((k) => answers[Number(k)]).length}/${questions.length} 题，结束后将进入 AI 评估。`
+                ? `已完成 ${Object.keys(answers).filter((k) => answers[k as any]).length}/${questions.length} 题，结束后将进入 AI 评估。`
                 : "结束后将生成面试复盘报告。"}
             </p>
             <div className="flex justify-center gap-3 pt-2">

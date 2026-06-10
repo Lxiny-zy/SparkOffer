@@ -202,9 +202,10 @@ def generate_drill_questions(topic: str, user_id: str) -> list[dict]:
             _logger.error(f"LLM raw response: {raw[:500]}")
             raise RuntimeError(f"出题失败，LLM 返回格式异常: {e}")
 
-    # Ensure each question has an id
+    # Force contiguous integer ids — don't trust LLM-provided ids (it emits
+    # strings like "Q2", which break the frontend's per-question persistence).
     for i, q in enumerate(questions):
-        if isinstance(q, dict) and "id" not in q:
+        if isinstance(q, dict):
             q["id"] = i + 1
     return questions[:10]
 
