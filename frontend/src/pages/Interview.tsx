@@ -65,6 +65,10 @@ export default function Interview() {
   });
 
   useEffect(() => {
+    // Build marker — confirms in the browser console that THIS build is the one
+    // actually served (vs a stale cached bundle).
+    // eslint-disable-next-line no-console
+    console.info("[drill] Interview build 2026-06-10-persist3 loaded");
     if (!isBatchMode && initData.message) {
       setMessages([{ role: "assistant", content: initData.message }]);
     }
@@ -79,6 +83,9 @@ export default function Interview() {
       .then((sess: any) => {
         const meta = sess.meta || {};
         const progress = meta.progress || {};
+        // eslint-disable-next-line no-console
+        console.info("[drill-restore] session=", sessionId, "mode=", sess.mode,
+          "progress=", JSON.stringify(progress).slice(0, 300));
         setRestoredMeta({
           mode: sess.mode,
           topic: sess.topic,
@@ -274,19 +281,52 @@ export default function Interview() {
   const totalQ = questions.length;
   const answeredCount = Object.keys(answers).length;
 
+  // Immediate (non-debounced) save with explicit values. Called on every
+  // question navigation so progress is persisted per step, independent of the
+  // debounce timer / unmount timing.
+  const persistNow = useCallback((
+    idx: number,
+    answersObj: Record<number, string>,
+    hintsObj: Record<number, HintState>,
+  ) => {
+    if (!isBatchMode || !sessionId || restoring || finished) return;
+    const payload = { current_index: idx, partial_answers: answersObj, hints: hintsObj };
+    if (draftKey) {
+      try { localStorage.setItem(draftKey, JSON.stringify({ ...payload, savedAt: Date.now() })); } catch { /* */ }
+    }
+    setSaveStatus("saving");
+    saveDrillProgress(sessionId, payload)
+      .then(() => {
+        setSaveStatus("saved");
+        setLastSavedAt(Date.now());
+        saveErrorShownRef.current = false;
+        if (draftKey) { try { localStorage.removeItem(draftKey); } catch { /* */ } }
+      })
+      .catch(() => {
+        setSaveStatus("error");
+        if (!saveErrorShownRef.current) {
+          saveErrorShownRef.current = true;
+          toast.error("云端保存失败，已在本地缓存，恢复后会自动同步");
+        }
+      });
+  }, [isBatchMode, sessionId, restoring, finished, draftKey]);
+
   const handleDrillSubmit = () => {
     const text = drillInput.trim();
     if (!text || !currentQ) return;
-    setAnswers((prev) => ({ ...prev, [currentQ.id]: text }));
+    const nextAnswers = { ...answers, [currentQ.id]: text };
+    setAnswers(nextAnswers);
     if (currentIndex < totalQ - 1) {
       const nextIdx = currentIndex + 1;
       // Load the destination question's existing answer (if it was answered
       // earlier and we're revisiting) so the drillInput→answers sync effect
       // doesn't overwrite it with an empty string.
-      setDrillInput(answers[questions[nextIdx]?.id] || "");
+      setDrillInput(nextAnswers[questions[nextIdx]?.id] || "");
       setCurrentIndex(nextIdx);
+      persistNow(nextIdx, nextAnswers, hints);
     } else {
       setDrillInput("");
+      persistNow(currentIndex, nextAnswers, hints);
       setFinished(true);
     }
   };
@@ -297,16 +337,20 @@ export default function Interview() {
       const nextIdx = currentIndex + 1;
       setDrillInput(answers[questions[nextIdx]?.id] || "");
       setCurrentIndex(nextIdx);
+      persistNow(nextIdx, answers, hints);
     } else {
       setDrillInput("");
+      persistNow(currentIndex, answers, hints);
       setFinished(true);
     }
   };
 
   const handlePrev = () => {
     if (currentIndex <= 0) return;
-    setDrillInput(answers[questions[currentIndex - 1]?.id] || "");
-    setCurrentIndex((i) => i - 1);
+    const prevIdx = currentIndex - 1;
+    setDrillInput(answers[questions[prevIdx]?.id] || "");
+    setCurrentIndex(prevIdx);
+    persistNow(prevIdx, answers, hints);
   };
 
   const handleHint = async () => {
