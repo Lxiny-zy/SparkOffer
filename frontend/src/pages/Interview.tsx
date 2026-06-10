@@ -207,7 +207,17 @@ export default function Interview() {
     const q = questions[currentIndex];
     if (!q) return;
     setAnswers((prev) => {
-      if (prev[q.id] === drillInput) return prev;
+      const cur = prev[q.id];
+      // Empty editor → drop the entry instead of storing "". Keeps the "已答"
+      // count honest and stops a blank drillInput (e.g. right after advancing)
+      // from persisting an empty answer.
+      if (!drillInput) {
+        if (cur === undefined) return prev;
+        const next = { ...prev };
+        delete next[q.id];
+        return next;
+      }
+      if (cur === drillInput) return prev;
       return { ...prev, [q.id]: drillInput };
     });
   }, [drillInput, currentIndex, questions, isBatchMode, restoring]);
@@ -228,16 +238,29 @@ export default function Interview() {
     const text = drillInput.trim();
     if (!text || !currentQ) return;
     setAnswers((prev) => ({ ...prev, [currentQ.id]: text }));
-    setDrillInput("");
-    if (currentIndex < totalQ - 1) setCurrentIndex((i) => i + 1);
-    else setFinished(true);
+    if (currentIndex < totalQ - 1) {
+      const nextIdx = currentIndex + 1;
+      // Load the destination question's existing answer (if it was answered
+      // earlier and we're revisiting) so the drillInput→answers sync effect
+      // doesn't overwrite it with an empty string.
+      setDrillInput(answers[questions[nextIdx]?.id] || "");
+      setCurrentIndex(nextIdx);
+    } else {
+      setDrillInput("");
+      setFinished(true);
+    }
   };
 
   const handleSkip = () => {
     if (!currentQ) return;
-    setDrillInput("");
-    if (currentIndex < totalQ - 1) setCurrentIndex((i) => i + 1);
-    else setFinished(true);
+    if (currentIndex < totalQ - 1) {
+      const nextIdx = currentIndex + 1;
+      setDrillInput(answers[questions[nextIdx]?.id] || "");
+      setCurrentIndex(nextIdx);
+    } else {
+      setDrillInput("");
+      setFinished(true);
+    }
   };
 
   const handlePrev = () => {
