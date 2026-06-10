@@ -65,10 +65,6 @@ export default function Interview() {
   });
 
   useEffect(() => {
-    // Build marker — confirms in the browser console that THIS build is the one
-    // actually served (vs a stale cached bundle).
-    // eslint-disable-next-line no-console
-    console.info("[drill] Interview build 2026-06-10-persist3 loaded");
     if (!isBatchMode && initData.message) {
       setMessages([{ role: "assistant", content: initData.message }]);
     }
@@ -83,9 +79,6 @@ export default function Interview() {
       .then((sess: any) => {
         const meta = sess.meta || {};
         const progress = meta.progress || {};
-        // eslint-disable-next-line no-console
-        console.info("[drill-restore] session=", sessionId, "mode=", sess.mode,
-          "progress=", JSON.stringify(progress).slice(0, 300));
         setRestoredMeta({
           mode: sess.mode,
           topic: sess.topic,

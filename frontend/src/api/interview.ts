@@ -244,9 +244,6 @@ export async function saveDrillProgress(
   payload: DrillProgressPayload,
   opts: { keepalive?: boolean } = {},
 ): Promise<void> {
-  const nAns = Object.keys(payload.partial_answers || {}).length;
-  // eslint-disable-next-line no-console
-  console.info(`[drill-save] POST progress session=${sessionId} idx=${payload.current_index} answers=${nAns} keepalive=${!!opts.keepalive}`);
   const res = await authFetch(`${API_BASE}/interview/session/${sessionId}/progress`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -255,8 +252,6 @@ export async function saveDrillProgress(
     // so the final flush isn't dropped when the user exits mid-drill.
     keepalive: opts.keepalive,
   });
-  // eslint-disable-next-line no-console
-  console.info(`[drill-save] ← status=${res.status} ok=${res.ok}`);
   // Surface backend failures (404/4xx) instead of silently resolving — the
   // caller's catch keeps the localStorage fallback + shows the retry toast.
   if (!res.ok) throw new Error(await res.text());
