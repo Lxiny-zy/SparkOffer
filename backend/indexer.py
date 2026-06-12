@@ -385,7 +385,8 @@ def invalidate_topic_index(topic: str, user_id: str):
     knowledge base has been fundamentally restructured (files deleted, renamed, etc.).
     """
     cache_key = (user_id, topic)
-    _index_cache.pop(cache_key, None)
+    with _index_cache_lock:  # see lock comment: every access must hold it
+        _index_cache.pop(cache_key, None)
     # 配置了 Qdrant 就尽力删掉对应 collection（即便当前降级到本地，也清掉残留）。
     if _use_qdrant_kb():
         try:
@@ -684,11 +685,17 @@ async def warmup_user_indices(user_id: str | None = None) -> None:
             logger.info("Index warmup cancelled.")
             raise
         except asyncio.TimeoutError:
+            # to_thread can't be cancelled: the timed-out build keeps running in
+            # its thread. Starting the NEXT topic now would run concurrently with
+            # that zombie and trip the embedding API throttle this loop is
+            # explicitly serialized to avoid (timeouts would then cascade).
+            # Stop warming up entirely — remaining topics lazy-load on demand.
             logger.warning(
-                "Index warmup timed out for topic=%s after %.0fs — skipping to next "
-                "(lazy-load will retry on demand)",
+                "Index warmup timed out for topic=%s after %.0fs — aborting warmup, "
+                "remaining topics will lazy-load on demand",
                 key, _WARMUP_PER_TOPIC_TIMEOUT,
             )
+            return
         except Exception as e:
             logger.warning(
                 "Index warmup failed for topic=%s: %s (lazy-load will retry on demand)",

@@ -285,12 +285,16 @@ class DrillPipeline:
         self.ctx["knowledge_cache_hit"] = False
 
         # Cache TTL 1h — long enough to span a multi-drill sitting but short
-        # enough that knowledge-base edits propagate the same day.
-        await asyncio.to_thread(cache.set_json, cache_key, {
-            "knowledge_ctx": knowledge_ctx,
-            "chunks": len(chunks),
-            "queries": stats.queries if stats else 0,
-        }, 3600)
+        # enough that knowledge-base edits propagate the same day. Only cache
+        # non-empty results: a transient RAG timeout/failure degraded to empty
+        # chunks above, and caching that would poison every same-key drill for
+        # the next hour ("缓存命中 · 0 片段").
+        if chunks:
+            await asyncio.to_thread(cache.set_json, cache_key, {
+                "knowledge_ctx": knowledge_ctx,
+                "chunks": len(chunks),
+                "queries": stats.queries if stats else 0,
+            }, 3600)
 
     def _knowledge_cache_key(self, weak_points: list[str]) -> str:
         import hashlib
@@ -505,7 +509,15 @@ class DrillPipeline:
         if emitted_count == 0:
             try:
                 parsed = _parse_json_response(accumulated)
-                if isinstance(parsed, list):
+                # LLMs often wrap the array: {"questions": [...]}. Unwrap instead
+                # of falling through — that path would silently end with
+                # self.questions = seeds only (possibly zero) and report success.
+                if isinstance(parsed, dict):
+                    for key in ("questions", "data", "items"):
+                        if isinstance(parsed.get(key), list):
+                            parsed = parsed[key]
+                            break
+                if isinstance(parsed, list) and parsed:
                     fixed: list[dict] = []
                     for i, q in enumerate(parsed[:n_from_llm]):
                         q["id"] = seed_offset + i + 1
@@ -514,6 +526,8 @@ class DrillPipeline:
                     self.questions = seed_questions + fixed
                     return
             except Exception:
+                pass  # fall through to the explicit failure below
+            if not seed_questions:
                 raise RuntimeError("出题失败，LLM 返回格式异常")
 
         all_objects, _ = extract_complete_objects(accumulated)

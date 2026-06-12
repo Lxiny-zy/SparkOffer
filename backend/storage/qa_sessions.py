@@ -75,14 +75,29 @@ def save_message(session_id: str, user_id: str, role: str, content: str):
     conn.commit()
 
 
-def load_messages(session_id: str, user_id: str, limit: int = 100) -> list[dict]:
+def load_messages(session_id: str, user_id: str, limit: int | None = 100) -> list[dict]:
+    """Return messages in chronological order.
+
+    With a limit, returns the MOST RECENT ``limit`` messages (still oldest→newest
+    within the window) — a plain ``ORDER BY id ASC LIMIT`` would silently pin the
+    window to the oldest messages and drop everything recent. ``limit=None``
+    returns the full history (the chat/summary paths need it: the rolling-summary
+    ``covered`` cursor indexes from message 0).
+    """
     conn = get_db()
+    if limit is None:
+        rows = conn.execute(
+            "SELECT role, content, created_at FROM qa_messages "
+            "WHERE session_id = ? AND user_id = ? ORDER BY id ASC",
+            (session_id, user_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
     rows = conn.execute(
         "SELECT role, content, created_at FROM qa_messages "
-        "WHERE session_id = ? AND user_id = ? ORDER BY id ASC LIMIT ?",
+        "WHERE session_id = ? AND user_id = ? ORDER BY id DESC LIMIT ?",
         (session_id, user_id, limit),
     ).fetchall()
-    return [dict(r) for r in rows]
+    return [dict(r) for r in reversed(rows)]
 
 
 def clear_messages(session_id: str, user_id: str) -> bool:

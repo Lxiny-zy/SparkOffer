@@ -78,6 +78,17 @@ export default function QAArena() {
   const rafRef = useRef<number | null>(null);
   const isStreamingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  // Mirrors activeId for the stream consumer: callbacks check it so a stream
+  // started in session A can't overwrite messages after switching to B.
+  const activeIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
+
+  // Abort any in-flight stream on unmount so the fetch is released immediately.
+  useEffect(() => () => {
+    abortRef.current?.abort();
+  }, []);
 
   // Load sessions on mount
   useEffect(() => {
@@ -105,6 +116,12 @@ export default function QAArena() {
 
   const switchReqRef = useRef<string | null>(null);
   const switchSession = useCallback(async (id: string) => {
+    // Stop any in-flight stream first — its callbacks would otherwise clobber
+    // the newly loaded session's last message. The ref is updated synchronously
+    // (not waiting for the effect) so the dying stream's final flush already
+    // sees the new id.
+    abortRef.current?.abort();
+    activeIdRef.current = id;
     switchReqRef.current = id;
     setActiveId(id);
     setSummaryResult(null);
@@ -117,8 +134,11 @@ export default function QAArena() {
   }, []);
 
   const handleNewSession = async () => {
+    // Same as switchSession: kill any in-flight stream before swapping state.
+    abortRef.current?.abort();
     const session = await createQASession();
     setSessions((prev) => [session, ...prev]);
+    activeIdRef.current = session.id;
     setActiveId(session.id);
     setMessages([]);
     setSummaryResult(null);
@@ -154,8 +174,9 @@ export default function QAArena() {
 
   // Shared streaming consumer for both first-send and regenerate. `makeStream` receives
   // the abort signal so handleStop can cancel the underlying fetch. Assumes the LAST
-  // message in state is the assistant placeholder to fill.
-  const consumeStream = useCallback(async (makeStream: (signal: AbortSignal) => AsyncGenerator<any>) => {
+  // message in state is the assistant placeholder to fill. `sid` is the session the
+  // stream belongs to — writes are skipped if the user switched sessions meanwhile.
+  const consumeStream = useCallback(async (sid: string, makeStream: (signal: AbortSignal) => AsyncGenerator<any>) => {
     setIsStreaming(true);
     isStreamingRef.current = true;
     setStreamError(null);
@@ -172,6 +193,9 @@ export default function QAArena() {
     const flushUpdate = () => {
       rafRef.current = null;
       pendingUpdate = false;
+      // Second line of defense (after the abort in switchSession/handleNewSession):
+      // never write into a session this stream doesn't belong to.
+      if (activeIdRef.current !== sid) return;
       setMessages((prev) => {
         const updated = [...prev];
         updated[updated.length - 1] = { role: "assistant", content: assistantContent, created_at: "", reasoning: assistantReasoning };
@@ -223,12 +247,16 @@ export default function QAArena() {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
       }
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated[updated.length - 1] = { role: "assistant", content: assistantContent, created_at: "", reasoning: assistantReasoning };
-        return updated;
-      });
-      abortRef.current = null;
+      // Same session guard as flushUpdate — skip the final write if the user
+      // switched sessions while this stream was running.
+      if (activeIdRef.current === sid) {
+        setMessages((prev) => {
+          const updated = [...prev];
+          updated[updated.length - 1] = { role: "assistant", content: assistantContent, created_at: "", reasoning: assistantReasoning };
+          return updated;
+        });
+      }
+      if (abortRef.current === controller) abortRef.current = null;
       isStreamingRef.current = false;
       setIsStreaming(false);
       setStreamStage("");
@@ -253,7 +281,7 @@ export default function QAArena() {
       inputRef.current.style.height = "auto";
     }
 
-    await consumeStream((signal) => streamQAChat(sid, text, signal));
+    await consumeStream(sid, (signal) => streamQAChat(sid, text, signal));
   };
 
   // Re-answer the last user question without re-typing it. Replaces the trailing
@@ -274,7 +302,7 @@ export default function QAArena() {
       return [...prev, { role: "assistant", content: "", created_at: "" }];
     });
 
-    await consumeStream((signal) => regenerateQAChat(sid, signal));
+    await consumeStream(sid, (signal) => regenerateQAChat(sid, signal));
   };
 
   const handleStop = () => {

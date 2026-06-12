@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import TopicCard from "../components/TopicCard";
 import { getTopics, startInterview, startInterviewStream, getResumeStatus, uploadResume, getProfile, getDueReviews } from "../api/interview";
 import { cn } from "@/lib/utils";
+import { formatQuestionLabel } from "@/lib/question";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -75,14 +76,31 @@ export default function Home() {
   } | null>(null);
   const streamedQuestionsRef = useRef<Question[]>([]);
   const pipelineStagesRef = useRef<PipelineStages>({});
+  // Generation counter + abort handle for the question stream. resetStreaming
+  // bumps the generation so callbacks from a superseded stream are ignored,
+  // and aborts the fetch so the old SSE connection is actually released.
+  const streamGenRef = useRef(0);
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   const resetStreaming = () => {
+    streamGenRef.current += 1;
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    setIsStreaming(false);
+    setLoading(false);
     setReadyToStart(null);
     setPipelineStages({});
     setStreamingQuestions([]);
     pipelineStagesRef.current = {};
     streamedQuestionsRef.current = [];
   };
+
+  // Abort any in-flight question stream on unmount. Bump the generation too so
+  // the abort doesn't surface as a "启动失败" toast from the catch block.
+  useEffect(() => () => {
+    streamGenRef.current += 1;
+    streamAbortRef.current?.abort();
+  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -127,13 +145,21 @@ export default function Home() {
       setStreamingQuestions([]);
       setPipelineStages({});
       pipelineStagesRef.current = {};
+      // Tag this stream with a generation; any callback from a stream that has
+      // been superseded (mode/topic switch, unmount) is dropped.
+      const gen = ++streamGenRef.current;
+      const controller = new AbortController();
+      streamAbortRef.current = controller;
+      const isCurrent = () => streamGenRef.current === gen;
       try {
         await startInterviewStream(mode, selectedTopic, {
           onQuestion: (q: Question) => {
+            if (!isCurrent()) return;
             streamedQuestionsRef.current = [...streamedQuestionsRef.current, q];
             setStreamingQuestions((prev) => [...prev, q]);
           },
           onQuestionUpdate: (q: Question) => {
+            if (!isCurrent()) return;
             // Validator repair / difficulty calibration replaces by id rather
             // than appends. Without this branch the user would see duplicate
             // cards (one repaired, one original).
@@ -143,6 +169,7 @@ export default function Home() {
             setStreamingQuestions((prev) => updateById(prev));
           },
           onStage: (evt) => {
+            if (!isCurrent()) return;
             setPipelineStages((prev) => {
               const next = applyStageEvent(prev, evt);
               pipelineStagesRef.current = next;
@@ -150,6 +177,7 @@ export default function Home() {
             });
           },
           onDone: (event: any) => {
+            if (!isCurrent()) return;
             setIsStreaming(false);
             setLoading(false);
             // Stash the timing breakdown so the Interview page (or future
@@ -174,16 +202,21 @@ export default function Home() {
             });
           },
           onError: (msg: string) => {
+            if (!isCurrent()) return;
             setIsStreaming(false);
             setLoading(false);
             setReadyToStart(null);
             toast.error("出题失败: " + msg);
           },
-        });
+        }, controller.signal);
       } catch (err: any) {
+        // A superseded / aborted stream is not a user-facing failure.
+        if (!isCurrent()) return;
         setIsStreaming(false);
         setLoading(false);
         toast.error("启动失败: " + err.message);
+      } finally {
+        if (streamAbortRef.current === controller) streamAbortRef.current = null;
       }
       return;
     }
@@ -477,7 +510,7 @@ export default function Home() {
                 <div className="flex flex-col gap-1.5">
                   {streamingQuestions.map((q) => (
                     <div key={q.id} className="flex items-center gap-2 text-[13px] text-dim animate-fade-in">
-                      <Badge variant="outline" className="text-xs shrink-0">Q{q.id}</Badge>
+                      <Badge variant="outline" className="text-xs shrink-0">{formatQuestionLabel(q.id)}</Badge>
                       <span className="truncate">{q.question}</span>
                     </div>
                   ))}

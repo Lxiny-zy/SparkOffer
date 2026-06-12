@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -157,48 +158,86 @@ def _insights_dir(user_id: str) -> Path:
     return settings.user_profile_dir(user_id) / "insights"
 
 
+def _load_profile_unlocked(user_id: str) -> dict:
+    path = _profile_path(user_id)
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    # deepcopy, not .copy(): a shallow copy shares DEFAULT_PROFILE's nested
+    # lists/dicts (weak_points, strong_points, topic_mastery, ...). Mutating a
+    # new user's profile would then leak into the global default and bleed
+    # into the next new user's "empty" profile.
+    return copy.deepcopy(DEFAULT_PROFILE)
+
+
 def _load_profile(user_id: str) -> dict:
-    """Load user profile with file lock protection."""
+    """Load user profile with file lock protection.
+
+    NOTE: this only protects the single read. Any read-modify-write sequence
+    must go through profile_transaction() instead — load + mutate + save with
+    separate lock acquisitions loses concurrent updates (last writer wins).
+    """
     lock = _get_profile_lock(user_id)
     with lock:
-        path = _profile_path(user_id)
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-        # deepcopy, not .copy(): a shallow copy shares DEFAULT_PROFILE's nested
-        # lists/dicts (weak_points, strong_points, topic_mastery, ...). Mutating a
-        # new user's profile would then leak into the global default and bleed
-        # into the next new user's "empty" profile.
-        return copy.deepcopy(DEFAULT_PROFILE)
+        return _load_profile_unlocked(user_id)
+
+
+def _save_profile_unlocked(profile: dict, user_id: str):
+    path = _profile_path(user_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    profile["updated_at"] = datetime.now().isoformat()
+    data = json.dumps(profile, ensure_ascii=False, indent=2)
+
+    # Atomic write: write to temp file in same directory, then rename
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent), suffix=".tmp", prefix=".profile_"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.replace(tmp_path, str(path))
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _save_profile(profile: dict, user_id: str):
     """Save user profile atomically with file lock protection.
 
     Uses write-to-temp-then-rename pattern to prevent corruption
-    if the process crashes mid-write.
+    if the process crashes mid-write. See _load_profile's note: prefer
+    profile_transaction() for read-modify-write sequences.
     """
     lock = _get_profile_lock(user_id)
     with lock:
-        path = _profile_path(user_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        profile["updated_at"] = datetime.now().isoformat()
-        data = json.dumps(profile, ensure_ascii=False, indent=2)
+        _save_profile_unlocked(profile, user_id)
 
-        # Atomic write: write to temp file in same directory, then rename
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(path.parent), suffix=".tmp", prefix=".profile_"
-        )
+
+class ProfileTransactionAbort(Exception):
+    """Raise inside a profile_transaction block to exit without saving."""
+
+
+@contextmanager
+def profile_transaction(user_id: str):
+    """Hold the per-user lock across an entire read-modify-write.
+
+    Yields the freshly loaded profile and saves it on normal exit, so two
+    concurrent updaters can't both load v0 and overwrite each other's writes.
+    The body must be synchronous and fast (no awaits, no LLM/embedding calls)
+    — resolve anything slow against a snapshot BEFORE entering, then re-apply
+    to the fresh profile inside.
+    """
+    lock = _get_profile_lock(user_id)
+    with lock:
+        profile = _load_profile_unlocked(user_id)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(data)
-            os.replace(tmp_path, str(path))
-        except Exception:
-            # Clean up temp file on failure
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+            yield profile
+        except ProfileTransactionAbort:
+            return
+        _save_profile_unlocked(profile, user_id)
 
 
 def _save_insight(mode: str, topic: str, summary: str, raw_extraction: dict, user_id: str):
@@ -285,52 +324,71 @@ def update_profile_realtime(
     weak_point: str | None = None,
 ):
     """Lightweight per-answer profile update — no LLM call, just save the data."""
-    profile = _load_profile(user_id)
     now = datetime.now().isoformat()
 
-    # Record score
-    if score_entry and score_entry.get("score") is not None:
-        history = profile.setdefault("stats", {}).setdefault("score_history", [])
-        history.append({
-            "date": now[:10],
-            "mode": mode,
-            "topic": topic,
-            "avg_score": score_entry["score"],
-            "question": score_entry.get("question", "")[:80],
-            "assessment": score_entry.get("assessment", ""),
-        })
-        # Cap score_history at 100 entries
-        if len(history) > 100:
-            history[:] = history[-100:]
-        # Rolling average
-        recent = [h["avg_score"] for h in history[-30:] if h.get("avg_score")]
-        if recent:
-            profile["stats"]["avg_score"] = round(sum(recent) / len(recent), 1)
-
-    # Record weak point (semantic matching)
+    # Resolve the semantic match against a snapshot BEFORE taking the lock — the
+    # embedding call can take seconds and must not stall other profile writers.
+    # Failure here must not lose the score entry below, so degrade to "no match"
+    # (worst case: a near-duplicate weak point gets appended).
+    match_point: str | None = None
     if weak_point:
         from backend.vector_memory import find_similar_weak_point_sync
-        match_idx = find_similar_weak_point_sync(weak_point, profile.get("weak_points", []), user_id=user_id)
-        if match_idx is not None:
-            profile["weak_points"][match_idx]["times_seen"] = profile["weak_points"][match_idx].get("times_seen", 1) + 1
-            profile["weak_points"][match_idx]["last_seen"] = now
-        else:
-            profile.setdefault("weak_points", []).append({
-                "point": weak_point,
-                "topic": topic or "",
-                "first_seen": now,
-                "last_seen": now,
-                "times_seen": 1,
-                "improved": False,
-                "mastery": 20,    # 默认 20 = "未证明"
-                "attempts": 0,
+        snapshot_wps = _load_profile(user_id).get("weak_points", [])
+        try:
+            match_idx = find_similar_weak_point_sync(weak_point, snapshot_wps, user_id=user_id)
+            if match_idx is not None:
+                match_point = snapshot_wps[match_idx].get("point")
+        except Exception as e:
+            logger.warning("weak point semantic match failed (%s), treating as new", e)
+
+    with profile_transaction(user_id) as profile:
+        # Record score
+        if score_entry and score_entry.get("score") is not None:
+            history = profile.setdefault("stats", {}).setdefault("score_history", [])
+            history.append({
+                "date": now[:10],
+                "mode": mode,
+                "topic": topic,
+                "avg_score": score_entry["score"],
+                "question": score_entry.get("question", "")[:80],
+                "assessment": score_entry.get("assessment", ""),
             })
+            # Cap score_history at 100 entries
+            if len(history) > 100:
+                history[:] = history[-100:]
+            # Rolling average ("is not None", not truthiness: a 0-score answer
+            # must drag the average down, not be silently excluded from it)
+            recent = [h["avg_score"] for h in history[-30:] if h.get("avg_score") is not None]
+            if recent:
+                profile["stats"]["avg_score"] = round(sum(recent) / len(recent), 1)
 
-    # Track that we have activity (for profile page display)
-    profile.setdefault("stats", {}).setdefault("total_answers", 0)
-    profile["stats"]["total_answers"] = profile["stats"].get("total_answers", 0) + 1
+        # Record weak point (semantic match resolved above; re-locate by point
+        # text because the list may have shifted while we were embedding)
+        if weak_point:
+            target = None
+            if match_point is not None:
+                target = next(
+                    (wp for wp in profile.get("weak_points", []) if wp.get("point") == match_point),
+                    None,
+                )
+            if target is not None:
+                target["times_seen"] = target.get("times_seen", 1) + 1
+                target["last_seen"] = now
+            else:
+                profile.setdefault("weak_points", []).append({
+                    "point": weak_point,
+                    "topic": topic or "",
+                    "first_seen": now,
+                    "last_seen": now,
+                    "times_seen": 1,
+                    "improved": False,
+                    "mastery": 20,    # 默认 20 = "未证明"
+                    "attempts": 0,
+                })
 
-    _save_profile(profile, user_id)
+        # Track that we have activity (for profile page display)
+        profile.setdefault("stats", {}).setdefault("total_answers", 0)
+        profile["stats"]["total_answers"] = profile["stats"].get("total_answers", 0) + 1
 
 
 def get_profile_summary(user_id: str) -> str:
@@ -432,9 +490,29 @@ def _parse_json_safe(content: str) -> dict | list:
     raise json.JSONDecodeError("No valid JSON found", content, 0)
 
 
-def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str):
-    """Execute LLM-decided ADD/UPDATE/NOOP/IMPROVE operations on profile."""
+def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str,
+                      index_points: list[str] | None = None):
+    """Execute LLM-decided ADD/UPDATE/NOOP/IMPROVE operations on profile.
+
+    ``index_points`` is the weak-point text list of the SNAPSHOT the ops were
+    generated against. The live list may have shifted while the LLM ran
+    (realtime updates append concurrently), so op indices are remapped via the
+    snapshot's point text instead of being trusted as positions.
+    """
     weak_points = profile.setdefault("weak_points", [])
+
+    def _resolve(idx) -> int | None:
+        if idx is None:
+            return None
+        if index_points is not None:
+            if not (0 <= idx < len(index_points)):
+                return None
+            text = index_points[idx]
+            for i, wp in enumerate(weak_points):
+                if wp.get("point") == text:
+                    return i
+            return None
+        return idx if 0 <= idx < len(weak_points) else None
 
     for op in ops.get("weak_point_ops", []):
         action = op.get("action", "NOOP")
@@ -450,8 +528,8 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str):
                 "mastery": 20, "attempts": 0,
             })
         elif action == "UPDATE":
-            idx = op.get("index")
-            if idx is not None and 0 <= idx < len(weak_points):
+            idx = _resolve(op.get("index"))
+            if idx is not None:
                 wp = weak_points[idx]
                 if op.get("new_point"):
                     wp["point"] = op["new_point"]
@@ -459,8 +537,8 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str):
                 wp["last_seen"] = now
 
     for imp in ops.get("improvements", []):
-        idx = imp.get("weak_index")
-        if idx is not None and 0 <= idx < len(weak_points):
+        idx = _resolve(imp.get("weak_index"))
+        if idx is not None:
             weak_points[idx]["improved"] = True
             weak_points[idx]["improved_at"] = now
 
@@ -474,28 +552,58 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str):
             })
 
 
-async def _deterministic_update(profile: dict, new_weak: list, new_strong: list,
-                                topic: str | None, now: str, user_id: str):
-    """Fallback: vector cosine dedup when LLM parse fails.
+async def _resolve_new_weak_points(
+    snapshot: dict, new_weak: list, topic: str | None, user_id: str,
+) -> list[tuple[str, str | None, str]]:
+    """Deterministic-fallback phase 1 (runs OUTSIDE the profile lock).
 
-    Awaits find_similar_weak_point directly in the loop. Each point previously
-    went through find_similar_weak_point_sync → _run_async which, under the async
-    llm_update_profile caller, spun up a ThreadPoolExecutor + fresh event loop per
-    point (an N+1 of event loops). New points still dedup against ones appended
-    earlier in the same batch — the comparison list is the growing profile["weak_points"].
+    Resolves each new weak point against a snapshot via embedding similarity
+    and returns ``(point, matched_point_text_or_None, topic)`` tuples. New
+    points still dedup against ones resolved earlier in the same batch — the
+    working list grows as we go. Embedding failures degrade to "no match"
+    rather than aborting the whole update.
     """
     from backend.vector_memory import find_similar_weak_point
 
+    working = list(snapshot.get("weak_points", []))
+    resolved: list[tuple[str, str | None, str]] = []
     for wp in new_weak:
         point = wp.get("point", wp) if isinstance(wp, dict) else str(wp)
-        match_idx = await find_similar_weak_point(point, profile.get("weak_points", []), user_id=user_id)
+        t = wp.get("topic", topic) if isinstance(wp, dict) else (topic or "")
+        try:
+            match_idx = await find_similar_weak_point(point, working, user_id=user_id)
+        except Exception as e:
+            logger.warning("weak point semantic match failed (%s), treating as new", e)
+            match_idx = None
         if match_idx is not None:
-            profile["weak_points"][match_idx]["times_seen"] = profile["weak_points"][match_idx].get("times_seen", 1) + 1
-            profile["weak_points"][match_idx]["last_seen"] = now
+            resolved.append((point, working[match_idx].get("point"), t or ""))
+        else:
+            working.append({"point": point, "topic": t or ""})
+            resolved.append((point, None, t or ""))
+    return resolved
+
+
+def _apply_deterministic_update(profile: dict, resolved: list, new_strong: list,
+                                topic: str | None, now: str):
+    """Deterministic-fallback phase 2 (runs INSIDE the profile lock).
+
+    Applies pre-resolved weak-point matches to the FRESH profile, re-locating
+    matches by point text (the list may have shifted since the snapshot).
+    """
+    for point, matched_text, t in resolved:
+        target = None
+        if matched_text is not None:
+            target = next(
+                (w for w in profile.get("weak_points", []) if w.get("point") == matched_text),
+                None,
+            )
+        if target is not None:
+            target["times_seen"] = target.get("times_seen", 1) + 1
+            target["last_seen"] = now
         else:
             profile.setdefault("weak_points", []).append({
                 "point": point,
-                "topic": wp.get("topic", topic) if isinstance(wp, dict) else (topic or ""),
+                "topic": t,
                 "first_seen": now, "last_seen": now,
                 "times_seen": 1, "improved": False,
                 "mastery": 20, "attempts": 0,
@@ -592,7 +700,9 @@ def _update_stats(
     if answer_count:
         stats["total_answers"] = stats.get("total_answers", 0) + answer_count
 
-    if avg_score:
+    # "is not None", not truthiness: a 0-score session must still be recorded
+    # and pull the averages down instead of being silently skipped.
+    if avg_score is not None:
         history = stats.setdefault("score_history", [])
         entry = {"date": now[:10], "mode": mode, "topic": topic, "avg_score": avg_score}
         if dimension_scores:
@@ -603,9 +713,9 @@ def _update_stats(
             history[:] = history[-100:]
 
         # Per-mode rolling averages
-        drill_scores = [h["avg_score"] for h in history if h.get("mode") == "topic_drill" and h.get("avg_score")][-20:]
-        resume_scores = [h["avg_score"] for h in history if h.get("mode") == "resume" and h.get("avg_score")][-10:]
-        job_prep_scores = [h["avg_score"] for h in history if h.get("mode") == "jd_prep" and h.get("avg_score")][-10:]
+        drill_scores = [h["avg_score"] for h in history if h.get("mode") == "topic_drill" and h.get("avg_score") is not None][-20:]
+        resume_scores = [h["avg_score"] for h in history if h.get("mode") == "resume" and h.get("avg_score") is not None][-10:]
+        job_prep_scores = [h["avg_score"] for h in history if h.get("mode") == "jd_prep" and h.get("avg_score") is not None][-10:]
 
         if drill_scores:
             stats["drill_avg_score"] = round(sum(drill_scores) / len(drill_scores), 1)
@@ -614,7 +724,7 @@ def _update_stats(
         if job_prep_scores:
             stats["job_prep_avg_score"] = round(sum(job_prep_scores) / len(job_prep_scores), 1)
 
-        all_recent = [h["avg_score"] for h in history if h.get("avg_score")][-30:]
+        all_recent = [h["avg_score"] for h in history if h.get("avg_score") is not None][-30:]
         if all_recent:
             stats["avg_score"] = round(sum(all_recent) / len(all_recent), 1)
 
@@ -637,22 +747,28 @@ async def llm_update_profile(
     """Mem0-style profile update: LLM decides ADD/UPDATE/NOOP for each fact."""
     from backend.prompts.interviewer import PROFILE_UPDATE_PROMPT
 
-    profile = _load_profile(user_id)
+    # Snapshot for prompt formatting + index remapping. The LLM call below can
+    # take tens of seconds; the profile is re-read fresh inside the transaction
+    # so concurrent realtime updates landing meanwhile aren't overwritten.
+    snapshot = _load_profile(user_id)
     now = datetime.now().isoformat()
 
-    # ── LLM-based update for weak/strong points ──
+    # ── LLM-based update for weak/strong points (slow part — OUTSIDE the lock) ──
     has_new_facts = bool(new_weak_points or new_strong_points)
+    ops: dict | None = None
+    resolved_fallback: list | None = None
+    snapshot_points = [wp.get("point") for wp in snapshot.get("weak_points", [])]
 
     if has_new_facts:
         # Format existing points with indices for LLM reference
         existing_weak_lines = []
-        for i, wp in enumerate(profile.get("weak_points", [])):
+        for i, wp in enumerate(snapshot.get("weak_points", [])):
             status = "已改善" if wp.get("improved") else f"出现{wp.get('times_seen', 1)}次"
             existing_weak_lines.append(
                 f"[{i}] {wp['point']} (领域: {wp.get('topic', '?')}, {status})"
             )
         existing_strong_lines = []
-        for i, sp in enumerate(profile.get("strong_points", [])):
+        for i, sp in enumerate(snapshot.get("strong_points", [])):
             existing_strong_lines.append(f"[{i}] {sp['point']} (领域: {sp.get('topic', '?')})")
 
         new_weak_lines = []
@@ -680,28 +796,35 @@ async def llm_update_profile(
         ])
 
         try:
-            ops = _parse_json_safe(response.content)
-            if isinstance(ops, dict):
-                _apply_memory_ops(profile, ops, topic, now)
+            parsed = _parse_json_safe(response.content)
+            if isinstance(parsed, dict):
+                ops = parsed
             else:
-                raise ValueError(f"Expected dict, got {type(ops)}")
+                raise ValueError(f"Expected dict, got {type(parsed)}")
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             logger.warning(f"Profile update LLM parse failed ({e}), falling back to deterministic")
-            await _deterministic_update(profile, new_weak_points, new_strong_points, topic, now, user_id)
+            resolved_fallback = await _resolve_new_weak_points(
+                snapshot, new_weak_points, topic, user_id,
+            )
 
-    # ── Snapshot current mastery for frontend comparison overlay ──
-    import copy
-    current_mastery = profile.get("topic_mastery", {})
-    if current_mastery:
-        profile["previous_topic_mastery"] = copy.deepcopy(current_mastery)
+    # ── Apply everything to a FRESH profile under the lock (fast, no awaits) ──
+    with profile_transaction(user_id) as profile:
+        if ops is not None:
+            _apply_memory_ops(profile, ops, topic, now, index_points=snapshot_points)
+        elif resolved_fallback is not None:
+            _apply_deterministic_update(profile, resolved_fallback, new_strong_points, topic, now)
 
-    # ── Deterministic updates for mastery / communication / thinking / stats ──
-    _update_mastery(profile, topic, topic_mastery, now, session_weight)
-    _update_communication(profile, communication)
-    _update_thinking_patterns(profile, thinking_patterns)
-    _update_stats(profile, mode, topic, avg_score, now, answer_count, dimension_scores)
+        # Snapshot current mastery for frontend comparison overlay
+        current_mastery = profile.get("topic_mastery", {})
+        if current_mastery:
+            profile["previous_topic_mastery"] = copy.deepcopy(current_mastery)
 
-    _save_profile(profile, user_id)
+        # Deterministic updates for mastery / communication / thinking / stats
+        _update_mastery(profile, topic, topic_mastery, now, session_weight)
+        _update_communication(profile, communication)
+        _update_thinking_patterns(profile, thinking_patterns)
+        _update_stats(profile, mode, topic, avg_score, now, answer_count, dimension_scores)
+
     _save_insight(mode=mode, topic=topic, summary=session_summary, raw_extraction={
         "weak_points": new_weak_points,
         "strong_points": new_strong_points,

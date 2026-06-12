@@ -4,6 +4,7 @@ import { Markdown } from "../components/ChatBubble";
 import { BookOpen, BriefcaseBusiness, Sparkles, RefreshCw, Star } from "lucide-react";
 import { getReview, getReferenceAnswer, addFavorite, getSessionRAGMetrics, type RAGEvalMetrics } from "../api/interview";
 import { cn } from "@/lib/utils";
+import { formatQuestionLabel } from "@/lib/question";
 import { metricColorVar } from "@/lib/metrics";
 import { MetricInfoTooltip } from "@/components/MetricInfoTooltip";
 import { Button } from "@/components/ui/button";
@@ -167,7 +168,7 @@ function StatStrip({ items }: StatStripProps) {
 // 时间线节点 ── 左侧分数圆 + 右侧题卡内容
 // ─────────────────────────────────────────────────────────────
 interface TimelineNodeProps {
-  index: number;
+  index: number | string;
   score: number | null | undefined;
   isSkipped?: boolean;
   isLast?: boolean;
@@ -199,7 +200,7 @@ function TimelineNode({ index, score, isSkipped, isLast, children }: TimelineNod
       </div>
       {/* 题号小标 */}
       <div className="absolute left-0 -bottom-1 w-10 md:w-12 text-center">
-        <span className="text-[9px] font-mono text-dim/60 tracking-wider">Q{String(index).padStart(2, "0")}</span>
+        <span className="text-[9px] font-mono text-dim/60 tracking-wider">{formatQuestionLabel(index, 2)}</span>
       </div>
       {/* 内容卡 */}
       <div className={cn("rounded-lg transition-colors", isSkipped ? "opacity-60" : "")}>
@@ -450,7 +451,7 @@ interface DrillReviewProps {
   scores: Score[] | null | undefined;
   overall: Overall | null | undefined;
   questions: Question[] | null | undefined;
-  answers: { question_id: number; answer: string }[] | null | undefined;
+  answers: { question_id: number | string; answer: string }[] | null | undefined;
   topic: string | null | undefined;
   sessionId: string | undefined;
   cachedRefAnswers: Record<string, string>;
@@ -474,14 +475,14 @@ function RAGQualityBadge({ value, label, metricKey }: { value: number | null | u
 }
 
 function DrillReview({ scores, overall, questions, answers, topic, sessionId, cachedRefAnswers, ragEvalMetrics }: DrillReviewProps) {
-  const answerMap: Record<number, string> = {};
+  const answerMap: Record<string | number, string> = {};
   for (const a of (answers || [])) answerMap[a.question_id] = a.answer;
-  const scoreMap: Record<number, Score> = {};
+  const scoreMap: Record<string | number, Score> = {};
   for (const s of (scores || [])) scoreMap[s.question_id] = s;
   const [refAnswers, setRefAnswers] = useState<Record<string, string>>(cachedRefAnswers || {});
   const [refLoading, setRefLoading] = useState<Record<string, boolean>>({});
-  const [favorited, setFavorited] = useState<Record<number, boolean>>({});
-  const [favLoading, setFavLoading] = useState<Record<number, boolean>>({});
+  const [favorited, setFavorited] = useState<Record<string | number, boolean>>({});
+  const [favLoading, setFavLoading] = useState<Record<string | number, boolean>>({});
 
   // Sync cached refs in once they arrive from the parent (getReview is async).
   // Merge instead of replace so locally-fetched answers aren't clobbered.
@@ -490,7 +491,7 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
     setRefAnswers((prev) => ({ ...cachedRefAnswers, ...prev }));
   }, [cachedRefAnswers]);
 
-  const handleRefAnswer = async (qId: number, questionText: string, force: boolean = false) => {
+  const handleRefAnswer = async (qId: number | string, questionText: string, force: boolean = false) => {
     if (refAnswers[qId] && !force) return;
     setRefLoading((p) => ({ ...p, [qId]: true }));
     try {
@@ -567,7 +568,12 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
       <div className="relative">
         {(questions || []).map((q, idx) => {
           const s: any = scoreMap[q.id] || {};
-          const answer = answerMap[q.id];
+          // Answer inference from the transcript can fail (e.g. the question
+          // text was rewritten), but if the evaluator left a score/assessment
+          // the question was clearly answered — show the review with a
+          // placeholder answer instead of collapsing to "未作答".
+          const hasScore = s.score != null || (s.assessment && s.assessment !== "未作答");
+          const answer = answerMap[q.id] || (hasScore ? "（答案未能恢复）" : "");
           const isSkipped = !answer;
           const isLast = idx === (questions?.length || 0) - 1;
 
@@ -636,7 +642,8 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
 
                     {/* RAG 指标 */}
                     {ragEvalMetrics?.per_question && (() => {
-                      const pq = ragEvalMetrics.per_question.find((r) => r.question_id === q.id);
+                      // String() both sides — ids can be numbers or strings like "Q2".
+                      const pq = ragEvalMetrics.per_question.find((r) => String(r.question_id) === String(q.id));
                       if (!pq) return null;
                       return (
                         <div className="flex gap-2 mt-2 text-[11px]">
@@ -717,14 +724,14 @@ interface JobPrepReviewProps {
   scores: Score[] | null | undefined;
   overall: Overall | null | undefined;
   questions: Question[] | null | undefined;
-  answers: { question_id: number; answer: string }[] | null | undefined;
+  answers: { question_id: number | string; answer: string }[] | null | undefined;
   meta: Record<string, any>;
 }
 
 function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepReviewProps) {
-  const answerMap: Record<number, string> = {};
+  const answerMap: Record<string | number, string> = {};
   for (const a of (answers || [])) answerMap[a.question_id] = a.answer;
-  const scoreMap: Record<number, Score> = {};
+  const scoreMap: Record<string | number, Score> = {};
   for (const s of (scores || [])) scoreMap[s.question_id] = s;
   const avgScore = overall?.avg_score || "-";
 
@@ -785,7 +792,10 @@ function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepRev
       <div className="flex flex-col gap-4">
         {(questions || []).map((q) => {
           const s: any = scoreMap[q.id] || {};
-          const answer = answerMap[q.id];
+          // Same fallback as DrillReview: a score/assessment means the question
+          // was answered even if the transcript match failed.
+          const hasScore = s.score != null || (s.assessment && s.assessment !== "未作答");
+          const answer = answerMap[q.id] || (hasScore ? "（答案未能恢复）" : "");
           const isSkipped = !answer;
 
           return (
@@ -793,7 +803,7 @@ function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepRev
               <CardContent className="p-4 md:p-6">
                 <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <Badge variant="outline" className="text-primary border-primary/30">Q{q.id}</Badge>
+                    <Badge variant="outline" className="text-primary border-primary/30">{formatQuestionLabel(q.id)}</Badge>
                     {q.category && <Badge variant="blue">{q.category}</Badge>}
                     {q.focus_area && <Badge variant="secondary">{q.focus_area}</Badge>}
                   </div>
@@ -853,10 +863,21 @@ function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepRev
   );
 }
 
-function inferAnswers(questions: Question[], transcript: { role: string; content: string }[]): { question_id: number; answer: string }[] {
+function inferAnswers(questions: Question[], transcript: { role: string; content: string }[]): { question_id: number | string; answer: string }[] {
   if (!questions?.length || !transcript?.length) return [];
   return questions.map((q) => {
-    const qIdx = transcript.findIndex((m) => m.role === "assistant" && m.content === q.question);
+    const qText = (q.question || "").trim();
+    // Exact match first (whitespace-trimmed). The question text may have been
+    // rewritten by a question_update after the transcript was recorded, so
+    // fall back to a loose containment match in either direction.
+    let qIdx = transcript.findIndex((m) => m.role === "assistant" && m.content.trim() === qText);
+    if (qIdx < 0 && qText) {
+      qIdx = transcript.findIndex((m) => {
+        if (m.role !== "assistant") return false;
+        const t = m.content.trim();
+        return !!t && (t.includes(qText) || qText.includes(t));
+      });
+    }
     const next = qIdx >= 0 ? transcript[qIdx + 1] : null;
     return { question_id: q.id, answer: next?.role === "user" ? next.content : "" };
   });
@@ -873,7 +894,7 @@ export default function Review() {
   const [scores, setScores] = useState<Score[] | null>(stateData.scores || null);
   const [overall, setOverall] = useState<Overall | null>(stateData.overall || null);
   const [questions, setQuestions] = useState<Question[]>(stateData.questions || []);
-  const [answers, setAnswers] = useState<{ question_id: number; answer: string }[]>(stateData.answers || []);
+  const [answers, setAnswers] = useState<{ question_id: number | string; answer: string }[]>(stateData.answers || []);
   const [messages, setMessages] = useState<{ role: string; content: string }[]>(stateData.messages || []);
   const [mode, setMode] = useState<string | null>(stateData.mode || null);
   const [topic, setTopic] = useState<string | null>(stateData.topic || null);

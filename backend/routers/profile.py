@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Depends
 
 from backend.config import settings
 from backend.indexer import load_topics, save_topics, _index_cache
-from backend.memory import get_profile, _load_profile, _save_profile
+from backend.memory import get_profile, _load_profile, profile_transaction
 from backend.storage.sessions import (
     get_session, list_sessions, list_sessions_by_topic,
     delete_session, list_distinct_topics, save_drill_progress,
@@ -240,9 +240,11 @@ def generate_retrospective(topic: str, user_id: str = Depends(get_current_user))
             else:
                 retrospective = value.strip()
 
-        profile.setdefault("topic_mastery", {}).setdefault(topic, {})["retrospective"] = retrospective
-        profile["topic_mastery"][topic]["retrospective_at"] = datetime.now().isoformat()
-        _save_profile(profile, user_id)
+        # Re-read under the lock: the pre-stream `profile` snapshot is minutes
+        # old by now and saving it would clobber any updates made meanwhile.
+        with profile_transaction(user_id) as fresh:
+            fresh.setdefault("topic_mastery", {}).setdefault(topic, {})["retrospective"] = retrospective
+            fresh["topic_mastery"][topic]["retrospective_at"] = datetime.now().isoformat()
 
         yield sse_event({"type": "complete", "data": {
             "topic": topic, "topic_name": topic_name,
@@ -285,6 +287,11 @@ async def get_interview_session(session_id: str, user_id: str = Depends(get_curr
     session = await asyncio.to_thread(get_session, session_id, user_id=user_id)
     if not session:
         raise HTTPException(404, "Session not found.")
+    # Completed sessions (review written) are read-only history: do NOT
+    # re-populate live_store, or /interview/end could re-evaluate them and
+    # overwrite the original review + double-count profile/SR stats.
+    if session.get("review"):
+        return session
     # Re-populate live_store if the backend has been restarted since session start
     from backend.live_store import drill_sessions, job_prep_sessions, save_live
     mode = session.get("mode")

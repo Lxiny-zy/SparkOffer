@@ -9,7 +9,7 @@ from typing import AsyncGenerator
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
 from backend.context_assembler import resolve_input_budget, count_tokens, pack_messages
-from backend.memory import get_profile, get_profile_summary, _load_profile, _save_profile
+from backend.memory import get_profile, get_profile_summary, _load_profile, profile_transaction, ProfileTransactionAbort
 from backend.storage.sessions import list_sessions, list_distinct_topics, get_session, list_sessions_by_topic
 from backend.storage.favorites import list_favorites, get_favorite_tags
 from backend.storage.algorithm import list_algorithm_cards, get_algorithm_tags
@@ -921,34 +921,34 @@ _FOCUS_PATTERN = re.compile(
 
 def _extract_and_update_preferences(text: str, user_id: str):
     """Extract explicit preferences from user message and update profile."""
-    profile = _load_profile(user_id)
-    prefs = profile.setdefault("preferences", {
-        "response_style": "", "preferred_difficulty": "",
-        "focus_topics": [], "interview_pace": "",
-        "feedback_style": "", "custom_notes": [],
-    })
+    with profile_transaction(user_id) as profile:
+        prefs = profile.setdefault("preferences", {
+            "response_style": "", "preferred_difficulty": "",
+            "focus_topics": [], "interview_pace": "",
+            "feedback_style": "", "custom_notes": [],
+        })
 
-    changed = False
+        changed = False
 
-    # Simple pattern matching
-    for pattern, key, value in _PREF_PATTERNS:
-        if pattern.search(text):
-            if prefs.get(key) != value:
-                prefs[key] = value
+        # Simple pattern matching
+        for pattern, key, value in _PREF_PATTERNS:
+            if pattern.search(text):
+                if prefs.get(key) != value:
+                    prefs[key] = value
+                    changed = True
+                    logger.info(f"Preference updated: {key}={value} for user {user_id}")
+
+        # Focus topic extraction
+        match = _FOCUS_PATTERN.search(text)
+        if match:
+            topic = match.group(1).strip().rstrip("的吧呢呀哦嘛吗了")
+            if topic and topic not in prefs.get("focus_topics", []):
+                prefs.setdefault("focus_topics", []).append(topic)
                 changed = True
-                logger.info(f"Preference updated: {key}={value} for user {user_id}")
+                logger.info(f"Focus topic added: {topic} for user {user_id}")
 
-    # Focus topic extraction
-    match = _FOCUS_PATTERN.search(text)
-    if match:
-        topic = match.group(1).strip().rstrip("的吧呢呀哦嘛吗了")
-        if topic and topic not in prefs.get("focus_topics", []):
-            prefs.setdefault("focus_topics", []).append(topic)
-            changed = True
-            logger.info(f"Focus topic added: {topic} for user {user_id}")
-
-    if changed:
-        _save_profile(profile, user_id)
+        if not changed:
+            raise ProfileTransactionAbort  # nothing extracted — skip the save
 
 
 # ── Welcome back message ──

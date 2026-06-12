@@ -461,7 +461,9 @@ async def stream_qa_chat(
     session_id: str, message: str, user_id: str
 ) -> AsyncGenerator[str, None]:
     """Stream SSE events for a new QA arena chat turn (saves the user message)."""
-    history = store.load_messages(session_id, user_id, limit=50)
+    # Full history: the rolling-summary covered cursor indexes from message 0, and
+    # the compression + token-budget layers below already bound what reaches the LLM.
+    history = store.load_messages(session_id, user_id, limit=None)
     store.save_message(session_id, user_id, "user", message)
 
     # Auto-title on first user message
@@ -485,7 +487,7 @@ async def stream_qa_regenerate(
     ``stream_qa_chat`` so the regenerated answer sees the same history.
     """
     store.delete_last_message_if_assistant(session_id, user_id)
-    messages = store.load_messages(session_id, user_id, limit=50)
+    messages = store.load_messages(session_id, user_id, limit=None)
     if not messages or messages[-1]["role"] != "user":
         yield f"data: {json.dumps({'type': 'error', 'message': '没有可重新生成的提问'}, ensure_ascii=False)}\n\n"
         return
@@ -547,7 +549,9 @@ async def stream_generate_summary(
     extract-and-reorganize task, not deep reasoning, so a lower effort cuts latency
     sharply with little quality loss. None/"" keeps the configured default.
     """
-    messages = store.load_messages(session_id, user_id, limit=200)
+    # Full history — the map-reduce path below exists precisely so long sessions
+    # are summarized in full instead of being truncated.
+    messages = store.load_messages(session_id, user_id, limit=None)
     if len(messages) < 2:
         yield f"data: {json.dumps({'type': 'error', 'message': '对话内容太少，无法生成总结'}, ensure_ascii=False)}\n\n"
         return
@@ -610,7 +614,9 @@ async def stream_generate_summary(
 
     topic = _extract_topic(content)
     safe_topic = _sanitize_filename(topic)
-    filename = f"{today}-{safe_topic}.md"
+    # Session id in the filename so get_summary_file can resolve THIS session's
+    # card instead of whichever card was written most recently.
+    filename = f"{today}-{safe_topic}-{session_id}.md"
 
     notes_dir = settings.base_dir / "data" / "qa_notes" / user_id
     notes_dir.mkdir(parents=True, exist_ok=True)
@@ -635,7 +641,13 @@ def get_summary_file(session_id: str, user_id: str) -> tuple[str, str] | None:
     notes_dir = settings.base_dir / "data" / "qa_notes" / user_id
     if not notes_dir.exists():
         return None
-    files = sorted(notes_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+    # Prefer files tagged with this session id (see stream_generate_summary).
+    # Legacy cards predate the tag, so fall back to the user's most recent file
+    # — but only when the session has NO tagged card, to avoid handing back a
+    # different session's summary.
+    files = sorted(
+        notes_dir.glob(f"*-{session_id}.md"), key=lambda f: f.stat().st_mtime, reverse=True
+    ) or sorted(notes_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
     if not files:
         return None
     f = files[0]

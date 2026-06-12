@@ -21,6 +21,7 @@ import json
 import logging
 import struct
 import threading
+import time
 from collections import OrderedDict
 from typing import Any, Optional
 
@@ -43,25 +44,36 @@ _EMBED_HEADER_LEN = 8
 
 
 class _LRU:
-    """Tiny thread-safe LRU used as the fallback when Redis is absent."""
+    """Tiny thread-safe LRU used as the fallback when Redis is absent.
+
+    Stores (expires_at, value) so TTLs survive the fallback — without it a
+    long-running Redis-less process serves stale JSON (e.g. JD knowledge
+    contexts designed for a 10-min TTL) until capacity eviction.
+    """
 
     def __init__(self, capacity: int = _LRU_MAX) -> None:
         self._cap = capacity
-        self._data: OrderedDict[str, bytes] = OrderedDict()
+        self._data: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
         self._lock = threading.Lock()
 
     def get(self, key: str) -> Optional[bytes]:
         with self._lock:
-            if key not in self._data:
+            entry = self._data.get(key)
+            if entry is None:
+                return None
+            expires_at, value = entry
+            if expires_at and time.time() > expires_at:
+                del self._data[key]
                 return None
             self._data.move_to_end(key)
-            return self._data[key]
+            return value
 
-    def set(self, key: str, value: bytes) -> None:
+    def set(self, key: str, value: bytes, ttl: int = 0) -> None:
         with self._lock:
             if key in self._data:
                 self._data.move_to_end(key)
-            self._data[key] = value
+            expires_at = time.time() + ttl if ttl else 0.0
+            self._data[key] = (expires_at, value)
             while len(self._data) > self._cap:
                 self._data.popitem(last=False)
 
@@ -135,7 +147,7 @@ class RedisCache:
             except Exception as exc:
                 self.stats.errors += 1
                 logger.warning("Redis SET failed (%s); falling back to LRU once", exc)
-        self._lru.set(key, value)
+        self._lru.set(key, value, ttl)
 
     # ── async wrappers (offload sync redis-py calls to a thread) ──
 

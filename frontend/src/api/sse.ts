@@ -22,21 +22,32 @@ function _timeoutError(error: any, timeoutMs: number): Error {
 /**
  * Run an SSE fetch under the shared hard timeout: wires an AbortController,
  * maps an abort into the localized 超时 message, and always clears the timer.
- * `fn` receives the signal to hand to fetch(). For consumers that *yield* frames,
- * use withSSETimeoutGen instead.
+ * `fn` receives the signal to hand to fetch(). An optional caller-supplied
+ * signal (e.g. component unmount / user cancel) also aborts the fetch.
+ * For consumers that *yield* frames, use withSSETimeoutGen instead.
  */
 export async function withSSETimeout<T>(
   fn: (signal: AbortSignal) => Promise<T>,
   timeoutMs = SSE_TIMEOUT_MS,
+  externalSignal?: AbortSignal,
 ): Promise<T> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", onExternalAbort);
+  }
   try {
     return await fn(controller.signal);
   } catch (error: any) {
+    // A caller-initiated abort isn't a timeout — re-throw as-is so callers
+    // can recognize it by `name === "AbortError"`.
+    if (externalSignal?.aborted) throw error;
     throw _timeoutError(error, timeoutMs);
   } finally {
     clearTimeout(timeoutId);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
   }
 }
 

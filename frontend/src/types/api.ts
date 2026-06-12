@@ -1,5 +1,7 @@
 export interface Question {
-  id: number;
+  // Usually a number, but the LLM can emit string ids like "Q2" — never
+  // Number() them (see Interview.tsx restore path).
+  id: number | string;
   question: string;
   difficulty?: number;
   focus_area?: string;

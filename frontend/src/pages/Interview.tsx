@@ -7,6 +7,7 @@ import ChatBubble from "../components/ChatBubble";
 import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics, type DrillProgressPayload } from "../api/interview";
 import useVoiceInput from "../hooks/useVoiceInput";
 import { cn } from "@/lib/utils";
+import { formatQuestionLabel } from "@/lib/question";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -41,11 +42,11 @@ export default function Interview() {
 
   const [questions, setQuestions] = useState<Question[]>(initData.questions || []);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [answers, setAnswers] = useState<Record<string | number, string>>({});
   const [drillInput, setDrillInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [evalProgress, setEvalProgress] = useState("");
-  const [hints, setHints] = useState<Record<number, HintState>>({});
+  const [hints, setHints] = useState<Record<string | number, HintState>>({});
   const [hintLoading, setHintLoading] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [restoring, setRestoring] = useState<boolean>(!initData.mode);
@@ -125,7 +126,15 @@ export default function Interview() {
               const local = JSON.parse(raw);
               if (local.partial_answers && Object.keys(local.partial_answers).length) {
                 setAnswers({ ...local.partial_answers });
+                const localIdx = typeof local.current_index === "number" ? local.current_index : 0;
                 if (typeof local.current_index === "number") setCurrentIndex(local.current_index);
+                // Same as the tier-2 path: load the current question's saved
+                // answer into drillInput, otherwise the sync effect sees an
+                // empty editor and deletes that answer once restoring is done.
+                const localQid = qList[localIdx]?.id;
+                if (localQid != null && local.partial_answers[String(localQid)]) {
+                  setDrillInput(local.partial_answers[String(localQid)]);
+                }
                 toast.info("已从本地缓存恢复未同步的草稿");
               }
             }
@@ -233,9 +242,12 @@ export default function Interview() {
     };
   }, [flushProgress]);
 
-  // Sync drillInput → answers so the draft survives refresh
+  // Sync drillInput → answers so the draft survives refresh.
+  // Guard on `finished`: the last-question submit sets answers then clears
+  // drillInput, and without this guard the effect would re-run with the empty
+  // drillInput and delete the just-submitted answer.
   useEffect(() => {
-    if (!isBatchMode || restoring) return;
+    if (!isBatchMode || restoring || finished) return;
     const q = questions[currentIndex];
     if (!q) return;
     setAnswers((prev) => {
@@ -252,7 +264,7 @@ export default function Interview() {
       if (cur === drillInput) return prev;
       return { ...prev, [q.id]: drillInput };
     });
-  }, [drillInput, currentIndex, questions, isBatchMode, restoring]);
+  }, [drillInput, currentIndex, questions, isBatchMode, restoring, finished]);
 
   useEffect(() => {
     if (!isBatchMode) chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -271,8 +283,8 @@ export default function Interview() {
   // debounce timer / unmount timing.
   const persistNow = useCallback((
     idx: number,
-    answersObj: Record<number, string>,
-    hintsObj: Record<number, HintState>,
+    answersObj: Record<string | number, string>,
+    hintsObj: Record<string | number, HintState>,
   ) => {
     if (!isBatchMode || !sessionId || restoring || finished) return;
     const payload = { current_index: idx, partial_answers: answersObj, hints: hintsObj };
@@ -345,7 +357,7 @@ export default function Interview() {
     const nextMode = current.stage === "none" ? "hint" : "full";
     if (current.stage === "full") return;
     if ((current as any)[nextMode]) {
-      setHints((p) => ({ ...p, [qid]: { ...p[qid], stage: nextMode } }));
+      setHints((p) => ({ ...p, [qid]: { ...p[qid], stage: nextMode } as HintState }));
       return;
     }
     setHintLoading(true);
@@ -356,7 +368,7 @@ export default function Interview() {
       const data = await getReferenceAnswer(topic, currentQ.question, sessionId, qid, false, nextMode);
       setHints((p) => ({
         ...p,
-        [qid]: { ...p[qid], [nextMode]: data.reference_answer, stage: nextMode },
+        [qid]: { ...p[qid], [nextMode]: data.reference_answer, stage: nextMode } as HintState,
       }));
     } catch (e) {
       console.error("获取提示失败:", e);
@@ -379,6 +391,19 @@ export default function Interview() {
         onProgress: (msg) => setEvalProgress(msg),
         onRAGMetrics: (m) => { ragMetrics = m; },
       });
+      // Evaluation succeeded — the session is completed on the backend. Cancel
+      // any pending debounced save, disable the unmount flush (handleEndBatch
+      // can run while `finished` is still false, e.g. via the confirm dialog),
+      // and drop the local draft so no stale progress write fires after
+      // navigation.
+      saveSnapshotRef.current.enabled = false;
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      if (draftKey) {
+        try { localStorage.removeItem(draftKey); } catch { /* noop */ }
+      }
       navigate(`/review/${sessionId}`, {
         state: {
           review: data.review,
@@ -569,7 +594,7 @@ export default function Interview() {
                     {answers[q.id]
                       ? <Check size={14} className="text-green" />
                       : <Minus size={14} className="text-dim opacity-50" />}
-                    <span>Q{q.id}: {q.question.slice(0, 60)}{q.question.length > 60 ? "..." : ""}</span>
+                    <span>{formatQuestionLabel(q.id)}: {q.question.slice(0, 60)}{q.question.length > 60 ? "..." : ""}</span>
                   </div>
                 ))}
               </div>
@@ -586,7 +611,7 @@ export default function Interview() {
               {/* L1 — 题号 + 分类侧边栏 */}
               <div className="w-full max-w-[720px] flex gap-3 md:gap-5 animate-fade-in">
                 <div className="hidden md:flex flex-col items-center gap-2 pt-1 shrink-0">
-                  <span className="text-[10px] font-mono uppercase tracking-widest text-dim/60">Q{String(currentQ.id).padStart(2, "0")}</span>
+                  <span className="text-[10px] font-mono uppercase tracking-widest text-dim/60">{formatQuestionLabel(currentQ.id, 2)}</span>
                   {currentQ.difficulty && (
                     <div className="flex flex-col items-center gap-0.5">
                       {Array.from({ length: 5 }, (_, i) => (

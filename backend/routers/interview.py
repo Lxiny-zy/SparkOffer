@@ -15,7 +15,7 @@ from backend.config import settings
 from backend.indexer import load_topics
 from backend.memory import update_profile_after_interview, llm_update_profile
 from backend.storage.sessions import (
-    create_session, append_message, save_review, save_drill_answers,
+    create_session, append_message, save_review, save_drill_answers, get_session,
 )
 from backend.graphs.resume_interview import compile_resume_interview
 from backend.graphs.topic_drill import generate_drill_questions, evaluate_drill_answers, stream_evaluate_drill_answers
@@ -111,6 +111,7 @@ async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get
 
         async def _gen():
             try:
+                result = None
                 async for kind, value in stream_blocking_sse(
                     graph.invoke, initial_state, config,
                     progress_msg="正在准备面试",
@@ -119,6 +120,11 @@ async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get
                         yield value
                     else:
                         result = value
+
+                if result is None:
+                    # graph.invoke failed — stream_blocking_sse already yielded
+                    # the error event; don't mask it with a NameError below.
+                    return
 
                 ai_message = ""
                 for msg in reversed(result["messages"]):
@@ -232,6 +238,12 @@ async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
 @router.post("/interview/end/{session_id}")
 async def end_interview(session_id: str, body: EndDrillRequest = None,
                         user_id: str = Depends(get_current_user)):
+    # Completed sessions are immutable history: re-running the evaluation would
+    # overwrite the original review/scores and double-count profile/SR stats.
+    existing = await asyncio.to_thread(get_session, session_id, user_id=user_id)
+    if existing and existing.get("review"):
+        raise HTTPException(409, "Session already evaluated.")
+
     # -- Drill mode --
     entry = get_live(drill_sessions, session_id, "drill", user_id)
     if entry:

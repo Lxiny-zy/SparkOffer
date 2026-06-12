@@ -190,11 +190,22 @@ def _run_async(coro):
         running_loop = None
 
     if running_loop and running_loop.is_running():
-        # Already inside an event loop — use thread executor to avoid nesting
+        # Already inside an event loop — use thread executor to avoid nesting.
+        # No `with` block: __exit__ does shutdown(wait=True), which would block
+        # on the worker until the coroutine truly finishes even after result()
+        # raised TimeoutError — the caller would stall the full internal
+        # retry-with-backoff duration (well past this deadline) and only then
+        # get the timeout. shutdown(wait=False) abandons the worker instead.
+        # The deadline covers the worst case (retries × per-call timeout +
+        # backoff) so a successfully-degrading inner call isn't cut short.
         import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
             future = pool.submit(asyncio.run, coro)
-            return future.result(timeout=_EMBED_TIMEOUT_SECONDS + 5.0)
+            deadline = (_MAX_EMBED_RETRIES + 1) * (_EMBED_TIMEOUT_SECONDS + _RETRY_BACKOFF_BASE ** _MAX_EMBED_RETRIES) + 5.0
+            return future.result(timeout=deadline)
+        finally:
+            pool.shutdown(wait=False)
     else:
         return asyncio.run(coro)
 
@@ -403,16 +414,18 @@ async def find_similar_weak_point(
     if not vectors:
         return None
 
-    matrix = np.stack(vectors)
-    # 兜底守卫：极端情况下（new_vec embed 失败退化成 1536 零向量，而批量 embed 又
-    # 拿到另一维度）matrix 与 new_vec 仍可能维度不符 —— 此时无法比较，直接放弃去重
-    # （返回 None 表示「没有相似项」），绝不让维度不匹配把请求打挂。
-    if matrix.shape[1] != new_vec.shape[0]:
+    # 维度过滤要在 stack 之前：批量 embed 失败时返回的零向量维度走探测/默认值，
+    # 可能与缓存向量不同——混合维度会让 np.stack 直接抛 ValueError（第 421 行的
+    # 守卫在 stack 之后，protect 不到）。逐条剔除异维向量，保持 indices 对齐。
+    aligned = [(idx, vec) for idx, vec in zip(indices, vectors) if vec.shape == new_vec.shape]
+    if not aligned:
         logger.warning(
-            "weak_point 去重维度不一致（%d vs %d），跳过本次匹配。",
-            matrix.shape[1], new_vec.shape[0],
+            "weak_point 去重维度不一致（全部候选与 new_vec %s 不符），跳过本次匹配。",
+            new_vec.shape,
         )
         return None
+    indices = [idx for idx, _ in aligned]
+    matrix = np.stack([vec for _, vec in aligned])
 
     sims = _cosine_similarity(new_vec, matrix)
     best_pos = int(np.argmax(sims))
@@ -435,9 +448,13 @@ def rebuild_index_from_profile(user_id: str):
     if not weak_points:
         return
 
-    texts = [wp["point"] for wp in weak_points if wp.get("point")]
-    if not texts:
+    # Filter the wp dicts FIRST, then derive texts — zipping filtered texts
+    # against the unfiltered weak_points list misaligns topic/created_at/
+    # metadata for every record after a skipped (empty-point) entry.
+    valid_wps = [wp for wp in weak_points if wp.get("point")]
+    if not valid_wps:
         return
+    texts = [wp["point"] for wp in valid_wps]
 
     embed_model = get_embedding()
     vectors = embed_model.get_text_embedding_batch(texts)
@@ -453,7 +470,7 @@ def rebuild_index_from_profile(user_id: str):
             created_at=wp.get("first_seen", now),
             metadata={"topic": wp.get("topic", ""), "times_seen": wp.get("times_seen", 1)},
         )
-        for text, vec, wp in zip(texts, vectors, weak_points)
+        for text, vec, wp in zip(texts, vectors, valid_wps)
     ]
     store.add(user_id, records)
     logger.info(f"Rebuilt {len(records)} weak_point vectors for user {user_id}.")

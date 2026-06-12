@@ -80,15 +80,19 @@ def save_drill_progress(session_id: str, current_index: int,
     """中途保存 drill / job_prep 进度到 meta.progress，不需要 schema 迁移。
 
     Returns True if the row was updated, False if no such session exists for
-    this user — callers should treat False as 404.
+    this user — callers should treat False as 404. Completed sessions (review
+    written) are read-only: a late progress POST (e.g. the frontend's unload
+    flush racing the evaluation) must not overwrite their stored progress.
     """
     conn = get_db()
     row = conn.execute(
-        "SELECT meta FROM sessions WHERE session_id = ? AND user_id = ?",
+        "SELECT meta, review FROM sessions WHERE session_id = ? AND user_id = ?",
         (session_id, user_id),
     ).fetchone()
     if not row:
         return False
+    if row["review"]:
+        return True  # already completed — accept silently, write nothing
     meta = json.loads(row["meta"] or "{}")
     meta["progress"] = {
         "current_index": current_index,

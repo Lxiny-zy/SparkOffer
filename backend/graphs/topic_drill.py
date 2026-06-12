@@ -23,16 +23,22 @@ _RETRIEVAL_TIMEOUT = 60.0
 
 def _safe_retrieve(topic: str, question: str, user_id: str, top_k: int = 5) -> list[str]:
     """Synchronous retrieve with timeout protection."""
+    # No `with` block: ThreadPoolExecutor.__exit__ does shutdown(wait=True),
+    # which would block on the hung retrieval thread until it finishes — making
+    # the 60s timeout purely cosmetic. shutdown(wait=False) returns at the
+    # deadline and abandons the worker thread (it dies when retrieval returns).
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(retrieve_topic_context, topic, question, user_id, top_k)
-            return future.result(timeout=_RETRIEVAL_TIMEOUT)
+        future = executor.submit(retrieve_topic_context, topic, question, user_id, top_k)
+        return future.result(timeout=_RETRIEVAL_TIMEOUT)
     except concurrent.futures.TimeoutError:
         _logger.warning(f"Knowledge retrieval timed out ({_RETRIEVAL_TIMEOUT}s) for topic={topic}")
         return []
     except Exception as e:
         _logger.warning(f"Knowledge retrieval failed for topic={topic}: {e}")
         return []
+    finally:
+        executor.shutdown(wait=False)
 
 
 def _get_topic_display(user_id: str) -> dict[str, str]:
@@ -246,9 +252,12 @@ def evaluate_drill_answers(topic: str, questions: list[dict], answers: list[dict
         SystemMessage(content="你是训练评估引擎。只返回 JSON，不要其他内容。"),
         HumanMessage(content=prompt),
     ])
+    # chunk_text, not response.content: content-block-list gateways would make
+    # .strip()/slicing below throw outside the JSON-failure fallback.
+    content = chunk_text(response)
 
     try:
-        result = _parse_json_response(response.content)
+        result = _parse_json_response(content)
         if not isinstance(result, dict):
             raise ValueError(f"Expected a dict, got {type(result)}")
         return result
@@ -256,7 +265,7 @@ def evaluate_drill_answers(topic: str, questions: list[dict], answers: list[dict
         import logging
         logger = logging.getLogger("uvicorn")
         logger.error(f"Drill evaluation failed: {e}")
-        logger.error(f"LLM raw response: {response.content[:500]}")
+        logger.error(f"LLM raw response: {content[:500]}")
         # Evaluation fallback is acceptable — better than crashing
         return {
             "scores": [{"question_id": q["id"], "score": None, "assessment": "评估解析失败，请重试"} for q in questions],
@@ -277,10 +286,20 @@ async def stream_evaluate_drill_answers(
 
     # Retrieve references for all answered questions concurrently on the loop
     # (was: serial _safe_retrieve, each spinning up its own thread pool).
-    per_q_refs = await asyncio.gather(*[
-        safe_retrieve_topic_context(topic, q["question"], user_id, top_k=2)
-        for q in answered_questions
-    ]) if answered_questions else []
+    # Bounded at 2 like rag_retrieval._EMBED_CONCURRENCY: an unbounded gather
+    # of up to 10 retrievals trips the embedding API's per-key concurrency
+    # throttle, stalling every request to its full timeout and degrading ALL
+    # references to [] — the evaluation then silently runs without any.
+    if answered_questions:
+        _eval_retrieval_sem = asyncio.Semaphore(2)
+
+        async def _bounded_retrieve(q: dict) -> list[str]:
+            async with _eval_retrieval_sem:
+                return await safe_retrieve_topic_context(topic, q["question"], user_id, top_k=2)
+
+        per_q_refs = await asyncio.gather(*[_bounded_retrieve(q) for q in answered_questions])
+    else:
+        per_q_refs = []
 
     qa_lines = []
     ref_lines = []

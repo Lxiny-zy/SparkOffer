@@ -96,7 +96,7 @@ export interface PipelineStageEvent {
   rag_metrics?: RAGRetrievalMetrics;
 }
 
-export async function startInterviewStream(mode: string, topic: string | null, { onQuestion, onQuestionUpdate, onDone, onError, onStage }: StreamCallbacks): Promise<void> {
+export async function startInterviewStream(mode: string, topic: string | null, { onQuestion, onQuestionUpdate, onDone, onError, onStage }: StreamCallbacks, externalSignal?: AbortSignal): Promise<void> {
   await withSSETimeout(async (signal) => {
     const res = await authFetch(`${API_BASE}/interview/start-stream`, {
       method: "POST",
@@ -113,7 +113,7 @@ export async function startInterviewStream(mode: string, topic: string | null, {
       else if (event.type === "error" && onError) onError(event.message);
       else if (event.type === "pipeline_stage" && onStage) onStage(event as PipelineStageEvent);
     }
-  });
+  }, undefined, externalSignal);
 }
 
 export async function previewJobPrep(payload: any, callbacks?: SSECallbacks): Promise<any> {
