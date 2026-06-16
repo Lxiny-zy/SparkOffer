@@ -3,7 +3,7 @@ import asyncio
 import re
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 
 from backend.config import settings
 from backend.indexer import load_topics, invalidate_topic_index, build_topic_index
@@ -13,6 +13,7 @@ from backend.auth import get_current_user
 router = APIRouter(prefix="/api")
 
 KNOWLEDGE_EXTS = (".md", ".txt", ".py")
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200MB per file
 
 
 def _validate_filename(filename: str) -> str:
@@ -26,6 +27,23 @@ def _validate_filename(filename: str) -> str:
     if not name or name in (".", "..") or name != Path(name).name:
         raise HTTPException(400, f"Invalid filename: {filename}")
     return name
+
+
+def _dedupe_filename(topic_dir: Path, filename: str) -> str:
+    """Return a non-colliding filename within topic_dir.
+
+    If `filename` already exists, append ' (1)', ' (2)', ... to the stem until a
+    free name is found, so uploads never overwrite existing knowledge files.
+    """
+    if not (topic_dir / filename).exists():
+        return filename
+    stem, suffix = Path(filename).stem, Path(filename).suffix
+    i = 1
+    while True:
+        candidate = f"{stem} ({i}){suffix}"
+        if not (topic_dir / candidate).exists():
+            return candidate
+        i += 1
 
 
 def _glob_knowledge_files(topic_dir: Path) -> list[Path]:
@@ -130,6 +148,51 @@ async def create_core_knowledge(topic: str, body: dict,
     await asyncio.to_thread(invalidate_topic_index, topic, user_id)
     schedule_index_rebuild(topic, user_id)
     return {"ok": True, "filename": filename}
+
+
+@router.post("/knowledge/{topic}/upload")
+async def upload_core_knowledge(topic: str, files: list[UploadFile] = File(...),
+                                user_id: str = Depends(get_current_user)):
+    topics = load_topics(user_id)
+    if topic not in topics:
+        raise HTTPException(400, f"Unknown topic: {topic}")
+    topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
+    topic_dir.mkdir(parents=True, exist_ok=True)
+
+    saved, skipped, rejected = [], [], []
+    for file in files:
+        try:
+            name = _validate_filename(file.filename)
+        except HTTPException:
+            rejected.append(file.filename)
+            continue
+        if not name.lower().endswith(".md"):
+            skipped.append(name)
+            continue
+        final_name = _dedupe_filename(topic_dir, name)
+        filepath = topic_dir / final_name
+        total = 0
+        too_large = False
+        with filepath.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    too_large = True
+                    break
+                out.write(chunk)
+        if too_large:
+            filepath.unlink()
+            rejected.append(name)
+            continue
+        saved.append(final_name)
+
+    if saved:
+        await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+        schedule_index_rebuild(topic, user_id)
+    return {"ok": True, "saved": saved, "skipped": skipped, "rejected": rejected}
 
 
 @router.post("/knowledge/{topic}/generate")

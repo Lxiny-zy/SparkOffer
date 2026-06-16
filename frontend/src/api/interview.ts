@@ -345,6 +345,17 @@ export async function createCoreKnowledge(topic: string, filename: string, conte
   return res.json();
 }
 
+export async function uploadCoreKnowledgeFiles(topic: string, files: File[]): Promise<any> {
+  const form = new FormData();
+  for (const f of files) form.append("files", f);
+  const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/upload`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function generateKnowledge(topic: string, callbacks?: SSECallbacks): Promise<any> {
   return fetchSSE(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/generate`, {
     method: "POST",

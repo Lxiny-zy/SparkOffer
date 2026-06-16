@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { X, Clock, MessageSquare } from "lucide-react";
+import { X, Clock, MessageSquare, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { getHistory, deleteSession, getInterviewTopics } from "../api/interview";
 import { cn } from "@/lib/utils";
@@ -177,6 +177,19 @@ export default function History() {
                         {/* L1 — Mode + Title + Subtitle */}
                         <div className="flex items-center gap-2 mb-1.5 flex-wrap">
                           <Badge variant={badge.variant as any} className="shrink-0 text-[10px]">{badge.text}</Badge>
+                          {statusFilter === "in_progress" && s.awaiting_eval && (
+                            <Badge
+                              variant="outline"
+                              className="shrink-0 text-[10px]"
+                              style={{
+                                background: "color-mix(in srgb, var(--sig-warning) 10%, transparent)",
+                                borderColor: "color-mix(in srgb, var(--sig-warning) 42%, transparent)",
+                                color: "var(--sig-warning)",
+                              }}
+                            >
+                              评估未完成
+                            </Badge>
+                          )}
                           <span className="text-sm text-text font-medium truncate">{title}</span>
                           {subtitle && <span className="text-xs text-dim truncate">· {subtitle}</span>}
                         </div>
@@ -203,6 +216,24 @@ export default function History() {
                       {/* Right rail */}
                       <div className="flex items-center gap-2 shrink-0">
                         <ScorePill score={s.avg_score} />
+                        {statusFilter === "in_progress" && s.awaiting_eval && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-[11px] gap-1"
+                            style={{
+                              borderColor: "color-mix(in srgb, var(--sig-warning) 42%, transparent)",
+                              color: "var(--sig-warning)",
+                            }}
+                            title="重新评估"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate(`/interview/${s.session_id}`, { state: { autoEvaluate: true } });
+                            }}
+                          >
+                            <RotateCcw size={12} /> 重新评估
+                          </Button>
+                        )}
                         <button
                           className="p-1.5 rounded-md text-dim opacity-0 group-hover:opacity-100 hover:text-[color:var(--sig-danger)] hover:bg-secondary transition-all cursor-pointer"
                           title="删除"

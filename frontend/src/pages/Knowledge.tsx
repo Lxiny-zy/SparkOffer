@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Menu, X, Sparkles, ChevronRight, ChevronDown, Activity, Clock, FileText, RefreshCw, Loader2, CheckCircle2, XCircle, CircleDashed } from "lucide-react";
+import { Menu, X, Sparkles, ChevronRight, ChevronDown, Activity, Clock, FileText, RefreshCw, Loader2, CheckCircle2, XCircle, CircleDashed, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { getTopicIcon, ICON_OPTIONS } from "../utils/topicIcons";
 import {
   getTopics, getCoreKnowledge, updateCoreKnowledge, createCoreKnowledge,
   deleteCoreKnowledge, getHighFreq, updateHighFreq, createTopic, deleteTopic, generateKnowledge,
   getKnowledgeStats, rebuildTopicIndex, rebuildAllIndices, getRebuildStatus,
+  uploadCoreKnowledgeFiles,
   type RebuildTaskStatus,
 } from "../api/interview";
 import type { KnowledgeStats } from "../api/interview";
@@ -65,6 +66,9 @@ export default function Knowledge() {
   const [showNewFile, setShowNewFile] = useState<boolean>(false);
   const [generating, setGenerating] = useState<boolean>(false);
   const [genProgress, setGenProgress] = useState<string>("");
+
+  const [uploading, setUploading] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [showAddTopic, setShowAddTopic] = useState<boolean>(false);
   const [newTopicName, setNewTopicName] = useState<string>("");
@@ -160,6 +164,41 @@ export default function Knowledge() {
       loadCore(selected!);
       toast.success(`已创建 ${fname}`);
     } catch (e: any) { toast.error("创建失败: " + e.message); }
+  };
+
+  const handleUploadFiles = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const all = Array.from(fileList);
+    const mdFiles = all.filter((f) => {
+      const isMd = f.name.toLowerCase().endsWith(".md");
+      if (!isMd) toast.error(`${f.name} 不是 .md 文件，已跳过`);
+      return isMd;
+    });
+    const validFiles = mdFiles.filter((f) => {
+      const tooLarge = f.size > 200 * 1024 * 1024;
+      if (tooLarge) toast.error(`${f.name} 超过 200MB，已跳过`);
+      return !tooLarge;
+    });
+    if (validFiles.length === 0) {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+    setUploading(true);
+    try {
+      const result = await uploadCoreKnowledgeFiles(selected!, validFiles);
+      await loadCore(selected!);
+      loadStats(selected!);
+      toast.success(`已上传 ${result.saved.length} 个文件`);
+      const extras: string[] = [];
+      if (result.skipped?.length) extras.push(`${result.skipped.length} 个已跳过`);
+      if (result.rejected?.length) extras.push(`${result.rejected.length} 个被拒绝`);
+      if (extras.length) toast.error(extras.join("，"));
+    } catch (e: any) {
+      toast.error("上传失败: " + e.message);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   };
 
   const handleDeleteFile = async (filename: string) => {
@@ -624,7 +663,7 @@ export default function Knowledge() {
               {tab === "core" ? (
                 <div>
               <div className="text-[13px] text-dim mb-3">
-                AI 出题和评分的参考依据，编辑后影响该领域的题目质量。支持 .md / .txt / .py 格式。
+                AI 出题和评分的参考依据，编辑后影响该领域的题目质量。支持 .md / .txt / .py 格式。也可直接上传 .md 文件（单文件最大 200MB）。
               </div>
               <div className="flex gap-2 mb-4">
                 {showNewFile ? (
@@ -636,6 +675,17 @@ export default function Knowledge() {
                 ) : (
                   <div className="flex gap-2">
                     <Button variant="outline" size="sm" onClick={() => setShowNewFile(true)}>+ 新增文件</Button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".md,text/markdown"
+                      multiple
+                      className="hidden"
+                      onChange={(e) => handleUploadFiles(e.target.files)}
+                    />
+                    <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+                      {uploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />} 上传 .md
+                    </Button>
                     {coreIsEmpty && (
                       <Button variant="outline" size="sm" className="border-primary/40 text-primary" onClick={handleGenerate} disabled={generating}>
                         {generating ? (genProgress || "正在生成...") : <><Sparkles size={14} /> AI 生成基础内容</>}

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useLocation, useNavigate } from "react-router-dom";
 import { Markdown } from "../components/ChatBubble";
-import { Check, Minus, Star, Lightbulb, Eye, Loader2 } from "lucide-react";
+import { Check, Minus, Star, Lightbulb, Eye, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import ChatBubble from "../components/ChatBubble";
 import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics, type DrillProgressPayload } from "../api/interview";
@@ -46,12 +46,14 @@ export default function Interview() {
   const [drillInput, setDrillInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [evalProgress, setEvalProgress] = useState("");
+  const [evalError, setEvalError] = useState<string | null>(null);
   const [hints, setHints] = useState<Record<string | number, HintState>>({});
   const [hintLoading, setHintLoading] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [restoring, setRestoring] = useState<boolean>(!initData.mode);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const restoredRef = useRef(false);
+  const autoEvalDoneRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
@@ -277,6 +279,7 @@ export default function Interview() {
   const currentQ = questions[currentIndex];
   const totalQ = questions.length;
   const answeredCount = Object.keys(answers).length;
+  const allAnswered = isBatchMode && questions.length > 0 && questions.every((q) => (answers[q.id] || "").trim().length > 0);
 
   // Immediate (non-debounced) save with explicit values. Called on every
   // question navigation so progress is persisted per step, independent of the
@@ -381,6 +384,7 @@ export default function Interview() {
     setShowEndConfirm(false);
     setSubmitting(true);
     setEvalProgress("");
+    setEvalError(null);
     try {
       const answerList = questions.map((q) => ({
         question_id: q.id,
@@ -420,11 +424,23 @@ export default function Interview() {
         },
       });
     } catch (err: any) {
-      alert("评估失败: " + err.message);
+      setEvalError(err?.message || "评估失败，请重试");
     } finally {
       setSubmitting(false);
     }
   };
+
+  // Auto-evaluate when arriving from the history page ("时光机") with intent:
+  // a fully-answered session whose evaluation previously failed. Fires at most
+  // once (guarded by autoEvalDoneRef) and only once restore has settled.
+  useEffect(() => {
+    if (restoring || !allAnswered || submitting || evalError || finished) return;
+    if (!(location.state as any)?.autoEvaluate) return;
+    if (autoEvalDoneRef.current) return;
+    autoEvalDoneRef.current = true;
+    handleEndBatch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restoring, allAnswered, submitting, evalError, finished]);
 
   const handleSend = async () => {
     const text = input.trim();
@@ -563,6 +579,32 @@ export default function Interview() {
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-8 flex flex-col items-center gap-4 md:gap-5">
+          {/* Eval failure banner — answers are preserved; one-click retry. */}
+          {evalError && !submitting && (
+            <div className="w-full max-w-[720px] rounded-xl bg-red/8 border border-red/20 px-4 py-3.5 flex flex-col gap-2 animate-fade-in">
+              <div className="text-sm text-red font-medium leading-relaxed">评估失败：{evalError}</div>
+              <div className="text-[13px] text-dim">答案已保留，可直接重试。</div>
+              <div className="flex justify-end">
+                <Button variant="default" size="sm" className="gap-1.5" onClick={handleEndBatch}>
+                  <RefreshCw size={14} />
+                  重新评估
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Auto-eval entry from history: fully answered but no report yet. */}
+          {isBatchMode && !restoring && !finished && !submitting && allAnswered && !evalError && (
+            <div className="w-full max-w-[720px] rounded-xl bg-primary/8 border border-primary/20 px-4 py-3.5 flex flex-col gap-2 animate-fade-in">
+              <div className="text-sm font-medium leading-relaxed">检测到你已完成全部作答，但尚未生成评估报告。</div>
+              <div className="flex justify-end">
+                <Button variant="default" size="sm" onClick={handleEndBatch}>
+                  生成评估报告
+                </Button>
+              </div>
+            </div>
+          )}
+
           {submitting ? (
             <div className="w-full max-w-[720px] flex flex-col items-center justify-center gap-4 py-15 text-dim text-base">
               <div className="flex gap-2">

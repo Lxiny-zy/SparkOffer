@@ -177,7 +177,7 @@ def list_sessions(
     ).fetchone()[0]
 
     rows = conn.execute(
-        f"SELECT session_id, mode, topic, meta, created_at, overall FROM sessions "
+        f"SELECT session_id, mode, topic, meta, questions, created_at, overall FROM sessions "
         f"WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
         params + [limit, offset],
     ).fetchall()
@@ -186,14 +186,29 @@ def list_sessions(
     for r in rows:
         overall = json.loads(r["overall"] or "{}")
         meta = json.loads(r["meta"] or "{}")
-        items.append({
+        item = {
             "session_id": r["session_id"],
             "mode": r["mode"],
             "topic": r["topic"],
             "meta": meta,
             "created_at": r["created_at"],
             "avg_score": overall.get("avg_score"),
-        })
+        }
+        # For in-progress batch drills, surface whether the session is fully
+        # answered but still missing an evaluation (review IS NULL) — lets the
+        # UI offer a "re-evaluate" affordance instead of "continue".
+        if status == "in_progress" and r["mode"] in ("topic_drill", "jd_prep"):
+            questions = json.loads(r["questions"] or "[]")
+            question_count = len(questions)
+            progress = (meta or {}).get("progress", {}) or {}
+            partial = progress.get("partial_answers", {}) or {}
+            answered_count = sum(
+                1 for v in partial.values() if isinstance(v, str) and v.strip()
+            )
+            item["question_count"] = question_count
+            item["answered_count"] = answered_count
+            item["awaiting_eval"] = question_count > 0 and answered_count >= question_count
+        items.append(item)
     return {"items": items, "total": total}
 
 
