@@ -430,17 +430,19 @@ export default function Interview() {
     }
   };
 
-  // Auto-evaluate when arriving from the history page ("时光机") with intent:
-  // a fully-answered session whose evaluation previously failed. Fires at most
-  // once (guarded by autoEvalDoneRef) and only once restore has settled.
+  // Auto-evaluate when arriving from the history page ("时光机") with intent.
+  // The backend reconstructs the submitted answers from the persisted transcript
+  // when the live answers are gone, so we don't gate on `allAnswered` here —
+  // only that questions have loaded. Fires at most once (autoEvalDoneRef).
   useEffect(() => {
-    if (restoring || !allAnswered || submitting || evalError || finished) return;
+    if (restoring || submitting || evalError || finished) return;
+    if (questions.length === 0) return;
     if (!(location.state as any)?.autoEvaluate) return;
     if (autoEvalDoneRef.current) return;
     autoEvalDoneRef.current = true;
     handleEndBatch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [restoring, allAnswered, submitting, evalError, finished]);
+  }, [restoring, submitting, evalError, finished, questions.length]);
 
   const handleSend = async () => {
     const text = input.trim();

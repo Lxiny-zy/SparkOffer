@@ -33,6 +33,48 @@ from backend.auth import get_current_user
 router = APIRouter(prefix="/api")
 
 
+def _answers_from_transcript(questions: list, transcript: list) -> list:
+    """Rebuild ``[{question_id, answer}]`` from a persisted drill transcript.
+
+    ``save_drill_answers`` writes the transcript as question/answer pairs in
+    question order (assistant=question, then an optional user=answer). This
+    recovers the originally-submitted answers when re-evaluating a session whose
+    live entry is gone (completed eval, restart, TTL eviction).
+    """
+    text_to_answer: dict[str, str] = {}
+    msgs = transcript or []
+    i = 0
+    while i < len(msgs):
+        m = msgs[i]
+        if m.get("role") == "assistant":
+            ans = ""
+            if i + 1 < len(msgs) and msgs[i + 1].get("role") == "user":
+                ans = msgs[i + 1].get("content", "") or ""
+                i += 1
+            text_to_answer[m.get("content", "")] = ans
+        i += 1
+    return [
+        {"question_id": q["id"], "answer": text_to_answer.get(q.get("question", ""), "")}
+        for q in questions
+    ]
+
+
+def _resolve_answers(body, existing: dict | None, questions: list) -> list:
+    """Pick the richer answer source: the request body vs the persisted transcript.
+
+    On a first submit the body carries the answers. On re-evaluation the live
+    answers may be gone or the restored progress stale, so the transcript is the
+    authoritative record. Whichever has more non-empty answers wins.
+    """
+    body_answers = list(body.answers) if (body and body.answers) else []
+    body_filled = sum(1 for a in body_answers if str(a.get("answer", "")).strip())
+    transcript_answers = _answers_from_transcript(questions, (existing or {}).get("transcript", []))
+    transcript_filled = sum(1 for a in transcript_answers if a["answer"].strip())
+    if transcript_filled > body_filled:
+        return transcript_answers
+    return body_answers if body_answers else transcript_answers
+
+
 def _get_resume_graph(session_id: str, user_id: str) -> dict | None:
     """Return the in-memory resume-graph entry, rehydrating on a cache miss.
 
@@ -238,21 +280,27 @@ async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
 @router.post("/interview/end/{session_id}")
 async def end_interview(session_id: str, body: EndDrillRequest = None,
                         user_id: str = Depends(get_current_user)):
-    # Completed sessions are immutable history: re-running the evaluation would
-    # overwrite the original review/scores and double-count profile/SR stats.
+    # Re-evaluation is allowed from any state (the 时光机 "重新评估" entry): a
+    # prior attempt may have produced an empty / failed review, or none at all.
+    # We always overwrite review/scores/overall, but skip the profile/SR/knowledge
+    # side-effects when they were already applied (a previous eval persisted
+    # non-empty scores) so re-evaluating a completed session never double-counts.
     existing = await asyncio.to_thread(get_session, session_id, user_id=user_id)
-    if existing and existing.get("review"):
-        raise HTTPException(409, "Session already evaluated.")
+    already_scored = bool(existing and existing.get("scores"))
 
     # -- Drill mode --
     entry = get_live(drill_sessions, session_id, "drill", user_id)
+    if entry is None and existing and existing.get("mode") == "topic_drill" and existing.get("questions"):
+        # Live entry gone (completed eval cleared it, restart, or TTL eviction):
+        # reconstruct from the persisted session so re-evaluation still works.
+        entry = {"topic": existing.get("topic"), "questions": existing["questions"], "user_id": user_id}
     if entry:
         if entry.get("user_id") != user_id:
             raise HTTPException(403, "Access denied.")
 
         topic = entry["topic"]
         questions = entry["questions"]
-        answers = body.answers if body and body.answers else []
+        answers = _resolve_answers(body, existing, questions)
         save_drill_answers(session_id, answers, user_id=user_id)
 
         async def _stream_drill():
@@ -355,23 +403,28 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                     review_ = format_drill_review(questions, answers, scores, overall)
                     save_review(session_id, review_, scores, overall.get("new_weak_points", []), overall, user_id=user_id)
 
-                    from backend.spaced_repetition import update_weak_point_sr
-                    for s in scores:
-                        wp = s.get("weak_point")
-                        sc = s.get("score")
-                        if wp and isinstance(sc, (int, float)):
-                            update_weak_point_sr(topic, wp, sc, user_id, difficulty=s.get("difficulty", 3))
+                    # SR / profile / knowledge are applied once per session. On a
+                    # re-evaluation of an already-scored session, skip them so the
+                    # stats aren't double-counted (the report itself is refreshed).
+                    if not already_scored:
+                        from backend.spaced_repetition import update_weak_point_sr
+                        for s in scores:
+                            wp = s.get("weak_point")
+                            sc = s.get("score")
+                            if wp and isinstance(sc, (int, float)):
+                                update_weak_point_sr(topic, wp, sc, user_id, difficulty=s.get("difficulty", 3))
 
-                    await _update_drill_profile(topic, overall, scores, len(questions), user_id)
+                        await _update_drill_profile(topic, overall, scores, len(questions), user_id)
                     del_live(drill_sessions, session_id, user_id)
 
-                    try:
-                        from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
-                        await extract_and_writeback(topic, questions, answers, scores, user_id)
-                        await collect_high_freq(topic, questions, scores, user_id)
-                    except Exception as e:
-                        import logging
-                        logging.getLogger("uvicorn").warning(f"Knowledge evolution failed: {e}")
+                    if not already_scored:
+                        try:
+                            from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+                            await extract_and_writeback(topic, questions, answers, scores, user_id)
+                            await collect_high_freq(topic, questions, scores, user_id)
+                        except Exception as e:
+                            import logging
+                            logging.getLogger("uvicorn").warning(f"Knowledge evolution failed: {e}")
                     return review_
                 except Exception as e:
                     import logging
@@ -394,6 +447,9 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
 
     # -- JD prep mode --
     entry = get_live(job_prep_sessions, session_id, "job_prep", user_id)
+    if entry is None and existing and existing.get("mode") == "jd_prep" and existing.get("questions"):
+        meta_ = existing.get("meta", {}) or {}
+        entry = {"questions": existing["questions"], "preview": meta_.get("preview", {}), "meta": meta_, "user_id": user_id}
     if entry:
         if entry.get("user_id") != user_id:
             raise HTTPException(403, "Access denied.")
@@ -401,7 +457,7 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         questions = entry["questions"]
         preview = entry["preview"]
         meta = entry["meta"]
-        answers = body.answers if body and body.answers else []
+        answers = _resolve_answers(body, existing, questions)
         save_drill_answers(session_id, answers, user_id=user_id)
 
         async def _stream_job_prep():
@@ -429,18 +485,21 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                     review_ = format_job_prep_review(questions, answers, scores, overall, meta)
                     save_review(session_id, review_, scores, overall.get("new_weak_points", []), overall, user_id=user_id)
 
-                    await _update_job_prep_profile(overall, scores, len(questions), meta, user_id)
+                    # Skip profile/knowledge side-effects on re-eval (see _persist_drill).
+                    if not already_scored:
+                        await _update_job_prep_profile(overall, scores, len(questions), meta, user_id)
                     del_live(job_prep_sessions, session_id, user_id)
 
-                    try:
-                        from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
-                        jd_topics = _match_jd_to_topics(meta, user_id)
-                        for t in jd_topics:
-                            await extract_and_writeback(t, questions, answers, scores, user_id)
-                            await collect_high_freq(t, questions, scores, user_id)
-                    except Exception as e:
-                        import logging
-                        logging.getLogger("uvicorn").warning(f"JD prep knowledge evolution failed: {e}")
+                    if not already_scored:
+                        try:
+                            from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+                            jd_topics = _match_jd_to_topics(meta, user_id)
+                            for t in jd_topics:
+                                await extract_and_writeback(t, questions, answers, scores, user_id)
+                                await collect_high_freq(t, questions, scores, user_id)
+                        except Exception as e:
+                            import logging
+                            logging.getLogger("uvicorn").warning(f"JD prep knowledge evolution failed: {e}")
                     return review_
                 except Exception as e:
                     import logging

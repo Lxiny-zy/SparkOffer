@@ -189,8 +189,7 @@ export default function History() {
                             >
                               评估未完成
                             </Badge>
-                          )}
-                          <span className="text-sm text-text font-medium truncate">{title}</span>
+                          )}                          <span className="text-sm text-text font-medium truncate">{title}</span>
                           {subtitle && <span className="text-xs text-dim truncate">· {subtitle}</span>}
                         </div>
                         {/* L2 — Meta */}
@@ -216,7 +215,7 @@ export default function History() {
                       {/* Right rail */}
                       <div className="flex items-center gap-2 shrink-0">
                         <ScorePill score={s.avg_score} />
-                        {statusFilter === "in_progress" && s.awaiting_eval && (
+                        {(s.mode === "topic_drill" || s.mode === "jd_prep") && (
                           <Button
                             variant="outline"
                             size="sm"
@@ -225,7 +224,7 @@ export default function History() {
                               borderColor: "color-mix(in srgb, var(--sig-warning) 42%, transparent)",
                               color: "var(--sig-warning)",
                             }}
-                            title="重新评估"
+                            title="重新生成评估报告"
                             onClick={(e) => {
                               e.stopPropagation();
                               navigate(`/interview/${s.session_id}`, { state: { autoEvaluate: true } });
