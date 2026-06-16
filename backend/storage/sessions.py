@@ -177,7 +177,7 @@ def list_sessions(
     ).fetchone()[0]
 
     rows = conn.execute(
-        f"SELECT session_id, mode, topic, meta, questions, created_at, overall FROM sessions "
+        f"SELECT session_id, mode, topic, meta, questions, transcript, created_at, overall FROM sessions "
         f"WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
         params + [limit, offset],
     ).fetchall()
@@ -194,20 +194,26 @@ def list_sessions(
             "created_at": r["created_at"],
             "avg_score": overall.get("avg_score"),
         }
-        # For in-progress batch drills, surface whether the session is fully
-        # answered but still missing an evaluation (review IS NULL) — lets the
-        # UI offer a "re-evaluate" affordance instead of "continue".
+        # For in-progress batch drills, surface whether an evaluation was already
+        # attempted but didn't complete (review IS NULL) — lets the UI offer a
+        # "re-evaluate" affordance instead of "continue".
+        #
+        # Signal: a non-empty transcript. For drill/jd, the transcript is written
+        # ONLY by save_drill_answers when 提交评估 is clicked — never during
+        # answering (mid-drill progress goes to meta.progress, not transcript).
+        # So in_progress + transcript-with-answers == evaluation failed/incomplete.
+        # This is far more reliable than counting partial_answers, whose last
+        # entry is often still in the autosave debounce window at submit time.
         if status == "in_progress" and r["mode"] in ("topic_drill", "jd_prep"):
             questions = json.loads(r["questions"] or "[]")
-            question_count = len(questions)
-            progress = (meta or {}).get("progress", {}) or {}
-            partial = progress.get("partial_answers", {}) or {}
+            transcript = json.loads(r["transcript"] or "[]")
             answered_count = sum(
-                1 for v in partial.values() if isinstance(v, str) and v.strip()
+                1 for m in transcript
+                if m.get("role") == "user" and (m.get("content") or "").strip()
             )
-            item["question_count"] = question_count
+            item["question_count"] = len(questions)
             item["answered_count"] = answered_count
-            item["awaiting_eval"] = question_count > 0 and answered_count >= question_count
+            item["awaiting_eval"] = answered_count > 0
         items.append(item)
     return {"items": items, "total": total}
 
