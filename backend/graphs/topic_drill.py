@@ -47,9 +47,26 @@ def _get_topic_display(user_id: str) -> dict[str, str]:
 
 
 def _parse_json_response(content: str) -> dict | list:
-    """Extract JSON from LLM response, handling various formats."""
+    """Extract JSON from an LLM response, tolerating reasoning models.
+
+    Handles, in order: a ```json fence, a ``<think>...</think>`` preamble that some
+    reasoning gateways stream *inline* in the content (instead of a separate
+    reasoning field), and trailing prose after the JSON value (via ``raw_decode``).
+    Raises ``json.JSONDecodeError`` when nothing parseable is found (incl. empty).
+    """
     import re
-    content = content.strip()
+    content = (content or "").strip()
+    if not content:
+        raise json.JSONDecodeError("Empty content", "", 0)
+
+    # Strip an inline reasoning block. Closed <think>…</think> first; then an
+    # unclosed leading <think> with no terminator (budget ran out mid-thought) —
+    # keep from the first JSON bracket so a truncated-but-present JSON still parses.
+    content = re.sub(r"<think>[\s\S]*?</think>", "", content, flags=re.IGNORECASE).strip()
+    if content.lower().startswith("<think>"):
+        brace = next((i for i, c in enumerate(content) if c in "{["), -1)
+        content = content[brace:] if brace >= 0 else ""
+        content = content.strip()
 
     # Try direct parse first
     try:
@@ -65,14 +82,16 @@ def _parse_json_response(content: str) -> dict | list:
         except json.JSONDecodeError:
             pass
 
-    # Find first [ or { and parse from there
+    # Find the first { or [ and decode just the JSON value, tolerating any trailing
+    # prose. Try each bracket (a '{' can appear inside leaked reasoning text first).
+    decoder = json.JSONDecoder()
     for i, c in enumerate(content):
-        if c in ("[", "{"):
+        if c in "{[":
             try:
-                return json.loads(content[i:])
+                obj, _end = decoder.raw_decode(content[i:])
+                return obj
             except json.JSONDecodeError:
-                pass
-            break
+                continue
 
     raise json.JSONDecodeError("No valid JSON found", content, 0)
 
@@ -348,11 +367,19 @@ async def stream_evaluate_drill_answers(
         if not isinstance(result, dict):
             raise ValueError(f"Expected a dict, got {type(result)}")
     except (json.JSONDecodeError, ValueError) as e:
-        _logger.error("Drill evaluation parse failed: %s", e)
-        _logger.error("LLM raw response: %s", accumulated[:500])
+        _logger.error("Drill evaluation parse failed: %s (content len=%d)", e, len(accumulated))
+        _logger.error("LLM raw response: %r", accumulated[:1000])
+        # Empty visible content == the model spent its whole budget on reasoning
+        # and emitted no answer. Surface the actionable cause instead of a generic
+        # parse error (the channel's reasoning_effort is too high / max_tokens too low).
+        summary = (
+            "评估失败：模型未返回评估正文（可能思考预算耗尽）。请重试，或降低该评估渠道的 reasoning_effort / 提高 max_tokens。"
+            if not accumulated.strip()
+            else "评估结果解析失败，请重试。"
+        )
         result = {
             "scores": [{"question_id": q["id"], "score": None, "assessment": "评估解析失败，请重试"} for q in questions],
-            "overall": {"avg_score": None, "summary": "评估结果解析失败。", "new_weak_points": [], "new_strong_points": []},
+            "overall": {"avg_score": None, "summary": summary, "new_weak_points": [], "new_strong_points": []},
         }
 
     yield f"data: {json.dumps({'type': 'eval_result', 'data': result}, ensure_ascii=False)}\n\n"
