@@ -1,8 +1,9 @@
 import { useParams, useLocation, useNavigate } from "react-router-dom";
 import { useState, useEffect, useRef, ReactNode } from "react";
 import { Markdown } from "../components/ChatBubble";
-import { BookOpen, BriefcaseBusiness, Sparkles, RefreshCw, Star } from "lucide-react";
-import { getReview, getReferenceAnswer, addFavorite, getSessionRAGMetrics, type RAGEvalMetrics } from "../api/interview";
+import { BookOpen, BriefcaseBusiness, Sparkles, RefreshCw, Star, Check } from "lucide-react";
+import { getReview, getReferenceAnswer, addFavorite, getSessionRAGMetrics, syncSession, type RAGEvalMetrics } from "../api/interview";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { formatQuestionLabel } from "@/lib/question";
 import { metricColorVar } from "@/lib/metrics";
@@ -904,6 +905,7 @@ export default function Review() {
   const [refAnswersCache, setRefAnswersCache] = useState<Record<string, string>>({});
   const [ragEvalMetrics, setRagEvalMetrics] = useState<RAGEvalMetrics | null>(stateData.ragEvalMetrics || null);
   const [loading, setLoading] = useState(!review && !scores);
+  const [syncing, setSyncing] = useState(false);
   // Fetch the review at most once per session. The effect's deps include
   // review/scores, so an empty backend response for an in-progress session would
   // otherwise let it re-fire getReview on every subsequent render.
@@ -985,16 +987,64 @@ export default function Review() {
   const showDrill = currentMode === "topic_drill" || isRecordingDual;
   const title = isRecording ? "录音复盘" : isJobPrep ? "JD 备面复盘" : showDrill ? "训练复盘" : "面试复盘";
 
+  // Manual fallback: only drill / JD-prep sessions feed the profile + knowledge
+  // base. meta.synced_at marks that those side-effects already landed.
+  const canSync = currentMode === "topic_drill" || isJobPrep;
+  const synced = !!meta?.synced_at;
+  const handleSync = async () => {
+    if (!sessionId || syncing) return;
+    if (!window.confirm(
+      "将本次评估结果同步到用户画像与知识库沉淀。\n\n仅在该会话的画像/知识库此前未更新时使用；已正常计入的会话请勿重复同步，以免重复计数。"
+    )) return;
+    setSyncing(true);
+    try {
+      const res = await syncSession(sessionId);
+      setMeta((m) => ({ ...m, synced_at: res.synced_at || new Date().toISOString() }));
+      toast.success(res.status === "already_synced" ? "该会话此前已同步" : "已同步到画像与知识库");
+    } catch (e: any) {
+      toast.error("同步失败: " + (e?.message || e));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   return (
     <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
-      <div className="mb-8 animate-fade-in">
-        <div className="flex items-center gap-2 mb-2">
-          {isJobPrep && <BriefcaseBusiness size={18} className="text-tertiary" />}
-          {showDrill && !isJobPrep && !isRecording && <Sparkles size={18} className="text-primary" />}
-          {isRecording && <BookOpen size={18} className="text-primary" />}
-          <h1 className="sig-display text-2xl md:text-[28px]">{title}<span className="sig-accent-c">.</span></h1>
+      <div className="mb-8 animate-fade-in flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 mb-2">
+            {isJobPrep && <BriefcaseBusiness size={18} className="text-tertiary" />}
+            {showDrill && !isJobPrep && !isRecording && <Sparkles size={18} className="text-primary" />}
+            {isRecording && <BookOpen size={18} className="text-primary" />}
+            <h1 className="sig-display text-2xl md:text-[28px]">{title}<span className="sig-accent-c">.</span></h1>
+          </div>
+          <div className="text-sm text-dim sig-num">Session: {sessionId}</div>
         </div>
-        <div className="text-sm text-dim sig-num">Session: {sessionId}</div>
+        {canSync && (
+          synced ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled
+              className="gap-1 shrink-0"
+              style={{ borderColor: "color-mix(in srgb, var(--green) 42%, transparent)", color: "var(--green)" }}
+              title="已同步到用户画像与知识库"
+            >
+              <Check size={14} /> 已同步
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleSync}
+              disabled={syncing}
+              className="gap-1 shrink-0"
+              title="将本次评估结果同步到用户画像与知识库（用于此前未计入的会话）"
+            >
+              <RefreshCw size={14} className={syncing ? "animate-spin" : ""} /> {syncing ? "同步中…" : "同步到画像"}
+            </Button>
+          )
+        )}
       </div>
 
       <div className="stagger-children">

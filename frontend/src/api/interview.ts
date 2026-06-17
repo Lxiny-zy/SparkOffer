@@ -197,6 +197,19 @@ export async function getReview(sessionId: string): Promise<any> {
   return res.json();
 }
 
+/**
+ * Manually apply profile / SR / knowledge side-effects for an already-scored
+ * session whose stats never landed. Idempotent on the server (meta.synced_at):
+ * status is "synced" on first apply, "already_synced" if it was applied before.
+ */
+export async function syncSession(
+  sessionId: string,
+): Promise<{ status: "synced" | "already_synced"; synced_at?: string }> {
+  const res = await authFetch(`${API_BASE}/interview/sync/${sessionId}`, { method: "POST" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function getReferenceAnswer(
   topic: string,
   question: string,

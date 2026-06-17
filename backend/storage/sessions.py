@@ -109,6 +109,30 @@ def save_drill_progress(session_id: str, current_index: int,
     return True
 
 
+def mark_session_synced(session_id: str, *, user_id: str) -> None:
+    """Stamp ``meta.synced_at`` to record that the profile / SR / knowledge
+    side-effects have been applied for this session.
+
+    This is the authoritative idempotency marker for the manual "同步" fallback
+    (and is also set on the normal eval path): once present, a re-sync is a
+    no-op so EWMA / SR / high-freq counters are never double-counted.
+    """
+    conn = get_db()
+    row = conn.execute(
+        "SELECT meta FROM sessions WHERE session_id = ? AND user_id = ?",
+        (session_id, user_id),
+    ).fetchone()
+    if not row:
+        return
+    meta = json.loads(row["meta"] or "{}")
+    meta["synced_at"] = datetime.now().isoformat()
+    conn.execute(
+        "UPDATE sessions SET meta = ? WHERE session_id = ? AND user_id = ?",
+        (json.dumps(meta, ensure_ascii=False), session_id, user_id),
+    )
+    conn.commit()
+
+
 def get_session(session_id: str, *, user_id: str) -> dict | None:
     conn = get_db()
     row = conn.execute(

@@ -16,6 +16,7 @@ from backend.indexer import load_topics
 from backend.memory import update_profile_after_interview, llm_update_profile
 from backend.storage.sessions import (
     create_session, append_message, save_review, save_drill_answers, get_session,
+    mark_session_synced,
 )
 from backend.graphs.resume_interview import compile_resume_interview
 from backend.graphs.topic_drill import generate_drill_questions, evaluate_drill_answers, stream_evaluate_drill_answers
@@ -283,10 +284,21 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
     # Re-evaluation is allowed from any state (the 时光机 "重新评估" entry): a
     # prior attempt may have produced an empty / failed review, or none at all.
     # We always overwrite review/scores/overall, but skip the profile/SR/knowledge
-    # side-effects when they were already applied (a previous eval persisted
-    # non-empty scores) so re-evaluating a completed session never double-counts.
+    # side-effects when they were already applied so re-evaluating a *completed*
+    # session never double-counts.
+    #
+    # "Already scored" must mean a previous eval actually counted toward those
+    # side-effects — NOT merely that score rows exist. A failed eval still
+    # persists placeholder rows ({score: None, "评分失败…"}; see decoupled_eval),
+    # and skipped questions persist score=0; neither ever applied a side-effect.
+    # Gate on ≥1 answered (non-skipped) question with a real numeric score, so
+    # re-evaluating a previously-failed session correctly (re)applies profile /
+    # SR / knowledge updates instead of silently skipping them.
     existing = await asyncio.to_thread(get_session, session_id, user_id=user_id)
-    already_scored = bool(existing and existing.get("scores"))
+    already_scored = bool(existing) and any(
+        isinstance(s.get("score"), (int, float)) and not s.get("skipped")
+        for s in (existing.get("scores") or [])
+    )
 
     # -- Drill mode --
     entry = get_live(drill_sessions, session_id, "drill", user_id)
@@ -425,6 +437,9 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                         except Exception as e:
                             import logging
                             logging.getLogger("uvicorn").warning(f"Knowledge evolution failed: {e}")
+                        # Stamp the idempotency marker so the "同步" fallback shows
+                        # this session as already synced and never re-applies stats.
+                        await asyncio.to_thread(mark_session_synced, session_id, user_id=user_id)
                     return review_
                 except Exception as e:
                     import logging
@@ -500,6 +515,8 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                         except Exception as e:
                             import logging
                             logging.getLogger("uvicorn").warning(f"JD prep knowledge evolution failed: {e}")
+                        # Idempotency marker for the "同步" fallback (see _persist_drill).
+                        await asyncio.to_thread(mark_session_synced, session_id, user_id=user_id)
                     return review_
                 except Exception as e:
                     import logging
@@ -619,6 +636,72 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         yield sse_event({"type": "done"})
 
     return streaming_response(_stream_resume())
+
+
+@router.post("/interview/sync/{session_id}")
+async def sync_session_side_effects(session_id: str, user_id: str = Depends(get_current_user)):
+    """Manual fallback: apply profile / SR / knowledge side-effects from a
+    session's ALREADY-persisted scores, without re-running the LLM evaluation.
+
+    For sessions that were scored but whose side-effects never landed — e.g. an
+    eval that failed at the per-question level yet still wrote placeholder score
+    rows, or a crash between save_review and the profile update. Re-evaluating
+    those won't help (they read as already-scored and skip the side-effects), so
+    this re-applies them straight from the stored scores/overall/answers.
+
+    Idempotent via meta.synced_at: a second call is a no-op, so EWMA / SR /
+    high-freq counters are never double-counted.
+    """
+    session = await asyncio.to_thread(get_session, session_id, user_id=user_id)
+    if not session:
+        raise HTTPException(404, "Session not found.")
+    mode = session.get("mode")
+    if mode not in ("topic_drill", "jd_prep"):
+        raise HTTPException(400, "仅训练 / JD 备面会话支持同步到画像。")
+    if (session.get("meta") or {}).get("synced_at"):
+        return {"status": "already_synced", "synced_at": session["meta"]["synced_at"]}
+
+    scores = session.get("scores") or []
+    has_valid = any(
+        isinstance(s.get("score"), (int, float)) and not s.get("skipped") for s in scores
+    )
+    if not has_valid:
+        raise HTTPException(400, "该会话没有有效评分，请先重新评估再同步。")
+
+    questions = session.get("questions") or []
+    overall = session.get("overall") or {}
+    answers = _answers_from_transcript(questions, session.get("transcript", []))
+
+    from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+
+    if mode == "topic_drill":
+        topic = session.get("topic")
+        from backend.spaced_repetition import update_weak_point_sr
+        for s in scores:
+            wp = s.get("weak_point")
+            sc = s.get("score")
+            if wp and isinstance(sc, (int, float)):
+                update_weak_point_sr(topic, wp, sc, user_id, difficulty=s.get("difficulty", 3))
+        await _update_drill_profile(topic, overall, scores, len(questions), user_id)
+        try:
+            await extract_and_writeback(topic, questions, answers, scores, user_id)
+            await collect_high_freq(topic, questions, scores, user_id)
+        except Exception as e:
+            import logging
+            logging.getLogger("uvicorn").warning(f"Sync knowledge evolution failed: {e}")
+    else:  # jd_prep
+        meta = session.get("meta", {}) or {}
+        await _update_job_prep_profile(overall, scores, len(questions), meta, user_id)
+        try:
+            for t in _match_jd_to_topics(meta, user_id):
+                await extract_and_writeback(t, questions, answers, scores, user_id)
+                await collect_high_freq(t, questions, scores, user_id)
+        except Exception as e:
+            import logging
+            logging.getLogger("uvicorn").warning(f"Sync JD prep knowledge evolution failed: {e}")
+
+    await asyncio.to_thread(mark_session_synced, session_id, user_id=user_id)
+    return {"status": "synced"}
 
 
 @router.post("/interview/reference-answer")
