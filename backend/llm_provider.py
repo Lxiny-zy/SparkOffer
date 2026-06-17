@@ -27,11 +27,14 @@ _LLM_TIMEOUT = httpx.Timeout(connect=15.0, read=360.0, write=30.0, pool=30.0)
 _EMBED_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)  # 与 vector_memory._EMBED_TIMEOUT_SECONDS 对齐
 
 # Embedding throughput knobs (used by full-KB rebuilds; query embeds send 1 text so
-# they're unaffected). embed_batch_size = texts per HTTP request (fewer round-trips);
-# num_workers = batches sent concurrently by LlamaIndex's internal thread pool.
-# Tuned conservatively: 32×4 ≈ 128 texts in flight. If the provider returns 429
-# (RPM/TPM limit), dial num_workers down first. Override via env without code change.
-_EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "32"))
+# they're unaffected). embed_batch_size = texts per HTTP request; num_workers =
+# batches sent concurrently by LlamaIndex's internal thread pool.
+# NOTE: many providers HARD-CAP batch size at 10 (e.g. DashScope/通义 returns
+# "batch size ... should not be larger than 10"). So default batch stays 10 and we
+# get throughput from concurrency (num_workers) instead — 10×4 ≈ 40 texts in flight.
+# Only raise EMBED_BATCH_SIZE if your provider allows it. If you hit 429, lower
+# EMBED_NUM_WORKERS first.
+_EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "10"))
 _EMBED_NUM_WORKERS = int(os.getenv("EMBED_NUM_WORKERS", "4"))
 
 # Same-channel retry: a transient 5xx/429/timeout is often gone on a quick retry, and
