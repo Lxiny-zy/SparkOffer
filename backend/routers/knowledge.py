@@ -9,11 +9,22 @@ from backend.config import settings
 from backend.indexer import load_topics, invalidate_topic_index, build_topic_index
 from backend.embedding_tasks import schedule_index_rebuild, get_task_queue
 from backend.auth import get_current_user
+from backend.utils.files import atomic_write_text
 
 router = APIRouter(prefix="/api")
 
 KNOWLEDGE_EXTS = (".md", ".txt", ".py")
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200MB per file
+# Cap for inline JSON-body edits (PUT/POST {content}). FastAPI has already parsed
+# the whole body into memory by the time we see it, so this is a post-hoc guard
+# against persisting an absurd document, not a transport limit. ~8MB of text is
+# far above any real knowledge file (a 30万字 .md is ~1MB) yet blocks runaways.
+MAX_DOC_CHARS = 8 * 1024 * 1024
+
+
+def _check_doc_size(content: str) -> None:
+    if len(content) > MAX_DOC_CHARS:
+        raise HTTPException(413, f"内容过大（>{MAX_DOC_CHARS // (1024*1024)}MB），请拆分后再保存")
 
 
 def _validate_filename(filename: str) -> str:
@@ -81,18 +92,24 @@ async def get_core_knowledge(topic: str, user_id: str = Depends(get_current_user
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
     topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
-    files = []
-    for f in _glob_knowledge_files(topic_dir):
-        try:
-            mtime = int(f.stat().st_mtime * 1000)
-        except OSError:
-            mtime = 0
-        files.append({
-            "filename": f.name,
-            "content": f.read_text(encoding="utf-8"),
-            "mtime": mtime,
-        })
-    return files
+
+    def _read_all() -> list[dict]:
+        # Synchronous full-text reads of every file — pushed to a worker thread so
+        # a topic with many 30万字 files can't stall the event loop while it reads.
+        out = []
+        for f in _glob_knowledge_files(topic_dir):
+            try:
+                mtime = int(f.stat().st_mtime * 1000)
+            except OSError:
+                mtime = 0
+            try:
+                content = f.read_text(encoding="utf-8")
+            except OSError:
+                content = ""
+            out.append({"filename": f.name, "content": content, "mtime": mtime})
+        return out
+
+    return await asyncio.to_thread(_read_all)
 
 
 @router.put("/knowledge/{topic}/core/{filename}")
@@ -106,7 +123,9 @@ async def update_core_knowledge(topic: str, filename: str, body: dict,
     filepath = topic_dir / filename
     if not filepath.exists():
         raise HTTPException(404, f"File not found: {filename}")
-    filepath.write_text(body.get("content", ""), encoding="utf-8")
+    content = body.get("content", "")
+    _check_doc_size(content)
+    await asyncio.to_thread(atomic_write_text, filepath, content)
     await asyncio.to_thread(invalidate_topic_index, topic, user_id)
     schedule_index_rebuild(topic, user_id)
     return {"ok": True}
@@ -144,7 +163,9 @@ async def create_core_knowledge(topic: str, body: dict,
     filepath = topic_dir / filename
     if filepath.exists():
         raise HTTPException(409, f"File already exists: {filename}")
-    filepath.write_text(body.get("content", ""), encoding="utf-8")
+    content = body.get("content", "")
+    _check_doc_size(content)
+    await asyncio.to_thread(atomic_write_text, filepath, content)
     await asyncio.to_thread(invalidate_topic_index, topic, user_id)
     schedule_index_rebuild(topic, user_id)
     return {"ok": True, "filename": filename}
@@ -228,8 +249,7 @@ async def generate_core_knowledge(topic: str, user_id: str = Depends(get_current
                 content = value.strip()
 
         topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
-        topic_dir.mkdir(parents=True, exist_ok=True)
-        (topic_dir / "README.md").write_text(content, encoding="utf-8")
+        await asyncio.to_thread(atomic_write_text, topic_dir / "README.md", content)
         invalidate_topic_index(topic, user_id)
         schedule_index_rebuild(topic, user_id)
 
@@ -251,7 +271,8 @@ async def get_high_freq(topic: str, user_id: str = Depends(get_current_user)):
         mtime = int(filepath.stat().st_mtime * 1000)
     except OSError:
         mtime = 0
-    return {"content": filepath.read_text(encoding="utf-8"), "mtime": mtime}
+    content = await asyncio.to_thread(filepath.read_text, "utf-8")
+    return {"content": content, "mtime": mtime}
 
 
 @router.put("/knowledge/{topic}/high_freq")
@@ -259,10 +280,10 @@ async def update_high_freq(topic: str, body: dict, user_id: str = Depends(get_cu
     topics = load_topics(user_id)
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
-    hf_dir = settings.user_high_freq_path(user_id)
-    hf_dir.mkdir(parents=True, exist_ok=True)
-    filepath = hf_dir / f"{topic}.md"
-    filepath.write_text(body.get("content", ""), encoding="utf-8")
+    content = body.get("content", "")
+    _check_doc_size(content)
+    filepath = settings.user_high_freq_path(user_id) / f"{topic}.md"
+    await asyncio.to_thread(atomic_write_text, filepath, content)
     return {"ok": True}
 
 
@@ -345,52 +366,58 @@ async def get_knowledge_stats(topic: str, user_id: str = Depends(get_current_use
         raise HTTPException(400, f"Unknown topic: {topic}")
 
     topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
-
-    last_evolved_at = 0  # mtime of 自动沉淀.md (or any file containing auto-deposit markers)
-    evolution_count = 0  # total <!-- 自动沉淀 ... --> markers across all files
-    last_evolved_file = ""
-    last_any_update_at = 0  # latest mtime across all .md files in this topic
-    file_count = 0
-
-    if topic_dir.exists():
-        marker_re = re.compile(r"<!--\s*自动沉淀\s+[\d\-:\s]+-->")
-        for f in _glob_knowledge_files(topic_dir):
-            file_count += 1
-            try:
-                mtime = int(f.stat().st_mtime * 1000)
-            except OSError:
-                mtime = 0
-            if mtime > last_any_update_at:
-                last_any_update_at = mtime
-
-            try:
-                content = f.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            hits = marker_re.findall(content)
-            if hits:
-                evolution_count += len(hits)
-                if mtime > last_evolved_at:
-                    last_evolved_at = mtime
-                    last_evolved_file = f.name
-
     hf_path = settings.user_high_freq_path(user_id) / f"{topic}.md"
-    last_high_freq_at = 0
-    high_freq_size = 0
-    if hf_path.exists():
-        try:
-            last_high_freq_at = int(hf_path.stat().st_mtime * 1000)
-            high_freq_size = hf_path.stat().st_size
-        except OSError:
-            pass
 
-    return {
-        "topic": topic,
-        "file_count": file_count,
-        "last_any_update_at": last_any_update_at,
-        "last_evolved_at": last_evolved_at,
-        "last_evolved_file": last_evolved_file,
-        "evolution_count": evolution_count,
-        "last_high_freq_at": last_high_freq_at,
-        "high_freq_size": high_freq_size,
-    }
+    def _compute() -> dict:
+        # This endpoint is POLLED by the UI and reads every file's full text to
+        # count auto-deposit markers. Run the whole scan in a worker thread so a
+        # topic with many 30万字 files never blocks the event loop on each poll.
+        last_evolved_at = 0
+        evolution_count = 0
+        last_evolved_file = ""
+        last_any_update_at = 0
+        file_count = 0
+
+        if topic_dir.exists():
+            marker_re = re.compile(r"<!--\s*自动沉淀\s+[\d\-:\s]+-->")
+            for f in _glob_knowledge_files(topic_dir):
+                file_count += 1
+                try:
+                    mtime = int(f.stat().st_mtime * 1000)
+                except OSError:
+                    mtime = 0
+                if mtime > last_any_update_at:
+                    last_any_update_at = mtime
+
+                try:
+                    content = f.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                hits = marker_re.findall(content)
+                if hits:
+                    evolution_count += len(hits)
+                    if mtime > last_evolved_at:
+                        last_evolved_at = mtime
+                        last_evolved_file = f.name
+
+        last_high_freq_at = 0
+        high_freq_size = 0
+        if hf_path.exists():
+            try:
+                last_high_freq_at = int(hf_path.stat().st_mtime * 1000)
+                high_freq_size = hf_path.stat().st_size
+            except OSError:
+                pass
+
+        return {
+            "topic": topic,
+            "file_count": file_count,
+            "last_any_update_at": last_any_update_at,
+            "last_evolved_at": last_evolved_at,
+            "last_evolved_file": last_evolved_file,
+            "evolution_count": evolution_count,
+            "last_high_freq_at": last_high_freq_at,
+            "high_freq_size": high_freq_size,
+        }
+
+    return await asyncio.to_thread(_compute)

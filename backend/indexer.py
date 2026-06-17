@@ -102,12 +102,28 @@ def _init_llama_settings():
     LlamaSettings.embed_model = get_embedding()
 
 
+# Hard token cap per chunk. MarkdownNodeParser splits ONLY on headings and has no
+# size limit, so a long section in a big .md (we've seen 300k+ char files) becomes a
+# single huge node. Embedding such a node either 400s (exceeds the model's input
+# limit) or times out mid-upload — and crucially the request often never reaches the
+# provider, so the failure looks like "no request logged, rebuild failed". Capping
+# below any embedding model's input window (8k+) makes every node embeddable. 1024
+# matches the SentenceSplitter default already used for non-md docs.
+_MAX_CHUNK_TOKENS = 1024
+_CHUNK_OVERLAP = 100
+
+
 def _build_nodes(docs: list) -> list:
-    """Route documents to the right node parser by extension.
+    """Route documents to the right node parser by extension, then enforce a
+    uniform per-chunk token cap so no single node can blow past the embedding
+    model's input limit.
 
     .md  → MarkdownNodeParser (preserves the section heading path under the
            "header_path" metadata key so retrieved chunks carry their heading
-           breadcrumb — better signal for embeddings and downstream LLM prompts).
+           breadcrumb — better signal for embeddings and downstream LLM prompts),
+           THEN SentenceSplitter to break any oversized section. The splitter
+           propagates the source node's metadata (header_path survives) and
+           leaves already-small sections untouched as single nodes.
     other → SentenceSplitter (LlamaIndex default 1024-token chunking).
     """
     md_docs, other_docs = [], []
@@ -118,11 +134,15 @@ def _build_nodes(docs: list) -> list:
         else:
             other_docs.append(d)
 
+    splitter = SentenceSplitter(chunk_size=_MAX_CHUNK_TOKENS, chunk_overlap=_CHUNK_OVERLAP)
     nodes = []
     if md_docs:
-        nodes.extend(MarkdownNodeParser().get_nodes_from_documents(md_docs))
+        md_nodes = MarkdownNodeParser().get_nodes_from_documents(md_docs)
+        # Second pass: re-split only the oversized heading-sections. Small sections
+        # pass through as-is, keeping their header_path metadata intact.
+        nodes.extend(splitter.get_nodes_from_documents(md_nodes))
     if other_docs:
-        nodes.extend(SentenceSplitter().get_nodes_from_documents(other_docs))
+        nodes.extend(splitter.get_nodes_from_documents(other_docs))
     return nodes
 
 
@@ -211,6 +231,28 @@ def _qdrant_collection_dim(client, collection: str) -> int | None:
         return None
 
 
+def _load_nodes_streaming(
+    source_dir: Path, required_exts: list[str] | None = None,
+) -> list:
+    """Read a directory file-by-file and chunk each before moving on.
+
+    SimpleDirectoryReader.load_data() materializes EVERY document's full text in
+    memory at once; for a topic with many 30万字+ .md files that's a large peak
+    before chunking even starts. iter_data() yields one file's documents at a
+    time, so we chunk-and-discard each file's raw text and only the (bounded)
+    nodes accumulate. Peak memory drops from (all docs + all nodes) to roughly
+    (one file's docs + all nodes).
+    """
+    reader_kwargs = {"input_dir": str(source_dir), "recursive": True}
+    if required_exts:
+        reader_kwargs["required_exts"] = required_exts
+    reader = SimpleDirectoryReader(**reader_kwargs)
+    nodes = []
+    for file_docs in reader.iter_data():
+        nodes.extend(_build_nodes(file_docs))
+    return nodes
+
+
 def _build_or_load_qdrant_index(
     collection: str, source_dir: Path, force_rebuild: bool,
     required_exts: list[str] | None = None, allow_empty: bool = False,
@@ -243,20 +285,17 @@ def _build_or_load_qdrant_index(
 
     if not source_dir.exists():
         if allow_empty:
-            docs = []
+            nodes = []
         else:
             raise FileNotFoundError(f"Knowledge directory not found: {source_dir}")
     else:
-        reader_kwargs = {"input_dir": str(source_dir), "recursive": True}
-        if required_exts:
-            reader_kwargs["required_exts"] = required_exts
-        docs = SimpleDirectoryReader(**reader_kwargs).load_data()
+        nodes = _load_nodes_streaming(source_dir, required_exts)
 
-    if not docs and not allow_empty:
+    if not nodes and not allow_empty:
         raise ValueError(f"No documents found in {source_dir}")
 
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    return VectorStoreIndex(_build_nodes(docs), storage_context=storage_context)
+    return VectorStoreIndex(nodes, storage_context=storage_context)
 
 
 def _build_or_load_local_index(
@@ -272,19 +311,16 @@ def _build_or_load_local_index(
 
     if not source_dir.exists():
         if allow_empty:
-            docs = []
+            nodes = []
         else:
             raise FileNotFoundError(f"Knowledge directory not found: {source_dir}")
     else:
-        reader_kwargs = {"input_dir": str(source_dir), "recursive": True}
-        if required_exts:
-            reader_kwargs["required_exts"] = required_exts
-        docs = SimpleDirectoryReader(**reader_kwargs).load_data()
+        nodes = _load_nodes_streaming(source_dir, required_exts)
 
-    if not docs and not allow_empty:
+    if not nodes and not allow_empty:
         raise ValueError(f"No documents found in {source_dir}")
 
-    index = VectorStoreIndex(_build_nodes(docs))
+    index = VectorStoreIndex(nodes)
     cache_dir.mkdir(parents=True, exist_ok=True)
     index.storage_context.persist(persist_dir=str(cache_dir))
     return index

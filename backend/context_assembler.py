@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 logger = logging.getLogger("uvicorn")
 
@@ -70,9 +71,20 @@ def _heuristic_tokens(text: str) -> int:
 
 
 def count_tokens(text: str) -> int:
-    """Approximate token count of ``text`` (tiktoken if available, else heuristic)."""
+    """Approximate token count of ``text`` (tiktoken if available, else heuristic).
+
+    Cached: pack_messages / budget resolution re-count the SAME history strings
+    every turn, so a bounded LRU avoids re-tokenizing identical text. maxsize is
+    small on purpose — a handful of large knowledge/resume strings is a few MB,
+    not unbounded growth.
+    """
     if not text:
         return 0
+    return _count_tokens_cached(text)
+
+
+@lru_cache(maxsize=1024)
+def _count_tokens_cached(text: str) -> int:
     enc = _get_encoder()
     if enc is not None:
         try:
@@ -162,20 +174,49 @@ def _truncate_on_boundary(text: str, max_tokens: int) -> str:
 
     Never cuts through a Markdown table row or code line. Mirrors the intent of
     the old ``qa_arena._truncate_on_boundary`` but in token space.
+
+    Implementation: when tiktoken is available, encode ONCE, slice the token ids,
+    and decode back — O(n) single pass. The previous shrink-by-0.9 loop re-encoded
+    the (still large) head on every iteration, so a 300k-char section paid for
+    several full tokenizations; on big knowledge chunks that was seconds of pure
+    CPU. Falls back to a proportional char estimate when tiktoken is absent.
     """
+    enc = _get_encoder()
+    if enc is not None:
+        try:
+            ids = enc.encode(text)
+            if len(ids) <= max_tokens:
+                return text
+            # Reserve headroom for the "…节选" suffix that _snap_back appends, so
+            # the final string still fits under max_tokens (budgeting is a hard cap).
+            head = enc.decode(ids[: max(1, max_tokens - _TRUNCATE_SUFFIX_TOKENS)])
+        except Exception:
+            head = None
+        if head is not None:
+            return _snap_back(head)
+
+    # Heuristic fallback (no tiktoken): proportional estimate, then verify down.
     total = count_tokens(text)
     if total <= max_tokens:
         return text
-    # Estimate a char cut proportional to the token ratio, then shrink until it
-    # fits (tiktoken on CJK is non-linear, so verify rather than trust the ratio).
     approx_chars = max(1, int(len(text) * max_tokens / max(1, total)))
     head = text[:approx_chars]
     while head and count_tokens(head) > max_tokens:
         head = head[: max(1, int(len(head) * 0.9))]
+    return _snap_back(head)
+
+
+def _snap_back(head: str) -> str:
+    """Snap a truncated head back to the last line boundary (if not too lossy)."""
     nl = head.rfind("\n")
     if nl > len(head) * 0.6:  # only snap back if it doesn't discard too much
         head = head[:nl]
-    return head.rstrip() + "\n\n…（已按上下文预算节选）"
+    return head.rstrip() + _TRUNCATE_SUFFIX
+
+
+_TRUNCATE_SUFFIX = "\n\n…（已按上下文预算节选）"
+# Token headroom reserved for _TRUNCATE_SUFFIX so the truncated result stays ≤ cap.
+_TRUNCATE_SUFFIX_TOKENS = 16
 
 
 class ContextBudget:

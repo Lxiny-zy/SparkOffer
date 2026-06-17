@@ -1,6 +1,7 @@
 """LLM / Embedding provider with multi-channel failover support."""
 import asyncio
 import logging
+import os
 import time
 from urllib.parse import urlparse, urlunparse, quote
 
@@ -24,6 +25,14 @@ _CUSTOM_HEADERS = {"User-Agent": "curl/7.88.1"}
 # tracks the upstream socket), hence the generous read budget here.
 _LLM_TIMEOUT = httpx.Timeout(connect=15.0, read=360.0, write=30.0, pool=30.0)
 _EMBED_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)  # 与 vector_memory._EMBED_TIMEOUT_SECONDS 对齐
+
+# Embedding throughput knobs (used by full-KB rebuilds; query embeds send 1 text so
+# they're unaffected). embed_batch_size = texts per HTTP request (fewer round-trips);
+# num_workers = batches sent concurrently by LlamaIndex's internal thread pool.
+# Tuned conservatively: 32×4 ≈ 128 texts in flight. If the provider returns 429
+# (RPM/TPM limit), dial num_workers down first. Override via env without code change.
+_EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "32"))
+_EMBED_NUM_WORKERS = int(os.getenv("EMBED_NUM_WORKERS", "4"))
 
 # Same-channel retry: a transient 5xx/429/timeout is often gone on a quick retry, and
 # retrying the same channel first avoids needlessly tripping every channel's cooldown (the
@@ -390,7 +399,8 @@ def _create_embedding():
                     "model_name": ch.get("api_model", ""),
                     "api_key": ch.get("api_key", ""),
                     "http_client": sync_c,
-                    "embed_batch_size": 10,
+                    "embed_batch_size": _EMBED_BATCH_SIZE,
+                    "num_workers": _EMBED_NUM_WORKERS,
                     # Fail fast: cap the SDK's internal retry/backoff (default
                     # max_retries=10 + tenacity) so a single query embed can't
                     # blow past the outer 60s retrieval timeout and leak threads.
@@ -415,7 +425,8 @@ def _create_embedding():
             "model_name": model_name,
             "api_key": api_key,
             "http_client": sync_c,
-            "embed_batch_size": 10,
+            "embed_batch_size": _EMBED_BATCH_SIZE,
+            "num_workers": _EMBED_NUM_WORKERS,
             # Same fail-fast cap as the channel-pool branch; the previous
             # timeout=None disabled httpx timeouts entirely (could hang forever).
             "max_retries": 1,

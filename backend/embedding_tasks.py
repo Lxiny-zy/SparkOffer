@@ -120,12 +120,25 @@ class EmbeddingCircuitBreaker:
             self._half_open_calls = 0
 
 
-# Global circuit breaker instance
+# Global circuit breaker instance — guards the retrieval / memory embedding path
+# (vector_memory._embed*). Query-time, latency-sensitive.
 _circuit_breaker = EmbeddingCircuitBreaker()
+
+# Dedicated breaker for the background QUEUE (_execute_task gate). Kept SEPARATE
+# from the retrieval breaker on purpose: previously both shared one global breaker,
+# so a transient retrieval-path failure would trip it and then silently reject
+# every queued KB rebuild ("嵌入服务持续不可用") WITHOUT issuing a single embedding
+# request — looking exactly like "provider down" when the provider was fine.
+# Higher threshold tolerates short 429 bursts from concurrent (num_workers) rebuilds.
+_queue_circuit_breaker = EmbeddingCircuitBreaker(failure_threshold=8, recovery_timeout=60.0)
 
 
 def get_circuit_breaker() -> EmbeddingCircuitBreaker:
     return _circuit_breaker
+
+
+def get_queue_circuit_breaker() -> EmbeddingCircuitBreaker:
+    return _queue_circuit_breaker
 
 
 # ── Background Task Queue ──
@@ -363,7 +376,7 @@ class EmbeddingTaskQueue:
 
     async def _execute_task(self, task: EmbeddingTask):
         """Execute a single task with circuit breaker and retry logic."""
-        cb = get_circuit_breaker()
+        cb = get_queue_circuit_breaker()
 
         if not cb.can_execute():
             # Circuit is open — re-enqueue after the recovery timeout WITHOUT
@@ -376,13 +389,14 @@ class EmbeddingTaskQueue:
                     f"Circuit breaker OPEN, deferring task {task.task_id} for {backoff:.0f}s"
                 )
                 self._update_status(task.task_id, state="pending",
-                                    message=f"嵌入服务暂不可用，{backoff:.0f}s 后重试")
+                                    message=f"嵌入任务队列熔断中（近期连续失败），{backoff:.0f}s 后重试")
                 self._spawn_retry(task, backoff)
             else:
                 self._stats["failed"] += 1
                 logger.warning(f"Task {task.task_id} exhausted retries (circuit open)")
                 self._update_status(task.task_id, state="failed",
-                                    finished_at=time.time(), error="嵌入服务持续不可用")
+                                    finished_at=time.time(),
+                                    error="嵌入任务连续失败触发队列熔断，请查看后端日志定位首个失败原因")
             return
 
         try:
@@ -433,6 +447,7 @@ class EmbeddingTaskQueue:
             "queue_size": self._queue.qsize() if self._queue else 0,
             "active": len(self._active_tasks),
             "circuit_state": _circuit_breaker.state.value,
+            "queue_circuit_state": _queue_circuit_breaker.state.value,
         }
 
     # ── Status tracking API ──

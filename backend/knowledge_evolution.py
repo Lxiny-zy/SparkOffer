@@ -5,8 +5,45 @@ from pathlib import Path
 
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
+from backend.utils.files import atomic_write_text
 
 logger = logging.getLogger("uvicorn")
+
+# Serializes all read-modify-write append operations on knowledge / high-freq
+# files. These run as fire-and-forget background coroutines (drill writeback, QA
+# ingest, high-freq collection) that may overlap; without this, two "read full
+# file → append → write back" cycles could interleave and silently drop one
+# side's append (lost update). Combined with atomic_write_text, every append is
+# both crash-safe and race-safe. Writes are infrequent, so one global lock is fine.
+_writeback_lock = asyncio.Lock()
+
+# Per-deposit size cap. Auto-extracted knowledge / cleaned QA cards are short by
+# nature; capping each appended block keeps the auto-deposit files from growing
+# without bound (which would slow every retrieval and rebuild on that topic).
+_MAX_DEPOSIT_CHARS = 8000
+
+
+def _cap_deposit(text: str) -> str:
+    """Trim a single deposit block to the per-deposit cap, on a line boundary."""
+    if len(text) <= _MAX_DEPOSIT_CHARS:
+        return text
+    head = text[:_MAX_DEPOSIT_CHARS]
+    nl = head.rfind("\n")
+    if nl > _MAX_DEPOSIT_CHARS * 0.6:
+        head = head[:nl]
+    return head.rstrip() + "\n\n<!-- 已截断（超单次沉淀上限） -->"
+
+
+def _append_sync(path: Path, block: str) -> None:
+    """Read-modify-write append, atomic. Runs in a worker thread."""
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    atomic_write_text(path, existing + block)
+
+
+async def _append_atomic(path: Path, block: str) -> None:
+    """Append ``block`` to ``path`` race-safe (lock) + crash-safe (atomic) + off-loop."""
+    async with _writeback_lock:
+        await asyncio.to_thread(_append_sync, path, block)
 
 _EXTRACT_PROMPT = """你是一个知识提取引擎。请从以下面试 Q&A 中提取有价值的知识点。
 
@@ -53,13 +90,10 @@ async def extract_and_writeback(
             return
 
         target = topics / "自动沉淀.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
-
-        existing = target.read_text(encoding="utf-8") if target.exists() else ""
         from datetime import datetime
         header = f"\n\n---\n\n<!-- 自动沉淀 {datetime.now().strftime('%Y-%m-%d %H:%M')} -->\n\n"
-        new_content = header + extracted + "\n"
-        target.write_text(existing + new_content, encoding="utf-8")
+        extracted = _cap_deposit(extracted)
+        await _append_atomic(target, header + extracted + "\n")
 
         # Background embedding: only embed the new knowledge content (incremental insert).
         # No full rebuild — the new .md content is the only thing that changed,
@@ -88,16 +122,14 @@ async def collect_high_freq(
             return
 
         high_freq_dir = settings.user_high_freq_path(user_id)
-        high_freq_dir.mkdir(parents=True, exist_ok=True)
         filepath = high_freq_dir / f"{topic}.md"
 
-        existing = filepath.read_text(encoding="utf-8") if filepath.exists() else ""
         from datetime import datetime
         lines = [f"\n\n<!-- {datetime.now().strftime('%Y-%m-%d %H:%M')} -->"]
         for q, score, assessment in low_score_items:
             lines.append(f"\n## Q: {q}\n得分: {score}\n评估: {assessment}\n---")
 
-        filepath.write_text(existing + "\n".join(lines) + "\n", encoding="utf-8")
+        await _append_atomic(filepath, "\n".join(lines) + "\n")
         logger.info(f"High-freq collection: {len(low_score_items)} items → {filepath}")
     except Exception as e:
         logger.warning(f"High-freq collection failed for {topic}: {e}")
@@ -204,15 +236,24 @@ async def ingest_qa_card_to_knowledge(card_content: str, user_id: str) -> dict:
     topic_dir = _get_topic_dir(key, user_id)
     if topic_dir is None:
         return {"ok": False, "topic": None, "reason": "主题目录不存在，未收录"}
-    topic_dir.mkdir(parents=True, exist_ok=True)
     target = topic_dir / "用户沉淀_qa.md"
-    existing = target.read_text(encoding="utf-8") if target.exists() else ""
-    if cleaned[:200] in existing:
-        return {"ok": True, "topic": topics[key].get("name", key), "reason": "该内容已在知识库中"}
-
+    cleaned = _cap_deposit(cleaned)
     from datetime import datetime
     header = f"\n\n---\n\n<!-- 问答演练场收录 {datetime.now().strftime('%Y-%m-%d %H:%M')} -->\n\n"
-    target.write_text(existing + header + cleaned + "\n", encoding="utf-8")
+
+    def _dedup_append() -> bool:
+        """Read-dedup-write under one critical section so a concurrent ingest
+        can't slip a duplicate past the check. Returns False if already present."""
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        if cleaned[:200] in existing:
+            return False
+        atomic_write_text(target, existing + header + cleaned + "\n")
+        return True
+
+    async with _writeback_lock:
+        appended = await asyncio.to_thread(_dedup_append)
+    if not appended:
+        return {"ok": True, "topic": topics[key].get("name", key), "reason": "该内容已在知识库中"}
 
     # 4) incremental embed so RAG retrieval can use it without a full rebuild.
     from backend.embedding_tasks import schedule_incremental_insert
