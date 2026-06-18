@@ -14,9 +14,11 @@ from backend.ai_config import get_effective, get_config_version
 logger = logging.getLogger("uvicorn")
 
 _embedding_instance = None
+_embedding_index_instance = None
 _llama_llm_instance = None
 _llama_config_version = -1
 _embedding_config_version = -1
+_embedding_index_config_version = -1
 
 _CUSTOM_HEADERS = {"User-Agent": "curl/7.88.1"}
 # read=360s is intentionally ABOVE nginx's proxy_read_timeout (300s) so a long reasoning
@@ -36,6 +38,16 @@ _EMBED_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)  
 # EMBED_NUM_WORKERS first.
 _EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "10"))
 _EMBED_NUM_WORKERS = int(os.getenv("EMBED_NUM_WORKERS", "4"))
+# The QUERY embedding instance fails fast (1 text, latency-sensitive, bounded by the
+# outer retrieval timeout). The INDEX instance is for background rebuilds where no one
+# waits synchronously: under num_workers concurrency a provider slows each request, so
+# it gets a much longer per-request timeout + an extra retry to ride out transient
+# slowness/429 instead of failing the whole rebuild. Tune via EMBED_INDEX_TIMEOUT.
+_EMBED_QUERY_TIMEOUT_S = 20.0
+_EMBED_INDEX_TIMEOUT_S = float(os.getenv("EMBED_INDEX_TIMEOUT", "60"))
+_EMBED_INDEX_HTTP_TIMEOUT = httpx.Timeout(
+    connect=10.0, read=_EMBED_INDEX_TIMEOUT_S, write=_EMBED_INDEX_TIMEOUT_S, pool=_EMBED_INDEX_TIMEOUT_S,
+)
 
 # Same-channel retry: a transient 5xx/429/timeout is often gone on a quick retry, and
 # retrying the same channel first avoids needlessly tripping every channel's cooldown (the
@@ -377,17 +389,63 @@ def get_llama_llm():
 
 
 def get_embedding():
-    """Embedding model (singleton, auto-invalidates on config change)."""
+    """Embedding model (singleton, auto-invalidates on config change).
+
+    Fast-fail tuning, for the latency-sensitive QUERY path (1 text per call).
+    """
     global _embedding_instance, _embedding_config_version
     ver = get_config_version()
     if _embedding_instance is None or _embedding_config_version != ver:
-        _embedding_instance = _create_embedding()
+        _embedding_instance = _create_embedding(for_index=False)
         _embedding_config_version = ver
     return _embedding_instance
 
 
-def _create_embedding():
-    """Create a fresh embedding instance — channel-aware."""
+def get_embedding_for_index():
+    """Embedding model for background KB rebuilds (separate singleton).
+
+    Long per-request timeout + extra retry + concurrency, since no one waits
+    synchronously and provider requests slow down under num_workers concurrency.
+    Passed explicitly to VectorStoreIndex at build time so the query path keeps
+    using the fast-fail get_embedding() instance.
+    """
+    global _embedding_index_instance, _embedding_index_config_version
+    ver = get_config_version()
+    if _embedding_index_instance is None or _embedding_index_config_version != ver:
+        _embedding_index_instance = _create_embedding(for_index=True)
+        _embedding_index_config_version = ver
+    return _embedding_index_instance
+
+
+def _embedding_api_kwargs(for_index: bool, proxy: str = "") -> dict:
+    """Shared OpenAIEmbedding kwargs for the API backend, per query/index profile."""
+    if for_index:
+        sync_c, _ = _build_http_clients(proxy, timeout=_EMBED_INDEX_HTTP_TIMEOUT)
+        return {
+            "http_client": sync_c,
+            "embed_batch_size": _EMBED_BATCH_SIZE,
+            "num_workers": _EMBED_NUM_WORKERS,
+            "max_retries": 2,
+            "timeout": _EMBED_INDEX_TIMEOUT_S,
+        }
+    sync_c, _ = _build_http_clients(proxy, timeout=_EMBED_TIMEOUT)
+    return {
+        "http_client": sync_c,
+        "embed_batch_size": _EMBED_BATCH_SIZE,
+        # Fail fast on the query path: cap the SDK's internal retry/backoff (default
+        # max_retries=10 + tenacity) so a single query embed can't blow past the
+        # outer retrieval timeout and leak threads. num_workers omitted (1 text).
+        "max_retries": 1,
+        "timeout": _EMBED_QUERY_TIMEOUT_S,
+    }
+
+
+def _create_embedding(for_index: bool = False):
+    """Create a fresh embedding instance — channel-aware.
+
+    ``for_index`` selects the background-rebuild profile (long timeout + retry +
+    concurrency) vs the default query profile (fast-fail).
+    """
     from backend.config import settings
     from backend.channel_manager import get_channel, has_channels
 
@@ -397,18 +455,10 @@ def _create_embedding():
             backend = ch.get("backend", "api")
             if backend == "api":
                 from llama_index.embeddings.openai import OpenAIEmbedding
-                sync_c, _ = _build_http_clients(ch.get("proxy", ""), timeout=_EMBED_TIMEOUT)
                 kwargs = {
                     "model_name": ch.get("api_model", ""),
                     "api_key": ch.get("api_key", ""),
-                    "http_client": sync_c,
-                    "embed_batch_size": _EMBED_BATCH_SIZE,
-                    "num_workers": _EMBED_NUM_WORKERS,
-                    # Fail fast: cap the SDK's internal retry/backoff (default
-                    # max_retries=10 + tenacity) so a single query embed can't
-                    # blow past the outer 60s retrieval timeout and leak threads.
-                    "max_retries": 1,
-                    "timeout": 20.0,
+                    **_embedding_api_kwargs(for_index, ch.get("proxy", "")),
                 }
                 if ch.get("api_base"):
                     kwargs["api_base"] = ch["api_base"]
@@ -423,17 +473,10 @@ def _create_embedding():
         model_name = get_effective("embedding", "api_model")
         if not model_name:
             raise RuntimeError("Embedding API model is required when backend=api")
-        sync_c, _ = _build_http_clients(timeout=_EMBED_TIMEOUT)
         kwargs = {
             "model_name": model_name,
             "api_key": api_key,
-            "http_client": sync_c,
-            "embed_batch_size": _EMBED_BATCH_SIZE,
-            "num_workers": _EMBED_NUM_WORKERS,
-            # Same fail-fast cap as the channel-pool branch; the previous
-            # timeout=None disabled httpx timeouts entirely (could hang forever).
-            "max_retries": 1,
-            "timeout": 20.0,
+            **_embedding_api_kwargs(for_index),
         }
         if api_base:
             kwargs["api_base"] = api_base
@@ -471,12 +514,14 @@ def _create_embedding():
 
 def invalidate_singletons():
     """Force recreation of cached LLM/embedding instances on next call."""
-    global _llama_llm_instance, _embedding_instance
-    global _llama_config_version, _embedding_config_version
+    global _llama_llm_instance, _embedding_instance, _embedding_index_instance
+    global _llama_config_version, _embedding_config_version, _embedding_index_config_version
     _llama_llm_instance = None
     _embedding_instance = None
+    _embedding_index_instance = None
     _llama_config_version = -1
     _embedding_config_version = -1
+    _embedding_index_config_version = -1
 
     # 记忆库向量后端单例也随配置失效（embedding 维度/通道变更后需重连）。
     try:

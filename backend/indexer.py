@@ -19,7 +19,7 @@ from llama_index.core import (
 from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
 
 from backend.config import settings
-from backend.llm_provider import get_llama_llm, get_embedding
+from backend.llm_provider import get_llama_llm, get_embedding, get_embedding_for_index
 
 logger = logging.getLogger("uvicorn")
 
@@ -295,7 +295,11 @@ def _build_or_load_qdrant_index(
         raise ValueError(f"No documents found in {source_dir}")
 
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    return VectorStoreIndex(nodes, storage_context=storage_context)
+    # Build with the dedicated index embedding (long timeout + retry + concurrency).
+    # Query keeps using LlamaSettings.embed_model (fast-fail) via load/from_vector_store.
+    return VectorStoreIndex(
+        nodes, storage_context=storage_context, embed_model=get_embedding_for_index(),
+    )
 
 
 def _build_or_load_local_index(
@@ -320,7 +324,7 @@ def _build_or_load_local_index(
     if not nodes and not allow_empty:
         raise ValueError(f"No documents found in {source_dir}")
 
-    index = VectorStoreIndex(nodes)
+    index = VectorStoreIndex(nodes, embed_model=get_embedding_for_index())
     cache_dir.mkdir(parents=True, exist_ok=True)
     index.storage_context.persist(persist_dir=str(cache_dir))
     return index
