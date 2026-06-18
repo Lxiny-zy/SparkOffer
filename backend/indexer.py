@@ -17,9 +17,13 @@ from llama_index.core import (
     Document,
 )
 from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
+from llama_index.core.schema import MetadataMode
 
 from backend.config import settings
-from backend.llm_provider import get_llama_llm, get_embedding, get_embedding_for_index
+from backend.llm_provider import (
+    get_llama_llm, get_embedding, get_embedding_for_index,
+    _EMBED_BATCH_SIZE, _EMBED_NUM_WORKERS,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -253,9 +257,38 @@ def _load_nodes_streaming(
     return nodes
 
 
+def _embed_nodes_with_progress(nodes, embed_model, progress_cb=None) -> None:
+    """Pre-embed nodes in observable windows, reporting (done, total) progress.
+
+    A plain VectorStoreIndex(nodes) embeds internally with no progress signal.
+    Instead we embed here in windows and set node.embedding; LlamaIndex's
+    embed_nodes() then reuses the pre-set embeddings (it only embeds nodes whose
+    .embedding is None), so the subsequent index build does NOT re-embed.
+
+    Uses node.get_content(MetadataMode.EMBED) — the exact text LlamaIndex would
+    embed — so vectors are identical to the opaque path. No-op without a callback
+    (small/early paths skip the windowing overhead and let the index embed).
+    """
+    if not progress_cb or not nodes:
+        return
+    total = len(nodes)
+    window = max(1, _EMBED_BATCH_SIZE * max(1, _EMBED_NUM_WORKERS))
+    done = 0
+    progress_cb(0, total)
+    for i in range(0, total, window):
+        batch = nodes[i:i + window]
+        texts = [n.get_content(metadata_mode=MetadataMode.EMBED) for n in batch]
+        embeddings = embed_model.get_text_embedding_batch(texts)
+        for n, emb in zip(batch, embeddings):
+            n.embedding = emb
+        done += len(batch)
+        progress_cb(done, total)
+
+
 def _build_or_load_qdrant_index(
     collection: str, source_dir: Path, force_rebuild: bool,
     required_exts: list[str] | None = None, allow_empty: bool = False,
+    progress_cb=None,
 ) -> VectorStoreIndex:
     """Qdrant 版构建/加载：已有 collection 直接 from_vector_store 恢复（不重嵌入），
     否则从磁盘文档构建并写入 Qdrant（不再用本地 persist_dir）。
@@ -295,16 +328,20 @@ def _build_or_load_qdrant_index(
         raise ValueError(f"No documents found in {source_dir}")
 
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    # Build with the dedicated index embedding (long timeout + retry + concurrency).
-    # Query keeps using LlamaSettings.embed_model (fast-fail) via load/from_vector_store.
+    # Pre-embed with progress (no-op without a callback); the index then reuses the
+    # embeddings instead of re-embedding. Dedicated index instance = long timeout +
+    # retry + concurrency. Query keeps LlamaSettings.embed_model (fast-fail).
+    embed_model = get_embedding_for_index()
+    _embed_nodes_with_progress(nodes, embed_model, progress_cb)
     return VectorStoreIndex(
-        nodes, storage_context=storage_context, embed_model=get_embedding_for_index(),
+        nodes, storage_context=storage_context, embed_model=embed_model,
     )
 
 
 def _build_or_load_local_index(
     cache_dir: Path, source_dir: Path, force_rebuild: bool,
     required_exts: list[str] | None = None, allow_empty: bool = False,
+    progress_cb=None,
 ) -> VectorStoreIndex:
     """本地 SimpleVectorStore 版构建/加载（默认后端，也是 Qdrant 不可用时的降级路径）。
 
@@ -324,7 +361,9 @@ def _build_or_load_local_index(
     if not nodes and not allow_empty:
         raise ValueError(f"No documents found in {source_dir}")
 
-    index = VectorStoreIndex(nodes, embed_model=get_embedding_for_index())
+    embed_model = get_embedding_for_index()
+    _embed_nodes_with_progress(nodes, embed_model, progress_cb)
+    index = VectorStoreIndex(nodes, embed_model=embed_model)
     cache_dir.mkdir(parents=True, exist_ok=True)
     index.storage_context.persist(persist_dir=str(cache_dir))
     return index
@@ -362,8 +401,13 @@ def build_resume_index(user_id: str, force_rebuild: bool = False) -> VectorStore
     return index
 
 
-def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False) -> VectorStoreIndex:
-    """Build or load index for a specific knowledge topic."""
+def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False,
+                       progress_cb=None) -> VectorStoreIndex:
+    """Build or load index for a specific knowledge topic.
+
+    ``progress_cb(done, total)`` is invoked during a full rebuild's embedding pass
+    so callers (the task queue) can surface a real progress bar.
+    """
     cache_key = (user_id, topic)
     cached = _cache_get(cache_key)
     if cached is not None and not force_rebuild:
@@ -384,17 +428,17 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False) -> 
         try:
             index = _build_or_load_qdrant_index(
                 _kb_collection_name(user_id, topic), topic_dir, force_rebuild,
-                required_exts=exts,
+                required_exts=exts, progress_cb=progress_cb,
             )
         except Exception as e:
             logger.warning("Qdrant KB 不可用（%s/%s），降级本地索引：%s", topic, user_id, e)
             _mark_kb_unhealthy()
             index = _build_or_load_local_index(
-                cache_dir, topic_dir, force_rebuild, required_exts=exts,
+                cache_dir, topic_dir, force_rebuild, required_exts=exts, progress_cb=progress_cb,
             )
     else:
         index = _build_or_load_local_index(
-            cache_dir, topic_dir, force_rebuild, required_exts=exts,
+            cache_dir, topic_dir, force_rebuild, required_exts=exts, progress_cb=progress_cb,
         )
 
     _cache_set(cache_key, index)

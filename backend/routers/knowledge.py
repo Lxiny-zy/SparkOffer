@@ -83,6 +83,8 @@ def _status_to_dict(st) -> dict:
         "retry_count": st.retry_count,
         "error": st.error,
         "message": st.message,
+        "progress_done": st.progress_done,
+        "progress_total": st.progress_total,
     }
 
 

@@ -324,9 +324,28 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             from backend.graphs.decoupled_eval import has_small_tier, evaluate_decoupled
 
             if has_small_tier():
-                yield sse_event({"type": "progress", "message": "并发评分中 (small tier)..."})
+                yield sse_event({"type": "eval_progress", "message": "并发评分中…"})
                 try:
-                    eval_result = await evaluate_decoupled(topic, questions, answers, user_id)
+                    # Stream per-question progress: evaluate_decoupled reports each
+                    # completed score via progress_cb → a queue we drain while the
+                    # eval task runs, emitting "评分 X/N 题".
+                    progress_q: asyncio.Queue = asyncio.Queue()
+                    eval_task = asyncio.create_task(
+                        evaluate_decoupled(
+                            topic, questions, answers, user_id,
+                            progress_cb=lambda d, t: progress_q.put_nowait((d, t)),
+                        )
+                    )
+                    while not eval_task.done():
+                        try:
+                            d, t = await asyncio.wait_for(progress_q.get(), timeout=0.5)
+                            yield sse_event({"type": "eval_progress", "message": f"并发评分中… {d}/{t} 题"})
+                        except asyncio.TimeoutError:
+                            continue
+                    while not progress_q.empty():
+                        d, t = progress_q.get_nowait()
+                        yield sse_event({"type": "eval_progress", "message": f"并发评分中… {d}/{t} 题"})
+                    eval_result = await eval_task
                     yield sse_event({"type": "eval_result", "data": eval_result})
                 except Exception as exc:
                     yield sse_event({"type": "progress", "message": f"并发评分失败，回退到批量评估: {exc}"})

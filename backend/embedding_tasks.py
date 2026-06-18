@@ -181,6 +181,8 @@ class TaskStatus:
     retry_count: int = 0
     error: str = ""
     message: str = ""
+    progress_done: int = 0   # embedded nodes so far (full rebuild only)
+    progress_total: int = 0  # total nodes to embed; 0 = unknown / not started
 
 
 class EmbeddingTaskQueue:
@@ -461,6 +463,21 @@ class EmbeddingTaskQueue:
             if hasattr(st, k):
                 setattr(st, k, v)
 
+    def set_progress(self, task_id: str, done: int, total: int):
+        """Report embedding progress for a running task (called from the build thread).
+
+        Surfaced via get_status()/list_statuses() so the UI can render a real
+        progress bar instead of just an elapsed timer. Also refreshes `message`
+        so even a text-only client shows forward movement.
+        """
+        st = self._statuses.get(task_id)
+        if st is None:
+            return
+        st.progress_done = done
+        st.progress_total = total
+        if total > 0:
+            st.message = f"嵌入向量 {done}/{total}"
+
     def _gc_statuses(self, *, force: bool = False):
         """Drop finished statuses older than retention window to bound memory.
 
@@ -581,7 +598,14 @@ def schedule_session_memory_index(
 def _do_index_rebuild(topic: str, user_id: str):
     """Synchronous full index rebuild (runs in thread pool)."""
     from backend.indexer import build_topic_index
-    build_topic_index(topic, user_id, force_rebuild=True)
+    # Report embedding progress back to this task's status so the UI shows a real
+    # progress bar. task_id is deterministic (see schedule_index_rebuild).
+    task_id = f"rebuild:{user_id}:{topic}"
+
+    def _progress(done: int, total: int):
+        _task_queue.set_progress(task_id, done, total)
+
+    build_topic_index(topic, user_id, force_rebuild=True, progress_cb=_progress)
     logger.info(f"Background index rebuild completed: topic={topic}, user={user_id}")
 
 

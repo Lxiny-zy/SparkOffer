@@ -574,17 +574,32 @@ export default function Knowledge() {
                         const dur = t.finished_at && t.started_at
                           ? `${Math.max(1, Math.round(t.finished_at - t.started_at))}s`
                           : t.started_at ? `${Math.max(1, Math.round(Date.now()/1000 - t.started_at))}s+` : "";
+                        const showBar = t.state === "running" && t.progress_total > 0;
+                        const pct = showBar ? Math.min(100, Math.round((t.progress_done / t.progress_total) * 100)) : 0;
                         return (
-                          <div key={t.task_id} className="flex items-center gap-2 text-[12px] px-2 py-1.5 rounded-lg bg-secondary/30">
-                            {icon}
-                            <span className="font-mono text-dim shrink-0 w-12">{t.topic}</span>
-                            <span className="flex-1 truncate text-text/80">{t.message || stateText}</span>
-                            {t.file_count > 0 && <span className="text-dim text-[11px] shrink-0">{t.file_count} 文件</span>}
-                            {dur && <span className="text-dim text-[11px] shrink-0 font-mono">{dur}</span>}
-                            {t.error && (
-                              <span className="text-red text-[11px] shrink-0 truncate max-w-[120px]" title={t.error}>
-                                {t.error}
-                              </span>
+                          <div key={t.task_id} className="flex flex-col gap-1 px-2 py-1.5 rounded-lg bg-secondary/30">
+                            <div className="flex items-center gap-2 text-[12px]">
+                              {icon}
+                              <span className="font-mono text-dim shrink-0 w-12">{t.topic}</span>
+                              <span className="flex-1 truncate text-text/80">{t.message || stateText}</span>
+                              {t.retry_count > 0 && t.state !== "completed" && (
+                                <span className="text-amber-500 text-[11px] shrink-0">重试 {t.retry_count}/2</span>
+                              )}
+                              {t.file_count > 0 && <span className="text-dim text-[11px] shrink-0">{t.file_count} 文件</span>}
+                              {dur && <span className="text-dim text-[11px] shrink-0 font-mono">{dur}</span>}
+                              {t.error && (
+                                <span className="text-red text-[11px] shrink-0 truncate max-w-[120px]" title={t.error}>
+                                  {t.error}
+                                </span>
+                              )}
+                            </div>
+                            {showBar && (
+                              <div className="flex items-center gap-2 pl-[22px]">
+                                <div className="flex-1 h-1.5 rounded-full bg-secondary overflow-hidden">
+                                  <div className="h-full bg-primary rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+                                </div>
+                                <span className="text-dim text-[11px] shrink-0 font-mono w-24 text-right">{t.progress_done}/{t.progress_total} ({pct}%)</span>
+                              </div>
                             )}
                           </div>
                         );

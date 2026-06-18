@@ -403,6 +403,8 @@ export interface RebuildTaskStatus {
   retry_count: number;
   error: string;
   message: string;
+  progress_done: number;
+  progress_total: number;
 }
 
 /** Submit a single-topic rebuild. Returns immediately with task_id; poll status separately. */

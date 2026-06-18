@@ -52,8 +52,12 @@ async def evaluate_decoupled(
     questions: list[dict],
     answers: list[dict],
     user_id: str,
+    progress_cb=None,
 ) -> dict:
     """Run per-Q scoring in parallel on small tier, then summarize on large tier.
+
+    ``progress_cb(done, total)`` (optional) fires as each per-question score
+    completes, so the SSE layer can stream "评分 X/N 题" step progress.
 
     Returns the same shape the legacy evaluator returns:
         {"scores": [...], "overall": {...}}
@@ -129,7 +133,24 @@ async def evaluate_decoupled(
                 "difficulty": q.get("difficulty", 3),
             }
 
-    scores = await asyncio.gather(*[_score_one(q) for q in answered])
+    # Wrap each scorer to report completion progress as soon as it resolves.
+    # `done += 1` is safe under the single-threaded event loop (no await between
+    # the read and write of `done`).
+    done = 0
+    total = len(answered)
+
+    async def _score_and_report(q: dict) -> dict:
+        nonlocal done
+        result = await _score_one(q)
+        done += 1
+        if progress_cb:
+            try:
+                progress_cb(done, total)
+            except Exception:
+                pass
+        return result
+
+    scores = await asyncio.gather(*[_score_and_report(q) for q in answered])
     scores = list(scores)
 
     # Skipped questions get an explicit zero so they show up in stats and so
