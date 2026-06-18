@@ -197,6 +197,7 @@ class LLMChannelConfig(BaseModel):
     temperature: float = 0.7
     reasoning_effort: str = ""
     max_tokens: int = 16384  # 单次输出上限（OpenAI max_completion_tokens），非上下文窗口
+    context_window: int = 0  # 输入上下文窗口（token）；0 = 用 settings.default_context_window 兜底。被 context_assembler._resolve_window 读取
     timeout: int = 0  # read timeout 秒；0 = 用全局默认 _LLM_TIMEOUT（read 240s）
     tier: str = "large"  # "small" for cheap-fast eval, "large" for primary; default large for back-compat
     priority: int = 1

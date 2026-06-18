@@ -59,9 +59,10 @@ class Settings(BaseSettings):
     max_drill_questions: int = 15
 
     # Context budgeting (context_assembler.py) — fallback input window in tokens
-    # when no LLM channel declares an explicit `context_window`. 32k is a safe
-    # floor across modern OpenAI-compatible models.
-    default_context_window: int = 32768
+    # when no LLM channel declares an explicit `context_window`. Set to 200k:
+    # the channels in use are large-window models (≥258k), so the old 32k floor
+    # silently starved the drill context budget down to its 1000-token floor.
+    default_context_window: int = 200000
 
     # Redis (optional — empty string disables; falls back to in-memory LRU)
     redis_url: str = ""

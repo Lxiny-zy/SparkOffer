@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronUp, FileText } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fmtPct01, metricColorClass, metricBarClass } from "@/lib/metrics";
+import { fmtPct01, metricColorClass, metricBarClass, metricTierLabel, metricBarPct } from "@/lib/metrics";
 import { MetricInfoTooltip } from "@/components/MetricInfoTooltip";
 import type { RAGRetrievalMetrics } from "@/api/interview";
 
@@ -47,14 +47,21 @@ export function RAGMetricsPanel({ metrics }: RAGMetricsPanelProps) {
             <MetricInfoTooltip key={key} metricKey={key}>
               <div className="rounded-lg bg-card/60 border border-border/40 px-3 py-2">
                 <div className="text-[11px] text-muted-fg mb-1">{METRIC_LABEL[key]}</div>
-                <div className={cn("text-lg font-semibold font-mono tabular-nums", val != null ? metricColorClass(val, key) : "text-muted-fg")}>
-                  {fmtPct01(val)}
+                <div className="flex items-baseline gap-1.5">
+                  <span className={cn("text-lg font-semibold font-mono tabular-nums", val != null ? metricColorClass(val, key) : "text-muted-fg")}>
+                    {fmtPct01(val)}
+                  </span>
+                  {val != null && (
+                    <span className={cn("text-[11px] font-medium", metricColorClass(val, key))}>
+                      {metricTierLabel(val, key)}
+                    </span>
+                  )}
                 </div>
                 <div className="mt-1 h-1 rounded-full bg-muted overflow-hidden">
                   {val != null && (
                     <div
                       className={cn("h-full rounded-full transition-all duration-500", metricBarClass(val, key))}
-                      style={{ width: fmtPct01(val) }}
+                      style={{ width: metricBarPct(val, key) }}
                     />
                   )}
                 </div>

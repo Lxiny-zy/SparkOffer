@@ -27,6 +27,16 @@ from backend.llm_provider import (
 
 logger = logging.getLogger("uvicorn")
 
+
+class IndexNotReady(Exception):
+    """请求路径请求加载某 topic 索引，但磁盘/向量库中尚无已建索引，且调用方
+    禁止现场重建（build_if_missing=False）。
+
+    抛出它表示「该 topic 的初始向量化还没成功落盘过」——出题等请求路径应捕获后
+    降级为空知识库上下文，并把（重）建委派给后台队列（schedule_index_rebuild），
+    绝不在 100s 请求预算内同步全量重嵌入。
+    """
+
 # In-memory index cache keyed by (user_id, topic_or_resume)
 # Entries expire after 1 hour to prevent unbounded memory growth.
 _INDEX_CACHE_TTL = 3600.0  # 1 hour
@@ -178,11 +188,11 @@ def _get_qdrant_client():
 
 
 def _qdrant_kb_available() -> bool:
-    """知识库本回合是否真的可用 Qdrant：配置开启 + 连通性探针通过（结果缓存）。
+    """启动期 KB Qdrant 连通性探针 —— 只用于日志/可观测，**不再参与路由**。
 
-    探针失败缓存为 False，后续直接走本地索引，避免每次 build 都对着挂掉的 Qdrant
-    干等 10s 超时 —— 与记忆库工厂「构造时探测、失败即降级 numpy」同构。配置变更时由
-    reset_qdrant_state() 清空缓存重新探测。
+    Qdrant-only：路由一律按 `_use_qdrant_kb()`（配置）走 Qdrant，不因探针失败降级本地。
+    本函数在启动时被调用一次，给出"Qdrant 是否真的连得上"的运维信号；结果缓存，
+    配置变更时由 reset_qdrant_state() 清空。
     """
     global _kb_qdrant_healthy
     if not _use_qdrant_kb():
@@ -194,14 +204,8 @@ def _qdrant_kb_available() -> bool:
             logger.info("Qdrant KB backend healthy.")
         except Exception as e:
             _kb_qdrant_healthy = False
-            logger.warning("Qdrant KB 探针失败，知识库降级用本地索引：%s", e)
+            logger.warning("Qdrant KB 连通性探针失败（qdrant-only，不降级；操作将抛 IndexNotReady）：%s", e)
     return _kb_qdrant_healthy
-
-
-def _mark_kb_unhealthy() -> None:
-    """运行期 Qdrant 操作出错时调用：本进程后续知识库走本地索引，直到状态被重置。"""
-    global _kb_qdrant_healthy
-    _kb_qdrant_healthy = False
 
 
 def _current_embed_dim() -> int:
@@ -288,13 +292,17 @@ def _embed_nodes_with_progress(nodes, embed_model, progress_cb=None) -> None:
 def _build_or_load_qdrant_index(
     collection: str, source_dir: Path, force_rebuild: bool,
     required_exts: list[str] | None = None, allow_empty: bool = False,
-    progress_cb=None,
+    progress_cb=None, build_if_missing: bool = True,
 ) -> VectorStoreIndex:
     """Qdrant 版构建/加载：已有 collection 直接 from_vector_store 恢复（不重嵌入），
     否则从磁盘文档构建并写入 Qdrant（不再用本地 persist_dir）。
 
     加载已有 collection 前会校验其维度与当前 embedding 模型一致；不一致（换过模型）
-    则丢弃并从磁盘源文档重建 —— 知识库的真相源在磁盘，重建无损。"""
+    则丢弃并从磁盘源文档重建 —— 知识库的真相源在磁盘，重建无损。
+
+    ``build_if_missing=False`` 时：collection 不存在（或维度不一致需重建）就抛
+    :class:`IndexNotReady`，且**不删除**任何现有 collection——请求路径用它避免现场重建，
+    真正的重建交后台队列（force_rebuild=True）处理。"""
     from llama_index.vector_stores.qdrant import QdrantVectorStore as _LlamaQdrant
 
     client = _get_qdrant_client()
@@ -304,6 +312,8 @@ def _build_or_load_qdrant_index(
     if exists and not force_rebuild:
         col_dim = _qdrant_collection_dim(client, collection)
         if col_dim is not None and col_dim != _current_embed_dim():
+            if not build_if_missing:
+                raise IndexNotReady(f"qdrant collection dim mismatch: {collection}")
             logger.warning(
                 "Qdrant KB '%s' 维度=%s 与当前 embedding 维度=%s 不一致，从源文档重建。",
                 collection, col_dim, _current_embed_dim(),
@@ -315,6 +325,9 @@ def _build_or_load_qdrant_index(
 
     if exists and force_rebuild:
         client.delete_collection(collection)  # 重建前清空，避免重复 node
+
+    if not build_if_missing:
+        raise IndexNotReady(f"qdrant collection missing: {collection}")
 
     if not source_dir.exists():
         if allow_empty:
@@ -341,14 +354,20 @@ def _build_or_load_qdrant_index(
 def _build_or_load_local_index(
     cache_dir: Path, source_dir: Path, force_rebuild: bool,
     required_exts: list[str] | None = None, allow_empty: bool = False,
-    progress_cb=None,
+    progress_cb=None, build_if_missing: bool = True,
 ) -> VectorStoreIndex:
     """本地 SimpleVectorStore 版构建/加载（默认后端，也是 Qdrant 不可用时的降级路径）。
 
-    已有磁盘 persist 缓存直接加载；否则从源文档构建并 persist 到磁盘。"""
+    已有磁盘 persist 缓存直接加载；否则从源文档构建并 persist 到磁盘。
+
+    ``build_if_missing=False`` 时：磁盘无 persist 缓存就抛 :class:`IndexNotReady`
+    而非现场全量重嵌入——请求路径用它避免 100s 死线内的同步重建。"""
     if cache_dir.exists() and not force_rebuild:
         storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
         return load_index_from_storage(storage_context)
+
+    if not build_if_missing:
+        raise IndexNotReady(f"local index missing: {cache_dir}")
 
     if not source_dir.exists():
         if allow_empty:
@@ -381,17 +400,17 @@ def build_resume_index(user_id: str, force_rebuild: bool = False) -> VectorStore
     cache_dir = settings.user_index_cache_path(user_id) / "resume"
     collection = _kb_collection_name(user_id, "resume")
 
-    if _qdrant_kb_available():
+    if _use_qdrant_kb():
+        # Qdrant-only：错误收敛成 IndexNotReady，绝不退本地（与 build_topic_index 一致）。
         try:
             index = _build_or_load_qdrant_index(
                 collection, resume_path, force_rebuild, allow_empty=True,
             )
+        except IndexNotReady:
+            raise
         except Exception as e:
-            logger.warning("Qdrant KB 不可用（resume/%s），降级本地索引：%s", user_id, e)
-            _mark_kb_unhealthy()
-            index = _build_or_load_local_index(
-                cache_dir, resume_path, force_rebuild, allow_empty=True,
-            )
+            logger.warning("Qdrant KB 操作失败（resume/%s）：%s", user_id, e)
+            raise IndexNotReady(f"qdrant kb unavailable: resume/{user_id}") from e
     else:
         index = _build_or_load_local_index(
             cache_dir, resume_path, force_rebuild, allow_empty=True,
@@ -402,11 +421,15 @@ def build_resume_index(user_id: str, force_rebuild: bool = False) -> VectorStore
 
 
 def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False,
-                       progress_cb=None) -> VectorStoreIndex:
+                       progress_cb=None, build_if_missing: bool = True) -> VectorStoreIndex:
     """Build or load index for a specific knowledge topic.
 
     ``progress_cb(done, total)`` is invoked during a full rebuild's embedding pass
     so callers (the task queue) can surface a real progress bar.
+
+    ``build_if_missing=False`` makes a cold (no in-memory cache, no persisted index)
+    lookup raise :class:`IndexNotReady` instead of synchronously re-embedding the
+    whole topic — request-path callers pass it to avoid blocking on a rebuild.
     """
     cache_key = (user_id, topic)
     cached = _cache_get(cache_key)
@@ -424,33 +447,88 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False,
     cache_dir = settings.user_index_cache_path(user_id) / topic
     exts = [".md", ".txt", ".py"]
 
-    if _qdrant_kb_available():
+    if _use_qdrant_kb():
+        # Qdrant-only：配置走 Qdrant 时绝不退本地。任何 Qdrant 错误（缺 collection /
+        # 连接失败）都收敛成 IndexNotReady —— 请求路径据此降级空上下文 + 调度后台重建；
+        # 后台重建失败则由任务队列重试。全程不读写本地 .index_cache。
         try:
             index = _build_or_load_qdrant_index(
                 _kb_collection_name(user_id, topic), topic_dir, force_rebuild,
-                required_exts=exts, progress_cb=progress_cb,
+                required_exts=exts, progress_cb=progress_cb, build_if_missing=build_if_missing,
             )
+        except IndexNotReady:
+            raise
         except Exception as e:
-            logger.warning("Qdrant KB 不可用（%s/%s），降级本地索引：%s", topic, user_id, e)
-            _mark_kb_unhealthy()
-            index = _build_or_load_local_index(
-                cache_dir, topic_dir, force_rebuild, required_exts=exts, progress_cb=progress_cb,
-            )
+            logger.warning("Qdrant KB 操作失败（%s/%s）：%s", topic, user_id, e)
+            raise IndexNotReady(f"qdrant kb unavailable: {topic}") from e
     else:
         index = _build_or_load_local_index(
-            cache_dir, topic_dir, force_rebuild, required_exts=exts, progress_cb=progress_cb,
+            cache_dir, topic_dir, force_rebuild, required_exts=exts,
+            progress_cb=progress_cb, build_if_missing=build_if_missing,
         )
 
     _cache_set(cache_key, index)
     return index
 
 
+def topic_index_exists(topic: str, user_id: str) -> bool:
+    """True if a built index for (user, topic) can be loaded WITHOUT building it —
+    i.e. it's in the in-memory cache or persisted (local dir / Qdrant collection).
+
+    Lets the request path distinguish "retrieval returned nothing because the index
+    isn't built yet (rebuild scheduled)" from "index is fine, just no match", so the
+    drill timeline can show 「索引重建中」 instead of a silent empty result.
+    """
+    if _cache_get((user_id, topic)) is not None:
+        return True
+    if _use_qdrant_kb():
+        try:
+            return _get_qdrant_client().collection_exists(_kb_collection_name(user_id, topic))
+        except Exception:
+            return False
+    return (settings.user_index_cache_path(user_id) / topic).exists()
+
+
+def topic_chunk_count(topic: str, user_id: str) -> int:
+    """已索引的 chunk（节点）数量。Qdrant 后端 O(1) 取 collection 点数；本地后端取
+    docstore 节点数（不做整索引加载）。取不到 / 未建 返回 0。"""
+    if _use_qdrant_kb():
+        try:
+            client = _get_qdrant_client()
+            collection = _kb_collection_name(user_id, topic)
+            return client.count(collection).count if client.collection_exists(collection) else 0
+        except Exception as e:
+            logger.warning("topic_chunk_count (qdrant) failed for %s/%s: %s", topic, user_id, e)
+            return 0
+    # 本地：优先用已缓存的内存索引；否则数 docstore.json 的节点（比向量文件小，免整载）。
+    cached = _cache_get((user_id, topic))
+    if cached is not None:
+        try:
+            return len(cached.docstore.docs)
+        except Exception:
+            pass
+    docstore = settings.user_index_cache_path(user_id) / topic / "docstore.json"
+    if docstore.exists():
+        try:
+            data = json.loads(docstore.read_text(encoding="utf-8"))
+            return len(data.get("docstore/data") or {})
+        except Exception:
+            pass
+    return 0
+
+
 def query_resume(question: str, user_id: str, top_k: int = 3) -> str:
-    """Query the resume index."""
-    index = build_resume_index(user_id)
-    engine = index.as_query_engine(similarity_top_k=top_k)
-    response = engine.query(question)
-    return str(response)
+    """Query the resume index. Returns "" if the resume index is unavailable
+    (Qdrant-only: a backend failure degrades to no resume context, never crashes
+    the job_prep / resume_interview callers)."""
+    try:
+        index = build_resume_index(user_id)
+        engine = index.as_query_engine(similarity_top_k=top_k)
+        response = engine.query(question)
+        return str(response)
+    except Exception as e:
+        logger.warning("query_resume degraded to empty (resume index unavailable): %s", e)
+        return ""
 
 
 def query_topic(topic: str, question: str, user_id: str, top_k: int = 5) -> str:
@@ -504,9 +582,8 @@ def incremental_insert_to_index(topic: str, user_id: str, new_text: str, source:
         # Create a Document from the new text and insert into existing index
         doc = Document(text=new_text, metadata={"source": source, "topic": topic})
         index.insert(doc)  # qdrant-backed 时自动推送到 Qdrant，无需本地 persist
-        # 持久化判定按「实际是否 Qdrant 后端」而非「是否配置 Qdrant」：Qdrant 降级到
-        # 本地时，insert 后必须 persist 到磁盘，否则缓存淘汰后新内容丢失。
-        if not _qdrant_kb_available():
+        # 非 Qdrant 后端（本地）才需 insert 后 persist 到磁盘，否则缓存淘汰后新内容丢失。
+        if not _use_qdrant_kb():
             cache_dir = settings.user_index_cache_path(user_id) / topic
             cache_dir.mkdir(parents=True, exist_ok=True)
             index.storage_context.persist(persist_dir=str(cache_dir))
@@ -577,9 +654,10 @@ class ChunkWithMeta:
     header_path: str
 
 
-def retrieve_topic_context(topic: str, question: str, user_id: str, top_k: int = 5) -> list[str]:
+def retrieve_topic_context(topic: str, question: str, user_id: str, top_k: int = 5,
+                           build_if_missing: bool = True) -> list[str]:
     """Retrieve raw text chunks from topic index (for answer evaluation)."""
-    index = build_topic_index(topic, user_id)
+    index = build_topic_index(topic, user_id, build_if_missing=build_if_missing)
     retriever = index.as_retriever(similarity_top_k=top_k)
     nodes = retriever.retrieve(question)
     return [node.get_content() for node in nodes]
@@ -587,9 +665,10 @@ def retrieve_topic_context(topic: str, question: str, user_id: str, top_k: int =
 
 def retrieve_topic_context_with_scores(
     topic: str, question: str, user_id: str, top_k: int = 5,
+    build_if_missing: bool = True,
 ) -> list[ChunkWithMeta]:
     """Retrieve chunks with similarity scores and source metadata preserved."""
-    index = build_topic_index(topic, user_id)
+    index = build_topic_index(topic, user_id, build_if_missing=build_if_missing)
     retriever = index.as_retriever(similarity_top_k=top_k)
     nodes = retriever.retrieve(question)
     results: list[ChunkWithMeta] = []
@@ -609,16 +688,40 @@ def retrieve_topic_context_with_scores(
     return results
 
 
+def _schedule_topic_rebuild(topic: str, user_id: str) -> None:
+    """Fire-and-forget background rebuild of a topic index via the embedding task
+    queue. Used by the request path when an index is missing (IndexNotReady): the
+    drill degrades to empty context now and the index self-heals for next time.
+
+    Submission is deduplicated by the queue's ``rebuild:{user}:{topic}`` task_id, so
+    the retrieval fan-out calling this several times for one topic still builds once.
+    Lazy import keeps indexer ⇄ embedding_tasks free of an import cycle (mirrors
+    async_rebuild_topic_index's lazy import of get_circuit_breaker).
+    """
+    try:
+        from backend.embedding_tasks import schedule_index_rebuild
+        schedule_index_rebuild(topic, user_id)
+    except Exception as e:
+        logger.warning("schedule background rebuild failed for %s/%s: %s", topic, user_id, e)
+
+
 async def safe_retrieve_topic_context_with_scores(
     topic: str, question: str, user_id: str,
     top_k: int = 5, timeout: float = _RETRIEVAL_TIMEOUT,
+    build_if_missing: bool = True,
 ) -> list[ChunkWithMeta]:
     """Async-safe wrapper around retrieve_topic_context_with_scores."""
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(retrieve_topic_context_with_scores, topic, question, user_id, top_k),
+            asyncio.to_thread(
+                retrieve_topic_context_with_scores, topic, question, user_id, top_k, build_if_missing,
+            ),
             timeout=timeout,
         )
+    except IndexNotReady:
+        logger.info("Index not built for topic=%s; degrading to empty + scheduling background rebuild", topic)
+        _schedule_topic_rebuild(topic, user_id)
+        return []
     except asyncio.TimeoutError:
         logger.warning("Knowledge retrieval (scored) timed out for topic=%s", topic)
         return []
@@ -630,6 +733,7 @@ async def safe_retrieve_topic_context_with_scores(
 async def safe_retrieve_topic_context(
     topic: str, question: str, user_id: str,
     top_k: int = 5, timeout: float = _RETRIEVAL_TIMEOUT,
+    build_if_missing: bool = True,
 ) -> list[str]:
     """Async-safe wrapper around retrieve_topic_context with timeout protection.
 
@@ -637,10 +741,16 @@ async def safe_retrieve_topic_context(
     """
     try:
         chunks = await asyncio.wait_for(
-            asyncio.to_thread(retrieve_topic_context, topic, question, user_id, top_k),
+            asyncio.to_thread(
+                retrieve_topic_context, topic, question, user_id, top_k, build_if_missing,
+            ),
             timeout=timeout,
         )
         return chunks
+    except IndexNotReady:
+        logger.info("Index not built for topic=%s; degrading to empty + scheduling background rebuild", topic)
+        _schedule_topic_rebuild(topic, user_id)
+        return []
     except asyncio.TimeoutError:
         logger.warning(
             f"Knowledge retrieval timed out ({timeout}s) for topic={topic}, "
@@ -737,10 +847,20 @@ async def warmup_user_indices(user_id: str | None = None) -> None:
 
     Designed to run fire-and-forget from the app lifespan:
       - Never raises — a failed topic logs and falls back to lazy-load on demand.
-      - Topics are warmed SEQUENTIALLY, not concurrently, to stay under the
-        embedding API concurrency limit (cf. commit 5ce4d7b).
-      - build_topic_index is cache-aware, so an already-warm topic returns fast.
+      - LOAD-only: warmup never inline-rebuilds. A persisted index loads into the
+        in-memory cache; a topic with no built index raises IndexNotReady fast and
+        is delegated to the background rebuild queue. So one big/unbuilt topic can
+        neither stall (no 100s+ inline re-embed) nor abort the rest of the queue.
+      - Topics are warmed SEQUENTIALLY smallest-first, so the cheap common case is
+        cached before any time is risked on a large one.
     """
+    # Startup operational signal: log the KB index backend + (qdrant) real connectivity
+    # once. Does NOT gate routing (qdrant-only keys off _use_qdrant_kb()); purely the
+    # boot-time "is Qdrant actually reachable" line mirroring the memory backend log.
+    logger.info("KB index backend: %s", "qdrant" if _use_qdrant_kb() else "local")
+    if _use_qdrant_kb():
+        _qdrant_kb_available()
+
     if user_id is None:
         user_id = _first_user_id()
     if not user_id:
@@ -756,30 +876,41 @@ async def warmup_user_indices(user_id: str | None = None) -> None:
         logger.info("Index warmup skipped: user %s has no topics.", user_id)
         return
 
-    logger.info("Index warmup starting: user=%s topics=%s", user_id, list(topics.keys()))
-    for key in topics:
+    def _source_weight(key: str) -> int:
+        d = settings.user_knowledge_path(user_id) / topics[key].get("dir", key)
+        try:
+            return sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+        except OSError:
+            return 0
+    ordered = sorted(topics, key=_source_weight)
+
+    logger.info("Index warmup starting: user=%s topics=%s", user_id, ordered)
+    for key in ordered:
         t0 = time.time()
         try:
+            # LOAD only (build_if_missing=False): populate the cache from a persisted
+            # index, or raise IndexNotReady instantly for an unbuilt one — no inline
+            # re-embed, so no un-cancellable zombie thread to collide with the next
+            # topic, which is why this loop no longer has to abort on the first miss.
             await asyncio.wait_for(
-                asyncio.to_thread(build_topic_index, key, user_id),
+                asyncio.to_thread(build_topic_index, key, user_id, build_if_missing=False),
                 timeout=_WARMUP_PER_TOPIC_TIMEOUT,
             )
             logger.info("Index warmup ready: topic=%s (%.1fs)", key, time.time() - t0)
         except asyncio.CancelledError:
             logger.info("Index warmup cancelled.")
             raise
-        except asyncio.TimeoutError:
-            # to_thread can't be cancelled: the timed-out build keeps running in
-            # its thread. Starting the NEXT topic now would run concurrently with
-            # that zombie and trip the embedding API throttle this loop is
-            # explicitly serialized to avoid (timeouts would then cascade).
-            # Stop warming up entirely — remaining topics lazy-load on demand.
-            logger.warning(
-                "Index warmup timed out for topic=%s after %.0fs — aborting warmup, "
-                "remaining topics will lazy-load on demand",
-                key, _WARMUP_PER_TOPIC_TIMEOUT,
+        except IndexNotReady:
+            logger.info(
+                "Index warmup: topic=%s has no built index — scheduling background rebuild",
+                key,
             )
-            return
+            _schedule_topic_rebuild(key, user_id)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Index warmup: loading topic=%s exceeded %.0fs — skipping; "
+                "it will lazy-load on demand", key, _WARMUP_PER_TOPIC_TIMEOUT,
+            )
         except Exception as e:
             logger.warning(
                 "Index warmup failed for topic=%s: %s (lazy-load will retry on demand)",

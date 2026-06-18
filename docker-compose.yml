@@ -35,9 +35,10 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
-      # 向量后端默认 numpy；在 .env 设 VECTOR_BACKEND=qdrant + QDRANT_URL 启用。
-      - VECTOR_BACKEND=${VECTOR_BACKEND:-}
-      - QDRANT_URL=${QDRANT_URL:-}
+      # 向量后端默认 qdrant（KB + 记忆库都走同进程外的 Qdrant，消除大索引进程内冷加载）。
+      # 仍可在 .env 覆盖：设 VECTOR_BACKEND=numpy 退回本地。
+      - VECTOR_BACKEND=${VECTOR_BACKEND:-qdrant}
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       - QDRANT_API_KEY=${QDRANT_API_KEY:-}
     depends_on:
       redis:

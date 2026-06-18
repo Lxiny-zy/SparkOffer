@@ -1,15 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Menu, X, Sparkles, ChevronRight, ChevronDown, Activity, Clock, FileText, RefreshCw, Loader2, CheckCircle2, XCircle, CircleDashed, Upload } from "lucide-react";
+import { Menu, X, Sparkles, ChevronRight, ChevronDown, Activity, Clock, FileText, RefreshCw, Loader2, CheckCircle2, XCircle, CircleDashed, Upload, Layers } from "lucide-react";
 import { toast } from "sonner";
 import { getTopicIcon, ICON_OPTIONS } from "../utils/topicIcons";
 import {
   getTopics, getCoreKnowledge, updateCoreKnowledge, createCoreKnowledge,
   deleteCoreKnowledge, getHighFreq, updateHighFreq, createTopic, deleteTopic, generateKnowledge,
   getKnowledgeStats, rebuildTopicIndex, rebuildAllIndices, getRebuildStatus,
-  uploadCoreKnowledgeFiles,
+  uploadCoreKnowledgeFiles, getChunkCounts,
   type RebuildTaskStatus,
 } from "../api/interview";
-import type { KnowledgeStats } from "../api/interview";
+import type { KnowledgeStats, ChunkCounts } from "../api/interview";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -61,6 +61,7 @@ export default function Knowledge() {
   const [hfSaving, setHfSaving] = useState<boolean>(false);
 
   const [stats, setStats] = useState<KnowledgeStats | null>(null);
+  const [chunkCounts, setChunkCounts] = useState<ChunkCounts | null>(null);
 
   const [newFileName, setNewFileName] = useState<string>("");
   const [showNewFile, setShowNewFile] = useState<boolean>(false);
@@ -86,12 +87,17 @@ export default function Knowledge() {
     return t;
   }, []);
 
+  const loadChunkCounts = useCallback(async () => {
+    try { setChunkCounts(await getChunkCounts()); } catch { /* best-effort: leave prior counts */ }
+  }, []);
+
   useEffect(() => {
     refreshTopics().then((t: Record<string, TopicInfo>) => {
       const keys = Object.keys(t);
       if (keys.length > 0) setSelected(keys[0]);
     });
-  }, [refreshTopics]);
+    loadChunkCounts();
+  }, [refreshTopics, loadChunkCounts]);
 
   const loadCore = useCallback(async (topic: string) => {
     try {
@@ -275,6 +281,7 @@ export default function Knowledge() {
           if (t.state === "completed") {
             toast.success(`${t.label} 完成（${t.file_count} 文件）`);
             if (selected && t.topic === selected) loadStats(selected);
+            loadChunkCounts();
           } else {
             toast.error(`${t.label} 失败：${t.error || "未知错误"}`);
           }
@@ -580,7 +587,7 @@ export default function Knowledge() {
                           <div key={t.task_id} className="flex flex-col gap-1 px-2 py-1.5 rounded-lg bg-secondary/30">
                             <div className="flex items-center gap-2 text-[12px]">
                               {icon}
-                              <span className="font-mono text-dim shrink-0 w-12">{t.topic}</span>
+                              <span className="font-mono text-dim shrink-0 w-12 truncate" title={t.topic}>{topics[t.topic]?.name ?? t.topic}</span>
                               <span className="flex-1 truncate text-text/80">{t.message || stateText}</span>
                               {t.retry_count > 0 && t.state !== "completed" && (
                                 <span className="text-amber-500 text-[11px] shrink-0">重试 {t.retry_count}/2</span>
@@ -659,6 +666,14 @@ export default function Knowledge() {
                             <FileText size={12} className="text-info/70" />
                             <span>文件总数：</span>
                             <span className="font-mono text-text">{stats.file_count}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5" title="该模块向量化后的 chunk 数；括号内为全库总数">
+                            <Layers size={12} className="text-primary/70" />
+                            <span>向量块：</span>
+                            <span className="font-mono text-text">{stats.chunk_count ?? 0}</span>
+                            {chunkCounts && (
+                              <span className="text-dim/70">（全库 {chunkCounts.total}）</span>
+                            )}
                           </div>
                         </div>
                       </div>

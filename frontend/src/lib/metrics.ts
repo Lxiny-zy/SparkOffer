@@ -144,3 +144,22 @@ export function metricBarClass(v: number, metricKey?: string): string {
   const tier = metricTier(v, metricKey);
   return tier === "good" ? "bg-green-500" : tier === "fair" ? "bg-yellow-500" : "bg-red-500";
 }
+
+/** Qualitative label (优秀/正常/偏低) so a healthy-but-low cosine (e.g. relevance
+ *  0.5) reads as "正常" instead of looking like a bad 50%. */
+export function metricTierLabel(v: number | null | undefined, metricKey?: string): string {
+  if (v == null) return "—";
+  const tier = metricTier(v, metricKey);
+  return tier === "good" ? "优秀" : tier === "fair" ? "正常" : "偏低";
+}
+
+/** Bar-fill % normalized to the metric's healthy scale, NOT the raw cosine.
+ *  Maps the value onto [0, excellent] so a "normal" reading fills most of the bar
+ *  rather than looking half-empty. Falls back to the raw value with no spec. */
+export function metricBarPct(v: number | null | undefined, metricKey?: string): string {
+  if (v == null) return "0%";
+  const spec = metricKey ? METRIC_SPEC[metricKey] : undefined;
+  const ceil = spec ? spec.excellent : 1;
+  const pct = Math.max(0, Math.min(100, Math.round((v / ceil) * 100)));
+  return `${pct}%`;
+}

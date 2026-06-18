@@ -271,7 +271,7 @@ export default function Profile() {
               >
                 <CardContent className="p-4">
                   <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-sm font-medium">{topic}</span>
+                    <span className="text-sm font-medium">{profile!.topic_names?.[topic] ?? topic}</span>
                     <span className="text-xs text-dim flex items-center gap-0.5">
                       <span className="font-semibold text-primary">{data.score ?? (data.level ? data.level * 20 : 0)}</span>/100 <ChevronRight size={14} />
                     </span>
@@ -299,7 +299,7 @@ export default function Profile() {
                   <CardContent className="p-3.5 flex justify-between items-center">
                     <span className="flex-1 text-sm">{w.point}</span>
                     <div className="flex items-center gap-2 text-xs text-dim shrink-0">
-                      {w.topic && <Badge variant="default">{w.topic}</Badge>}
+                      {w.topic && <Badge variant="default">{profile!.topic_names?.[w.topic] ?? w.topic}</Badge>}
                       <span>出现 {w.times_seen} 次</span>
                     </div>
                   </CardContent>
@@ -314,7 +314,7 @@ export default function Profile() {
                 <Card key={i} className="border-l-[3px] border-l-green">
                   <CardContent className="p-3.5 flex justify-between items-center">
                     <span className="text-sm">{s.point}</span>
-                    {s.topic && <Badge variant="default">{s.topic}</Badge>}
+                    {s.topic && <Badge variant="default">{profile!.topic_names?.[s.topic] ?? s.topic}</Badge>}
                   </CardContent>
                 </Card>
               )} />

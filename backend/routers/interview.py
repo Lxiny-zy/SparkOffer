@@ -751,7 +751,8 @@ async def generate_reference_answer(body: dict, user_id: str = Depends(get_curre
     topics = load_topics(user_id)
     topic_name = topics.get(topic, {}).get("name", topic)
 
-    refs = await safe_retrieve_topic_context(topic, question, user_id, top_k=3, timeout=60.0)
+    refs = await safe_retrieve_topic_context(topic, question, user_id, top_k=3, timeout=60.0,
+                                             build_if_missing=False)
     knowledge_context = "\n\n".join(refs) if refs else "（暂无参考材料）"
 
     if mode == "hint":

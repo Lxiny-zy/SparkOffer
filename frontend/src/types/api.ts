@@ -94,6 +94,8 @@ export interface Profile {
   strong_points?: StrongPoint[];
   thinking_patterns?: ThinkingPatterns;
   communication?: CommunicationObservations;
+  /** key→display-name for topics (mastery/weak/strong store topic *keys*). */
+  topic_names?: Record<string, string>;
   updated_at?: string;
 }
 

@@ -51,8 +51,11 @@ def _create_vector_store() -> AbstractVectorStore:
             )
             return store
         except Exception as e:
-            logger.warning("Qdrant init failed, degrading to numpy: %s", e)
-            return NumpyVectorStore()
+            # Qdrant-only：不降级 numpy。抛错让上层（search_memory 等）按「特性不可用」
+            # 优雅置空，而不是静默退回本地 SQLite/numpy。get_vector_store 不缓存异常，
+            # 故 Qdrant 恢复后下次调用会自动重建成功。
+            logger.error("Qdrant init failed (qdrant-only, no numpy fallback): %s", e)
+            raise
     logger.info("VectorStore backend: numpy")
     return NumpyVectorStore()
 

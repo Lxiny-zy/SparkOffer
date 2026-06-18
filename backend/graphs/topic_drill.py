@@ -314,7 +314,9 @@ async def stream_evaluate_drill_answers(
 
         async def _bounded_retrieve(q: dict) -> list[str]:
             async with _eval_retrieval_sem:
-                return await safe_retrieve_topic_context(topic, q["question"], user_id, top_k=2)
+                return await safe_retrieve_topic_context(
+                    topic, q["question"], user_id, top_k=2, build_if_missing=False,
+                )
 
         per_q_refs = await asyncio.gather(*[_bounded_retrieve(q) for q in answered_questions])
     else:

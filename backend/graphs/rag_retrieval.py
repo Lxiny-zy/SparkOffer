@@ -88,7 +88,8 @@ async def retrieve_for_drill(
     async def _bounded(query: str):
         async with sem:
             return await safe_retrieve_topic_context_with_scores(
-                topic, query, user_id, top_k=per_query_top_k, timeout=timeout
+                topic, query, user_id, top_k=per_query_top_k, timeout=timeout,
+                build_if_missing=False,
             )
 
     raw_results = await asyncio.gather(

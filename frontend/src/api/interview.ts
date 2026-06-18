@@ -479,6 +479,7 @@ export async function updateHighFreq(topic: string, content: string): Promise<an
 export interface KnowledgeStats {
   topic: string;
   file_count: number;
+  chunk_count: number;
   last_any_update_at: number;
   last_evolved_at: number;
   last_evolved_file: string;
@@ -489,6 +490,17 @@ export interface KnowledgeStats {
 
 export async function getKnowledgeStats(topic: string): Promise<KnowledgeStats> {
   const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/stats`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export interface ChunkCounts {
+  counts: Record<string, number>;
+  total: number;
+}
+
+export async function getChunkCounts(): Promise<ChunkCounts> {
+  const res = await authFetch(`${API_BASE}/knowledge/chunk-counts`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

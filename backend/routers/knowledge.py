@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 
 from backend.config import settings
-from backend.indexer import load_topics, invalidate_topic_index, build_topic_index
+from backend.indexer import load_topics, invalidate_topic_index, build_topic_index, topic_chunk_count
 from backend.embedding_tasks import schedule_index_rebuild, get_task_queue
 from backend.auth import get_current_user
 from backend.utils.files import atomic_write_text
@@ -414,6 +414,7 @@ async def get_knowledge_stats(topic: str, user_id: str = Depends(get_current_use
         return {
             "topic": topic,
             "file_count": file_count,
+            "chunk_count": topic_chunk_count(topic, user_id),
             "last_any_update_at": last_any_update_at,
             "last_evolved_at": last_evolved_at,
             "last_evolved_file": last_evolved_file,
@@ -421,5 +422,17 @@ async def get_knowledge_stats(topic: str, user_id: str = Depends(get_current_use
             "last_high_freq_at": last_high_freq_at,
             "high_freq_size": high_freq_size,
         }
+
+    return await asyncio.to_thread(_compute)
+
+
+@router.get("/knowledge/chunk-counts")
+async def get_chunk_counts(user_id: str = Depends(get_current_user)):
+    """每个 topic 的已索引 chunk 数 + 全库总数。Qdrant 后端每个 topic O(1)，很快。"""
+    topics = load_topics(user_id)
+
+    def _compute() -> dict:
+        counts = {key: topic_chunk_count(key, user_id) for key in topics}
+        return {"counts": counts, "total": sum(counts.values())}
 
     return await asyncio.to_thread(_compute)

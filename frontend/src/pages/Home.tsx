@@ -282,7 +282,7 @@ export default function Home() {
                 <div className="text-[11px] text-dim mb-2">领域掌握</div>
                 {topTopics.map(([t, d]) => (
                   <div key={t} className="flex items-center gap-2 mb-1.5">
-                    <span className="text-xs w-[70px] text-text truncate">{t}</span>
+                    <span className="text-xs w-[70px] text-text truncate">{profile.topic_names?.[t] ?? t}</span>
                     <div className="sig-progress flex-1">
                       <div className="sig-progress-fill" style={{ width: `${d.score || 0}%` }} />
                     </div>

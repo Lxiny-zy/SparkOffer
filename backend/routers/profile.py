@@ -70,7 +70,14 @@ def delete_topic(key: str, user_id: str = Depends(get_current_user)):
 
 @router.get("/profile")
 def get_user_profile(user_id: str = Depends(get_current_user)):
-    return get_profile(user_id)
+    profile = get_profile(user_id)
+    if not profile:
+        return profile
+    # Profile stores topic *keys* (e.g. the hash key of a manually-created topic).
+    # Attach a key→display-name map so the frontend renders 「大厂题库」 instead of
+    # `cb8f7fc8`. Shallow-copied into the response so the stored profile isn't mutated.
+    names = {k: v.get("name", k) for k, v in load_topics(user_id).items()}
+    return {**profile, "topic_names": names}
 
 
 @router.get("/profile/export")
@@ -79,6 +86,9 @@ def export_user_profile(user_id: str = Depends(get_current_user)):
     profile = get_profile(user_id)
     if not profile:
         return {"markdown": "# SparkOffer 学习画像\n\n暂无训练数据。", "filename": "profile.md"}
+
+    # key→display-name：画像里存的是 topic key，导出时映射成可读名称。
+    names = {k: v.get("name", k) for k, v in load_topics(user_id).items()}
 
     lines = [
         "# SparkOffer 学习画像",
@@ -101,7 +111,7 @@ def export_user_profile(user_id: str = Depends(get_current_user)):
         lines.append("| 领域 | 分数 | 等级 |")
         lines.append("|------|------|------|")
         for topic_name, data in sorted(mastery.items(), key=lambda x: x[1].get("score", 0), reverse=True):
-            lines.append(f"| {topic_name} | {data.get('score', 0)} | L{data.get('level', '?')} |")
+            lines.append(f"| {names.get(topic_name, topic_name)} | {data.get('score', 0)} | L{data.get('level', '?')} |")
         lines.append("")
 
     weak = profile.get("weak_points", [])
@@ -112,7 +122,8 @@ def export_user_profile(user_id: str = Depends(get_current_user)):
             lines.append("## 当前薄弱点")
             for w in active:
                 point = w.get("point", str(w)) if isinstance(w, dict) else str(w)
-                topic_tag = f" ({w.get('topic', '')})" if isinstance(w, dict) and w.get("topic") else ""
+                topic_key = w.get("topic", "") if isinstance(w, dict) else ""
+                topic_tag = f" ({names.get(topic_key, topic_key)})" if topic_key else ""
                 lines.append(f"- {point}{topic_tag}")
             lines.append("")
         if improved:
@@ -160,7 +171,8 @@ def export_user_profile(user_id: str = Depends(get_current_user)):
         lines.append("| 日期 | 模式 | 领域 | 得分 |")
         lines.append("|------|------|------|------|")
         for h in history[-20:]:
-            lines.append(f"| {h.get('date', '?')[:10]} | {h.get('mode', '?')} | {h.get('topic', '-')} | {h.get('avg_score', '?')} |")
+            topic_key = h.get("topic", "-")
+            lines.append(f"| {h.get('date', '?')[:10]} | {h.get('mode', '?')} | {names.get(topic_key, topic_key)} | {h.get('avg_score', '?')} |")
         lines.append("")
 
     return {"markdown": "\n".join(lines), "filename": f"sparkoffer-profile-{_dt.now().strftime('%Y%m%d')}.md"}

@@ -36,7 +36,7 @@ from backend.graphs.seed_pool import draft_from_seed_pool, has_pool
 from backend.graphs.validators import (
     DEFAULT_VALIDATORS, ValidationContext, ValidationResult,
 )
-from backend.indexer import safe_retrieve_topic_context
+from backend.indexer import safe_retrieve_topic_context, topic_index_exists
 from backend.llm_provider import get_langchain_llm
 from backend.context_assembler import ContextBudget, Section, resolve_input_budget, count_tokens
 from backend.live_store import drill_sessions, save_live
@@ -134,6 +134,8 @@ class DrillPipeline:
                 return f"{len(wps)} WP · {len(due)} 到期 · 槽位 {' '.join(parts)}"
             return f"{len(wps)} 个薄弱点 · {len(due)} 个到期复习"
         if stage == "retrieve":
+            if self.ctx.get("index_not_ready"):
+                return "索引重建中 · 本轮无知识库上下文（后台已排队）"
             n = self.ctx.get("knowledge_chunks", 0)
             queries = self.ctx.get("retrieval_queries", 0)
             if self.ctx.get("knowledge_cache_hit"):
@@ -283,6 +285,11 @@ class DrillPipeline:
         self.ctx["retrieval_queries"] = stats.queries if stats else 0
         self.ctx["retrieval_stats"] = stats
         self.ctx["knowledge_cache_hit"] = False
+        # Empty result + no built index = the retrieve path hit IndexNotReady and
+        # scheduled a background rebuild. Flag it so the timeline shows 「索引重建中」
+        # rather than a silent empty retrieval; cleared implicitly once built.
+        if not chunks and not topic_index_exists(self.topic, self.user_id):
+            self.ctx["index_not_ready"] = True
 
         # Cache TTL 1h — long enough to span a multi-drill sitting but short
         # enough that knowledge-base edits propagate the same day. Only cache
@@ -408,7 +415,7 @@ class DrillPipeline:
         past_insights_text = "\n".join(
             f"- {ins[:200]}" for ins in drill_ctx.get("past_insights", [])
         ) or "暂无历史数据"
-        high_freq = _load_high_freq(self.topic, self.user_id) or "暂无"
+        high_freq = _load_high_freq(self.topic, self.user_id)
 
         weak_lines: list[str] = []
         for w in all_weak[:10]:
@@ -445,22 +452,26 @@ class DrillPipeline:
 
         # #4 ContextAssembler: replace the old knowledge_ctx[:5000] hard cut with a
         # token budget. Measure the template's fixed cost (small fields filled, the
-        # three big variable fields blank), then hand the remainder to
-        # knowledge / recent / insights by priority — knowledge carries the most
-        # value (p3) but the cheaper recent-question list (p2) wins ties on a tight
-        # budget because it guards against repeats.
+        # big variable fields blank), then hand the remainder to
+        # knowledge / recent / high_freq / insights by priority — knowledge carries
+        # the most value (p3) but the cheaper recent-question list (p2) wins ties on
+        # a tight budget because it guards against repeats. high_freq (the topic's
+        # whole question-bank file) used to be spliced into the fixed prompt
+        # uncapped, bypassing the budget and starving everything else; it now packs
+        # as a Section like the rest.
         fixed_prompt = DRILL_QUESTION_GEN_PROMPT.format(
             topic_name=topic_name, knowledge_context="",
             rag_quality_hint=self._rag_quality_hint(), user_profile=profile_summary,
             mastery_info=drill_ctx["mastery_info"], weak_points=weak_points_text,
-            high_freq_questions=high_freq, recent_questions="", past_insights="",
+            high_freq_questions="", recent_questions="", past_insights="",
             question_strategy=question_strategy, diff_min=diff_min, diff_max=diff_max,
         )
         ctx_budget = max(1000, resolve_input_budget() - count_tokens(fixed_prompt))
         packed = ContextBudget(ctx_budget).pack([
             Section("recent", recent_text, priority=2),
             Section("knowledge", knowledge_text, priority=3, min_tokens=200),
-            Section("insights", past_insights_text, priority=4, min_tokens=100),
+            Section("high_freq", high_freq, priority=4, min_tokens=200),
+            Section("insights", past_insights_text, priority=5, min_tokens=100),
         ])
         self.ctx["context_report"] = packed.report
 
@@ -471,7 +482,7 @@ class DrillPipeline:
             user_profile=profile_summary,
             mastery_info=drill_ctx["mastery_info"],
             weak_points=weak_points_text,
-            high_freq_questions=high_freq,
+            high_freq_questions=packed.get("high_freq") or "暂无",
             recent_questions=packed.get("recent") or "暂无",
             past_insights=packed.get("insights") or "暂无历史数据",
             question_strategy=question_strategy,

@@ -332,14 +332,15 @@ async def search_memory(
     """Semantic search with time decay. Returns [{content, chunk_type, topic, score, created_at}]."""
     # Embed query (async with timeout)
     query_vec = await _embed(query)
-    store = get_vector_store()
 
     # Backend search returns raw cosine; we apply time decay + sort + top_k here
     # so numpy and qdrant produce identical final ordering. Pull the full filtered
     # set (limit=MAX_VECTORS_PER_USER) — decaying then truncating MUST happen after
     # retrieval, not before. Deserialize/cosine/decay/sort are CPU-bound over ≤500
-    # rows → keep them off the event loop.
+    # rows → keep them off the event loop. get_vector_store() is called inside the
+    # worker too, so a Qdrant init/connection error surfaces here and is caught below.
     def _search_and_rank() -> list[dict]:
+        store = get_vector_store()
         hits = store.search(
             user_id, query_vec,
             chunk_types=chunk_types, topic=topic, limit=MAX_VECTORS_PER_USER,
@@ -358,7 +359,13 @@ async def search_memory(
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:top_k]
 
-    return await asyncio.to_thread(_search_and_rank)
+    # Qdrant-only：向量后端不可用时记忆搜索优雅置空（无个性化召回），绝不崩调用方
+    # （assistant / qa_arena）。写入路径走后台队列另有重试，不受此影响。
+    try:
+        return await asyncio.to_thread(_search_and_rank)
+    except Exception as e:
+        logger.warning("search_memory degraded to empty (vector backend unavailable): %s", e)
+        return []
 
 
 async def find_similar_weak_point(
