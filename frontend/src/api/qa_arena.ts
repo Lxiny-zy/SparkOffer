@@ -14,6 +14,10 @@ export interface QAMessage {
   // Transient thinking trace streamed by reasoning models (reasoning_content). Display-only:
   // populated live during a turn, never persisted, so it's absent on reload.
   reasoning?: string;
+  // Attached image URLs ready to render: authenticated server URLs for loaded
+  // history (fetched via fetchAuthedImage), or local object/data URLs for a
+  // message the user just sent this session.
+  images?: string[];
 }
 
 export interface QASummaryResult {
@@ -61,13 +65,34 @@ export async function renameQASession(sessionId: string, title: string): Promise
 
 // ── Messages ──
 
+// URL of a stored chat image. Auth-protected on the backend — load it via
+// fetchAuthedImage (an <img src> can't send the Authorization header).
+export function qaImageUrl(sessionId: string, name: string): string {
+  return `${API_BASE}/qa-arena/sessions/${sessionId}/images/${encodeURIComponent(name)}`;
+}
+
+// Fetch an auth-protected image and return an object URL usable as <img src>.
+// The caller must URL.revokeObjectURL it on unmount. Local blob:/data: URLs are
+// returned as-is (already directly renderable).
+export async function fetchAuthedImage(url: string): Promise<string> {
+  if (url.startsWith("blob:") || url.startsWith("data:")) return url;
+  const res = await fetch(url, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`图片加载失败: ${res.status}`);
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
 export async function loadQAMessages(sessionId: string): Promise<QAMessage[]> {
   const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/messages`, {
     headers: authHeaders(),
   });
   if (!res.ok) return [];
   const data = await res.json();
-  return data.messages || [];
+  return (data.messages || []).map((m: any) => ({
+    ...m,
+    // Backend stores bare filenames; turn them into auth'd serve URLs for display.
+    images: Array.isArray(m.images) ? m.images.map((n: string) => qaImageUrl(sessionId, n)) : [],
+  }));
 }
 
 export async function clearQAMessages(sessionId: string): Promise<void> {
@@ -79,11 +104,11 @@ export async function clearQAMessages(sessionId: string): Promise<void> {
 
 // ── Streaming Chat ──
 
-export async function* streamQAChat(sessionId: string, message: string, signal?: AbortSignal): AsyncGenerator<any> {
+export async function* streamQAChat(sessionId: string, message: string, images: string[] | undefined, signal?: AbortSignal): AsyncGenerator<any> {
   const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/chat`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, images: images || [] }),
     signal,
   });
 

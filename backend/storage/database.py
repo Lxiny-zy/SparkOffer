@@ -212,6 +212,13 @@ def init_all_tables():
         )
     """)
 
+    # Migration: add images column to qa_messages (multimodal attachments —
+    # JSON array of stored image filenames under data/users/<uid>/qa_uploads/<sid>/)
+    try:
+        conn.execute("SELECT images FROM qa_messages LIMIT 1")
+    except Exception:
+        conn.execute("ALTER TABLE qa_messages ADD COLUMN images TEXT")
+
     # ── 索引 ──
 
     # sessions（新增 — 修复全表扫描）

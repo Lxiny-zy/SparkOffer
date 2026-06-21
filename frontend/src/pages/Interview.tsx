@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { useParams, useLocation, useNavigate } from "react-router-dom";
 import { Markdown } from "../components/ChatBubble";
 import { Check, Minus, Star, Lightbulb, Eye, Loader2, RefreshCw } from "lucide-react";
@@ -275,6 +275,39 @@ export default function Interview() {
   useEffect(() => {
     if (isBatchMode) textareaRef.current?.focus();
   }, [currentIndex, isBatchMode]);
+
+  // Auto-grow the drill answer box to fit its content, so a long answer expands
+  // the box (and the page scrolls) instead of scrolling inside a fixed-height
+  // box. Capped at 60% of the viewport so a very long answer can't keep growing
+  // off-screen — past the cap the box itself scrolls internally. Runs on every
+  // drillInput / question change — covers typing, voice input, question
+  // navigation and draft restore (all set drillInput).
+  const autoResizeDrill = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const cap = Math.round(window.innerHeight * 0.6);
+    if (el.scrollHeight > cap) {
+      el.style.height = `${cap}px`;
+      el.style.overflowY = "auto";
+    } else {
+      el.style.height = `${el.scrollHeight}px`;
+      el.style.overflowY = "hidden";
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    if (isBatchMode) autoResizeDrill();
+  }, [drillInput, currentIndex, isBatchMode, autoResizeDrill]);
+
+  // Recompute the cap when the viewport changes (window resize / device rotation /
+  // mobile keyboard) — otherwise a box sized to the old 60vh stays stale.
+  useEffect(() => {
+    if (!isBatchMode) return;
+    const onResize = () => autoResizeDrill();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [isBatchMode, autoResizeDrill]);
 
   const currentQ = questions[currentIndex];
   const totalQ = questions.length;
@@ -753,7 +786,7 @@ export default function Interview() {
                 <div className="flex-1 relative">
                   <textarea
                     ref={textareaRef}
-                    className="sig-textarea w-full min-h-[100px] md:min-h-[80px] max-h-[240px] pl-12 text-[15px] md:text-sm"
+                    className="sig-textarea w-full min-h-[100px] md:min-h-[80px] pl-12 text-[15px] md:text-sm resize-none"
                     value={drillInput}
                     onChange={(e) => setDrillInput(e.target.value)}
                     onKeyDown={handleKeyDown}

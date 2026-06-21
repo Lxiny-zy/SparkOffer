@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useCallback, memo, useMemo } from "react";
 import {
   Plus, Trash2, Send, Download, FileText, Loader2,
-  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square, RefreshCw, AlertCircle, Brain, BookPlus,
+  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square, RefreshCw, AlertCircle, Brain, BookPlus, ImagePlus,
 } from "lucide-react";
+import { toast } from "sonner";
 import { Markdown } from "../components/ChatBubble";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import {
   generateQASummary,
   ingestQACardToKnowledge,
   downloadMarkdown,
+  fetchAuthedImage,
   type QASession,
   type QAMessage,
   type QASummaryResult,
@@ -48,6 +50,20 @@ const ALL_SUGGESTED_QUESTIONS = [
 
 const SUGGESTED_COUNT = 4;
 
+// Image attachment limits — mirror the backend caps in qa_arena.py.
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+const ACCEPTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+function readFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 function pickRandomQuestions(pool: string[], count: number): string[] {
   const shuffled = [...pool].sort(() => Math.random() - 0.5);
   return shuffled.slice(0, count);
@@ -58,6 +74,9 @@ export default function QAArena() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<QAMessage[]>([]);
   const [input, setInput] = useState("");
+  // Staged image attachments for the next message. `preview` is a local object URL
+  // (rendered immediately); `dataUrl` is the base64 sent to the backend.
+  const [attachments, setAttachments] = useState<{ preview: string; dataUrl: string }[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [streamStage, setStreamStage] = useState<string>("");
@@ -75,6 +94,7 @@ export default function QAArena() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const rafRef = useRef<number | null>(null);
   const isStreamingRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -127,6 +147,7 @@ export default function QAArena() {
     setSummaryResult(null);
     setShowSummary(false);
     setStreamError(null);
+    setAttachments((prev) => { prev.forEach((a) => URL.revokeObjectURL(a.preview)); return []; });
     const msgs = await loadQAMessages(id);
     // Guard against out-of-order responses: if the user switched again while this
     // load was in flight, don't clobber the newer session's messages.
@@ -144,6 +165,7 @@ export default function QAArena() {
     setSummaryResult(null);
     setShowSummary(false);
     setStreamError(null);
+    clearAttachments();
     inputRef.current?.focus();
   };
 
@@ -265,23 +287,97 @@ export default function QAArena() {
     }
   }, []);
 
+  // Stage image files for the next message: validate type/size, build a local
+  // preview + base64 payload, enforce the per-message cap.
+  const addImageFiles = useCallback(async (files: FileList | File[] | null) => {
+    if (!files) return;
+    const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (list.length === 0) return;
+    const accepted: { preview: string; dataUrl: string }[] = [];
+    for (const file of list) {
+      if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) {
+        toast.error(`不支持的图片格式：${file.name || file.type}`);
+        continue;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        toast.error(`图片过大（需 ≤ 6MB）：${file.name}`);
+        continue;
+      }
+      try {
+        const dataUrl = await readFileAsDataURL(file);
+        accepted.push({ preview: URL.createObjectURL(file), dataUrl });
+      } catch {
+        toast.error(`读取图片失败：${file.name}`);
+      }
+    }
+    if (accepted.length === 0) return;
+    setAttachments((prev) => {
+      const room = MAX_IMAGES - prev.length;
+      if (room <= 0) {
+        toast.error(`最多上传 ${MAX_IMAGES} 张图片`);
+        accepted.forEach((a) => URL.revokeObjectURL(a.preview));
+        return prev;
+      }
+      if (accepted.length > room) {
+        toast.error(`最多上传 ${MAX_IMAGES} 张图片，多余的已忽略`);
+        accepted.slice(room).forEach((a) => URL.revokeObjectURL(a.preview));
+      }
+      return [...prev, ...accepted.slice(0, room)];
+    });
+  }, []);
+
+  const removeAttachment = useCallback((idx: number) => {
+    setAttachments((prev) => {
+      const a = prev[idx];
+      if (a) URL.revokeObjectURL(a.preview);
+      return prev.filter((_, i) => i !== idx);
+    });
+  }, []);
+
+  // Revoke staged previews and drop them (used on session switch — staged images
+  // shouldn't leak into another conversation).
+  const clearAttachments = useCallback(() => {
+    setAttachments((prev) => {
+      prev.forEach((a) => URL.revokeObjectURL(a.preview));
+      return [];
+    });
+  }, []);
+
+  // Paste a screenshot / image straight into the box.
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData?.items || [])
+      .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => !!f);
+    if (files.length > 0) {
+      e.preventDefault();
+      addImageFiles(files);
+    }
+  }, [addImageFiles]);
+
   const handleSend = async (overrideText?: string) => {
     const text = (overrideText || input).trim();
-    if (!text || isStreaming || !activeId) return;
+    const imgs = attachments;
+    if ((!text && imgs.length === 0) || isStreaming || !activeId) return;
     const sid = activeId;
+
+    const previews = imgs.map((a) => a.preview);
+    const dataUrls = imgs.map((a) => a.dataUrl);
 
     setMessages((prev) => [
       ...prev,
-      { role: "user", content: text, created_at: new Date().toISOString() },
+      { role: "user", content: text, created_at: new Date().toISOString(), images: previews },
       { role: "assistant", content: "", created_at: "" },
     ]);
     setInput("");
+    // Hand the previews off to the message bubble — don't revoke them here.
+    setAttachments([]);
     // Reset textarea height
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
 
-    await consumeStream(sid, (signal) => streamQAChat(sid, text, signal));
+    await consumeStream(sid, (signal) => streamQAChat(sid, text, dataUrls, signal));
   };
 
   // Re-answer the last user question without re-typing it. Replaces the trailing
@@ -585,6 +681,7 @@ export default function QAArena() {
                   role={m.role}
                   content={m.content}
                   reasoning={m.reasoning}
+                  images={m.images}
                   streaming={isStreaming && i === messages.length - 1 && m.role === "assistant"}
                   emptyHint={m.role === "assistant" && !m.content && !m.reasoning && !isStreaming && i === messages.length - 1}
                 />
@@ -620,42 +717,84 @@ export default function QAArena() {
                 <span>{streamError}</span>
               </div>
             )}
-            <div className="max-w-3xl mx-auto flex items-end gap-2">
-              <textarea
-                ref={inputRef}
-                className="sig-textarea flex-1 text-[15px] md:text-sm min-h-[44px]"
-                rows={1}
-                placeholder="输入你的问题... (Enter 发送)"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                onInput={(e) => {
-                  const t = e.target as HTMLTextAreaElement;
-                  t.style.height = "auto";
-                  t.style.height = Math.min(t.scrollHeight, 160) + "px";
-                }}
-                disabled={isStreaming}
-              />
-              {isStreaming ? (
-                <Button
-                  size="icon"
-                  variant="destructive"
-                  className="h-11 w-11 md:h-10 md:w-10 shrink-0"
-                  onClick={handleStop}
-                  title="停止生成"
-                >
-                  <Square className="w-4 h-4" />
-                </Button>
-              ) : (
-                <Button
-                  size="icon"
-                  className="h-11 w-11 md:h-10 md:w-10 shrink-0"
-                  onClick={() => handleSend()}
-                  disabled={!input.trim()}
-                >
-                  <Send className="w-4 h-4" />
-                </Button>
+            <div className="max-w-3xl mx-auto">
+              {attachments.length > 0 && (
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {attachments.map((a, i) => (
+                    <div key={i} className="relative">
+                      <img
+                        src={a.preview}
+                        alt={`附件 ${i + 1}`}
+                        className="w-16 h-16 object-cover rounded-lg border border-border"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(i)}
+                        className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-bg border border-border flex items-center justify-center text-dim hover:text-destructive shadow-sm"
+                        title="移除"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
               )}
+              <div className="flex items-end gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => { addImageFiles(e.target.files); e.target.value = ""; }}
+                />
+                <Button
+                  size="icon"
+                  variant="outline"
+                  className="h-11 w-11 md:h-10 md:w-10 shrink-0"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isStreaming || attachments.length >= MAX_IMAGES}
+                  title="上传图片（最多 4 张，支持粘贴截图）"
+                >
+                  <ImagePlus className="w-4 h-4" />
+                </Button>
+                <textarea
+                  ref={inputRef}
+                  className="sig-textarea flex-1 text-[15px] md:text-sm min-h-[44px]"
+                  rows={1}
+                  placeholder="输入你的问题，或上传/粘贴图片... (Enter 发送)"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
+                  onInput={(e) => {
+                    const t = e.target as HTMLTextAreaElement;
+                    t.style.height = "auto";
+                    t.style.height = Math.min(t.scrollHeight, 160) + "px";
+                  }}
+                  disabled={isStreaming}
+                />
+                {isStreaming ? (
+                  <Button
+                    size="icon"
+                    variant="destructive"
+                    className="h-11 w-11 md:h-10 md:w-10 shrink-0"
+                    onClick={handleStop}
+                    title="停止生成"
+                  >
+                    <Square className="w-4 h-4" />
+                  </Button>
+                ) : (
+                  <Button
+                    size="icon"
+                    className="h-11 w-11 md:h-10 md:w-10 shrink-0"
+                    onClick={() => handleSend()}
+                    disabled={!input.trim() && attachments.length === 0}
+                  >
+                    <Send className="w-4 h-4" />
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -717,13 +856,22 @@ export default function QAArena() {
   );
 }
 
-const ChatMessage = memo(function ChatMessage({ role, content, reasoning, streaming, emptyHint }: { role: string; content: string; reasoning?: string; streaming?: boolean; emptyHint?: boolean }) {
+const ChatMessage = memo(function ChatMessage({ role, content, reasoning, streaming, emptyHint, images }: { role: string; content: string; reasoning?: string; streaming?: boolean; emptyHint?: boolean; images?: string[] }) {
   if (role === "user") {
     return (
-      <div className="flex justify-end animate-fade-in">
-        <div className="max-w-[75%] px-4 py-2.5 rounded-lg rounded-tr-sm text-[15px] leading-[1.7] whitespace-pre-wrap" style={{ background: "var(--sig-accent)", color: "var(--sig-accent-fg)" }}>
-          {content}
-        </div>
+      <div className="flex flex-col items-end gap-1.5 animate-fade-in">
+        {images && images.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 justify-end max-w-[75%]">
+            {images.map((src, i) => (
+              <ChatImage key={i} src={src} />
+            ))}
+          </div>
+        )}
+        {content && (
+          <div className="max-w-[75%] px-4 py-2.5 rounded-lg rounded-tr-sm text-[15px] leading-[1.7] whitespace-pre-wrap" style={{ background: "var(--sig-accent)", color: "var(--sig-accent-fg)" }}>
+            {content}
+          </div>
+        )}
       </div>
     );
   }
@@ -755,6 +903,51 @@ const ChatMessage = memo(function ChatMessage({ role, content, reasoning, stream
         </div>
       </div>
     </div>
+  );
+});
+
+// Renders a chat image. Local previews (blob:/data:) display directly; stored
+// history images come from an auth-protected endpoint, so they're fetched through
+// the authenticated client into an object URL (a JWT can't ride on an <img src>).
+const ChatImage = memo(function ChatImage({ src }: { src: string }) {
+  const isLocal = src.startsWith("blob:") || src.startsWith("data:");
+  const [resolved, setResolved] = useState<string | null>(isLocal ? src : null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (src.startsWith("blob:") || src.startsWith("data:")) {
+      setResolved(src);
+      setFailed(false);
+      return;
+    }
+    let cancelled = false;
+    let obj: string | null = null;
+    setResolved(null);
+    setFailed(false);
+    fetchAuthedImage(src)
+      .then((u) => { if (!cancelled) { obj = u; setResolved(u); } })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; if (obj) URL.revokeObjectURL(obj); };
+  }, [src]);
+
+  if (failed) {
+    return (
+      <div className="w-28 h-28 rounded-lg border border-border flex items-center justify-center text-dim text-xs text-center px-2">
+        图片加载失败
+      </div>
+    );
+  }
+  if (!resolved) {
+    return <div className="w-28 h-28 rounded-lg border border-border bg-secondary animate-pulse" />;
+  }
+  return (
+    <a href={resolved} target="_blank" rel="noopener noreferrer" className="block">
+      <img
+        src={resolved}
+        alt="对话图片"
+        className="max-w-[160px] max-h-[160px] rounded-lg border border-border object-cover hover:opacity-90 transition-opacity"
+      />
+    </a>
   );
 });
 

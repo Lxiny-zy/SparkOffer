@@ -1,11 +1,14 @@
 """问答演练场 — 自由问答 + 长期记忆 + 背诵卡片式总结导出。"""
 
 import asyncio
+import base64
 import json
 import logging
 import re
+import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
+from pathlib import Path
 
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
@@ -144,8 +147,126 @@ MAP_PROMPT = """以下是一段较长技术问答对话的第 {idx}/{total} 段�
 {conversation}"""
 
 
+# ── Multimodal image attachments ──
+# Uploaded images are saved as files under the per-user data dir (the DB stores
+# only filenames, kept lean) and re-encoded to base64 data URLs when fed to the
+# vision model — the model provider is external and can't fetch our auth-protected
+# serve endpoint, so it must receive the bytes inline.
+
+_IMAGE_EXT_BY_MIME = {
+    "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif",
+}
+_MIME_BY_EXT = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "webp": "image/webp", "gif": "image/gif",
+}
+MAX_IMAGE_BYTES = 6 * 1024 * 1024   # 6MB per image
+MAX_IMAGES_PER_MESSAGE = 4
+_DATA_URL_RE = re.compile(r"^data:(image/[\w.+-]+);base64,(.+)$", re.DOTALL)
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _qa_uploads_dir(user_id: str, session_id: str) -> Path:
+    d = settings.user_data_dir(user_id) / "qa_uploads" / session_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def delete_session_images(session_id: str, user_id: str) -> None:
+    """Remove all uploaded images for a session — called when the session or its
+    messages are deleted, so image files don't orphan on disk."""
+    import shutil
+    d = settings.user_data_dir(user_id) / "qa_uploads" / session_id
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def save_uploaded_images(session_id: str, user_id: str, data_urls: list[str] | None) -> list[str]:
+    """Decode base64 image data URLs, persist to disk, return the stored filenames.
+
+    Silently skips entries that aren't a supported image data URL, fail to decode,
+    or exceed the size cap — a bad attachment never blocks the text turn.
+    """
+    saved: list[str] = []
+    for url in (data_urls or [])[:MAX_IMAGES_PER_MESSAGE]:
+        if not isinstance(url, str):
+            continue
+        m = _DATA_URL_RE.match(url)
+        if not m:
+            continue
+        ext = _IMAGE_EXT_BY_MIME.get(m.group(1).lower())
+        if not ext:
+            continue
+        try:
+            raw = base64.b64decode(m.group(2), validate=True)
+        except Exception:
+            continue
+        if not raw or len(raw) > MAX_IMAGE_BYTES:
+            continue
+        name = f"{uuid.uuid4().hex}.{ext}"
+        try:
+            (_qa_uploads_dir(user_id, session_id) / name).write_bytes(raw)
+        except OSError as e:
+            logger.warning("Failed to persist QA image %s: %s", name, e)
+            continue
+        saved.append(name)
+    return saved
+
+
+def get_image_path(session_id: str, user_id: str, name: str) -> Path | None:
+    """Resolve a stored image filename to its path. Returns None if the name is
+    unsafe (path-traversal guard) or the file is missing."""
+    if not name or not _SAFE_NAME_RE.match(name):
+        return None
+    p = settings.user_data_dir(user_id) / "qa_uploads" / session_id / name
+    return p if p.exists() else None
+
+
+def _image_data_url(session_id: str, user_id: str, name: str) -> str | None:
+    """Read a stored image and return it as a base64 data URL for the vision model."""
+    p = get_image_path(session_id, user_id, name)
+    if not p:
+        return None
+    mime = _MIME_BY_EXT.get(p.suffix.lstrip(".").lower(), "image/png")
+    try:
+        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+    except OSError:
+        return None
+    return f"data:{mime};base64,{b64}"
+
+
+def _user_content(text: str, image_names: list[str] | None, session_id: str, user_id: str):
+    """Build the LLM ``content`` value for a user turn.
+
+    A plain string when there are no images (keeps the prompt-prefix cache
+    friendly); otherwise an OpenAI-style multimodal parts list
+    ``[{type:text}, {type:image_url}, ...]``. Falls back to the text string if
+    every referenced image fails to load.
+    """
+    if not image_names:
+        return text
+    parts: list[dict] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    loaded = 0
+    for name in image_names:
+        url = _image_data_url(session_id, user_id, name)
+        if url:
+            parts.append({"type": "image_url", "image_url": {"url": url}})
+            loaded += 1
+    if loaded == 0:
+        return text  # every image failed to load → fall back to text-only
+    if not text:
+        # Image-only turn: a minimal neutral instruction so the model knows to read
+        # the image, and so endpoints that reject a text-less content array accept it.
+        parts.insert(0, {"type": "text", "text": "请看图片。"})
+    return parts
+
+
 async def _build_memory_context(user_message: str, user_id: str) -> str:
     """Retrieve long-term vector memory relevant to the current question."""
+    if not user_message or not user_message.strip():
+        return ""  # image-only turn: nothing to search on
     try:
         from backend.vector_memory import search_memory
         results = await search_memory(user_message, user_id, top_k=5)
@@ -302,13 +423,15 @@ def _sse(payload: dict) -> str:
 
 
 async def _stream_chat_answer(
-    session_id: str, user_id: str, history: list[dict], prompt: str
+    session_id: str, user_id: str, history: list[dict], prompt: str,
+    prompt_images: list[str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Core QA streaming, shared by first-send and regenerate.
 
     ``history`` is the prior conversation (NOT including ``prompt``); ``prompt`` is the
-    current user question to answer. Persists the assistant reply itself so callers stay
-    thin. Three mutually-exclusive terminal states:
+    current user question to answer, with ``prompt_images`` its attached image filenames.
+    Persists the assistant reply itself so callers stay thin. Three mutually-exclusive
+    terminal states:
       - non-empty content, clean finish     → save assistant + ``done``
       - non-empty content, mid-stream error → save partial  + ``error`` (no ``done``)
       - empty content (any reason)          → persist nothing + ``error``
@@ -358,12 +481,19 @@ async def _stream_chat_answer(
     if summary_block:
         lc_messages.append({"role": "system", "content": summary_block})
     for m in kept_tail:
-        lc_messages.append({"role": m["role"], "content": m["content"]})
+        # Re-attach images for recent user turns so follow-ups ("what about the
+        # bottom-left of that diagram") still see them; old turns drop off with
+        # the context window. Assistant turns are always plain text.
+        if m["role"] == "user" and m.get("images"):
+            content = _user_content(m["content"], m.get("images"), session_id, user_id)
+        else:
+            content = m["content"]
+        lc_messages.append({"role": m["role"], "content": content})
 
     if memory_ctx:
         lc_messages.append({"role": "system", "content": memory_ctx})
 
-    lc_messages.append({"role": "user", "content": prompt})
+    lc_messages.append({"role": "user", "content": _user_content(prompt, prompt_images, session_id, user_id)})
 
     # Stage 2 — model call. A reasoning model can "think" for a long time before any visible
     # answer token; we stream that thinking (see _chunk_reasoning) to keep the SSE connection
@@ -458,22 +588,28 @@ async def _stream_chat_answer(
 
 
 async def stream_qa_chat(
-    session_id: str, message: str, user_id: str
+    session_id: str, message: str, user_id: str, images: list[str] | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Stream SSE events for a new QA arena chat turn (saves the user message)."""
+    """Stream SSE events for a new QA arena chat turn (saves the user message).
+
+    ``images`` is an optional list of base64 image data URLs; they're persisted to
+    disk and the stored filenames are attached to the user message + fed to the
+    vision model.
+    """
     # Full history: the rolling-summary covered cursor indexes from message 0, and
     # the compression + token-budget layers below already bound what reaches the LLM.
     history = store.load_messages(session_id, user_id, limit=None)
-    store.save_message(session_id, user_id, "user", message)
+    image_names = save_uploaded_images(session_id, user_id, images)
+    store.save_message(session_id, user_id, "user", message, images=image_names)
 
     # Auto-title on first user message
     if not history:
-        title = message[:20].strip()
+        title = message[:20].strip() or ("图片提问" if image_names else "新对话")
         if len(message) > 20:
             title += "..."
         store.update_session_title(session_id, user_id, title)
 
-    async for event in _stream_chat_answer(session_id, user_id, history, message):
+    async for event in _stream_chat_answer(session_id, user_id, history, message, image_names):
         yield event
 
 
@@ -484,7 +620,8 @@ async def stream_qa_regenerate(
 
     The user message is NOT re-saved; the trailing assistant message (if any) is dropped
     so the regenerated answer cleanly replaces it. Shares the same context window as
-    ``stream_qa_chat`` so the regenerated answer sees the same history.
+    ``stream_qa_chat`` so the regenerated answer sees the same history — including any
+    images attached to that last user turn.
     """
     store.delete_last_message_if_assistant(session_id, user_id)
     messages = store.load_messages(session_id, user_id, limit=None)
@@ -492,8 +629,9 @@ async def stream_qa_regenerate(
         yield f"data: {json.dumps({'type': 'error', 'message': '没有可重新生成的提问'}, ensure_ascii=False)}\n\n"
         return
     prompt = messages[-1]["content"]
+    prompt_images = messages[-1].get("images") or []
     history = messages[:-1]
-    async for event in _stream_chat_answer(session_id, user_id, history, prompt):
+    async for event in _stream_chat_answer(session_id, user_id, history, prompt, prompt_images):
         yield event
 
 

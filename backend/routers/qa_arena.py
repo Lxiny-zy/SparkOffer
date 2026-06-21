@@ -1,7 +1,7 @@
 """问答演练场路由 — 会话管理 + 流式对话 + 总结导出。"""
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from backend.auth import get_current_user
 from backend.storage import qa_sessions as store
@@ -28,6 +28,8 @@ def list_sessions(limit: int = 50, offset: int = 0, user_id: str = Depends(get_c
 def delete_session(session_id: str, user_id: str = Depends(get_current_user)):
     if not store.delete_session(session_id, user_id):
         raise HTTPException(404, "会话不存在")
+    from backend.qa_arena import delete_session_images
+    delete_session_images(session_id, user_id)
     return {"ok": True}
 
 
@@ -50,23 +52,43 @@ def get_messages(session_id: str, limit: int = 100, user_id: str = Depends(get_c
 @router.delete("/sessions/{session_id}/messages")
 def clear_messages(session_id: str, user_id: str = Depends(get_current_user)):
     store.clear_messages(session_id, user_id)
+    from backend.qa_arena import delete_session_images
+    delete_session_images(session_id, user_id)
     return {"ok": True}
 
 
 @router.post("/sessions/{session_id}/chat")
 def chat(session_id: str, body: dict, user_id: str = Depends(get_current_user)):
     message = (body.get("message") or "").strip()
-    if not message:
+    images = body.get("images") or []
+    if not message and not images:
         raise HTTPException(400, "消息不能为空")
     if not store.get_session(session_id, user_id):
         raise HTTPException(404, "会话不存在")
 
     from backend.qa_arena import stream_qa_chat
     return StreamingResponse(
-        stream_qa_chat(session_id, message, user_id),
+        stream_qa_chat(session_id, message, user_id, images),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/sessions/{session_id}/images/{name}")
+def get_image(session_id: str, name: str, user_id: str = Depends(get_current_user)):
+    """Serve a stored chat image (auth'd, owner-scoped, path-traversal safe).
+
+    The frontend fetches this through the authenticated client (token in the
+    Authorization header) and renders the blob — so the JWT never leaks into an
+    <img> URL.
+    """
+    if not store.get_session(session_id, user_id):
+        raise HTTPException(404, "会话不存在")
+    from backend.qa_arena import get_image_path
+    path = get_image_path(session_id, user_id, name)
+    if not path:
+        raise HTTPException(404, "图片不存在")
+    return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
 
 
 @router.post("/sessions/{session_id}/regenerate")

@@ -1,9 +1,21 @@
 """问答演练场会话与消息持久化 (SQLite)."""
 
+import json
 import uuid
 from datetime import datetime, timezone
 
 from backend.storage.database import get_db
+
+
+def _row_to_message(row) -> dict:
+    """Map a qa_messages row to a dict, decoding the JSON ``images`` column to a list."""
+    d = dict(row)
+    raw = d.pop("images", None)
+    try:
+        d["images"] = json.loads(raw) if raw else []
+    except (ValueError, TypeError):
+        d["images"] = []
+    return d
 
 
 def create_session(user_id: str, title: str = "新对话") -> dict:
@@ -62,11 +74,12 @@ def delete_session(session_id: str, user_id: str) -> bool:
     return cur.rowcount > 0
 
 
-def save_message(session_id: str, user_id: str, role: str, content: str):
+def save_message(session_id: str, user_id: str, role: str, content: str, images: list[str] | None = None):
     conn = get_db()
+    images_json = json.dumps(images) if images else None
     conn.execute(
-        "INSERT INTO qa_messages (session_id, user_id, role, content) VALUES (?, ?, ?, ?)",
-        (session_id, user_id, role, content),
+        "INSERT INTO qa_messages (session_id, user_id, role, content, images) VALUES (?, ?, ?, ?, ?)",
+        (session_id, user_id, role, content, images_json),
     )
     conn.execute(
         "UPDATE qa_sessions SET updated_at = ? WHERE id = ? AND user_id = ?",
@@ -83,21 +96,24 @@ def load_messages(session_id: str, user_id: str, limit: int | None = 100) -> lis
     window to the oldest messages and drop everything recent. ``limit=None``
     returns the full history (the chat/summary paths need it: the rolling-summary
     ``covered`` cursor indexes from message 0).
+
+    Each message carries an ``images`` list (stored attachment filenames; empty
+    when the turn had none).
     """
     conn = get_db()
     if limit is None:
         rows = conn.execute(
-            "SELECT role, content, created_at FROM qa_messages "
+            "SELECT role, content, images, created_at FROM qa_messages "
             "WHERE session_id = ? AND user_id = ? ORDER BY id ASC",
             (session_id, user_id),
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_row_to_message(r) for r in rows]
     rows = conn.execute(
-        "SELECT role, content, created_at FROM qa_messages "
+        "SELECT role, content, images, created_at FROM qa_messages "
         "WHERE session_id = ? AND user_id = ? ORDER BY id DESC LIMIT ?",
         (session_id, user_id, limit),
     ).fetchall()
-    return [dict(r) for r in reversed(rows)]
+    return [_row_to_message(r) for r in reversed(rows)]
 
 
 def clear_messages(session_id: str, user_id: str) -> bool:
