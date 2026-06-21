@@ -36,6 +36,8 @@ export default function AlgorithmSolver() {
   const [solution, setSolution] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
+  // Read-only review mode: re-opened from collection, showing the saved flow.
+  const [reviewing, setReviewing] = useState(false);
 
   // Loading states
   const [solving, setSolving] = useState(false);
@@ -58,6 +60,19 @@ export default function AlgorithmSolver() {
       setProblemText(s.problemText);
       setSourceUrl(s.sourceUrl || "");
       setLanguage(s.language || "python");
+      // Restore the full saved flow so re-opening a collected card shows the
+      // original solve + chat (read-only review), not just the problem text.
+      // No sessionId is set, so the save/chat/restart actions stay hidden.
+      if (s.solution || (s.conversationHistory && s.conversationHistory.length)) {
+        setSolution(s.solution || "");
+        setChatMessages(
+          (s.conversationHistory || []).map((m: any) => ({
+            role: m.role === "user" ? "user" : "assistant",
+            content: m.content,
+          })),
+        );
+        setReviewing(true);
+      }
     }
   }, [location.state]);
 
@@ -73,6 +88,7 @@ export default function AlgorithmSolver() {
     setSolution("");
     setChatMessages([]);
     setSessionId(null);
+    setReviewing(false);
     try {
       const data = await solveAlgorithm(problemText.trim(), language, sourceUrl.trim(), {
         onProgress: (msg) => setSolveProgress(msg),
@@ -148,6 +164,7 @@ export default function AlgorithmSolver() {
     setSessionId(null);
     setChatInput("");
     setShowSave(false);
+    setReviewing(false);
   };
 
   return (
@@ -200,7 +217,7 @@ export default function AlgorithmSolver() {
               {solving ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
               {solving ? "解题中..." : "开始解题"}
             </Button>
-            {sessionId && (
+            {(sessionId || reviewing) && (
               <Button variant="ghost" size="sm" onClick={handleReset} className="shrink-0 self-start sm:self-center">
                 <X size={14} /> 重新开始
               </Button>
@@ -210,13 +227,14 @@ export default function AlgorithmSolver() {
       </Card>
 
       {/* Solution Display */}
-      {(solution || solving) && (
+      {(solution || solving || reviewing) && (
         <div className="animate-fade-in">
           {/* Solution Header */}
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <h2 className="text-lg font-semibold">AI 解答</h2>
               <Badge variant="secondary">{LANGUAGES.find((l) => l.value === language)?.label}</Badge>
+              {reviewing && <Badge variant="outline">复习模式 · 收藏记录</Badge>}
             </div>
             {sessionId && !solving && (
               <Button

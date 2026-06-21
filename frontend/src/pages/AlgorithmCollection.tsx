@@ -128,6 +128,10 @@ export default function AlgorithmCollection() {
         problemText: item.problem_text,
         sourceUrl: item.source_url,
         language: item.language,
+        // Restore the full saved session so re-opening shows the original
+        // solve + chat flow (read-only review), not just the problem text.
+        solution: item.solution,
+        conversationHistory: item.conversation_history || [],
       },
     });
   };

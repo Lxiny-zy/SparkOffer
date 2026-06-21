@@ -72,7 +72,10 @@ def algorithm_chat(req: AlgorithmChatRequest, user_id: str = Depends(get_current
                 ai_reply = value
 
         session["messages"].append(AIMessage(content=ai_reply))
-        session["solution"] = ai_reply
+        # NOTE: do NOT overwrite session["solution"] here. "solution" is the
+        # first-pass full answer shown as the card's headline; follow-up chat
+        # turns are preserved in full via "messages" (saved as conversation_history).
+        # Overwriting it left the saved card's solution as the last short reply.
         save_live(algorithm_sessions, req.session_id, "algorithm", user_id, session)
         yield sse_event({"type": "complete", "data": {"session_id": req.session_id, "message": ai_reply}})
         yield sse_event({"type": "done"})

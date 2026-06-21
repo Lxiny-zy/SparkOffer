@@ -198,9 +198,10 @@ async def ingest_qa_card_to_knowledge(card_content: str, user_id: str) -> dict:
     if not topics:
         return {"ok": False, "topic": None, "reason": "暂无可用知识库主题"}
 
-    # 1) classify into ONE existing topic key (or NONE). Minimal reasoning — trivial routing;
+    # 1) classify into ONE existing topic key (or NONE). Low reasoning — trivial routing;
     #    high effort would only add latency (and a long "thinking" wait on the button).
-    classify_llm = get_langchain_llm(reasoning_effort="minimal")
+    #    (Not "minimal": some models don't expose that tier, so "low" is the safe floor.)
+    classify_llm = get_langchain_llm(reasoning_effort="low")
     topic_list = "\n".join(f"- {k}: {v.get('name', k)}" for k, v in topics.items())
     # Window-derived budget for the card text instead of the old [:3000] / [:8000]
     # char cuts. Helper trims card_content to fit whatever room the template leaves.

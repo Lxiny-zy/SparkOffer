@@ -539,8 +539,7 @@ export default function QAArena() {
                 disabled={isStreaming || isSummarizing}
                 title="知识卡片思考强度：低档更快，高档更精炼（简单对话用低档即可）"
               >
-                <option value="" style={{ color: "#000" }}>思考档·默认</option>
-                <option value="minimal" style={{ color: "#000" }}>minimal·最快</option>
+                <option value="" style={{ color: "#000" }}>不思考·默认</option>
                 <option value="low" style={{ color: "#000" }}>low·快</option>
                 <option value="medium" style={{ color: "#000" }}>medium·均衡</option>
                 <option value="high" style={{ color: "#000" }}>high·最精</option>
