@@ -147,6 +147,57 @@ MAP_PROMPT = """以下是一段较长技术问答对话的第 {idx}/{total} 段�
 {conversation}"""
 
 
+REDUCE_PROMPT = """下面是同一段技术问答对话被分段整理出的多份**笔记片段**（用 --- 分隔）。请把它们**合并**成一张统一、无重复的知识卡片。
+
+合并要求：
+1. **同一知识点只保留一处**：多个片段讲到同一概念时合并条目，不要重复罗列。
+2. **完整保留所有表格与代码**：任一片段出现的 Markdown 表格 / 代码块都要并入结果并补全表头与列；讲同一主题的对比表合并成一张。
+3. **不新增、不臆造**：只整合片段里已有的内容，不补充片段之外的知识。
+4. 按下面的小节组织，**所有片段都没涉及的小节整节省略**。
+
+## 笔记片段
+
+{notes}
+
+## 输出要求
+
+严格输出 Markdown（不要用代码块包裹整份输出）：
+
+# {{自动识别的主题名称}}
+> {date} 问答演练总结
+
+## 速览
+（2-4 句概括这次对话覆盖了哪些问题、核心结论）
+
+## 核心知识点
+### 1. {{知识点名称}}
+- **定义**: 一两句精确定义
+- **原理 / 关键要点**: 关键要点，可多条
+- **易错点**: 常见误解或易混点
+
+（合并后每个知识点只列一次，不重复）
+
+## 横向对比 / 选型
+（把各片段的对比表合并、补全；没有则**省略本节**）
+
+| 维度 | 方案 A | 方案 B |
+|------|--------|--------|
+| ...  | ...    | ...    |
+
+## 关键代码 / 实现要点
+（保留片段中的核心代码块；没有则**省略本节**）
+
+## 系统设计与权衡
+（设计/架构类讨论：需求拆解 → 方案选型 → 权衡 → 坑点；没有则**省略本节**）
+
+## 高频追问
+- Q: {{对话中出现的面试常考问题}}?
+- A: {{简洁回答}}
+
+## 待巩固 / 薄弱点
+（基于对话暴露的困惑；没有则**省略本节**）"""
+
+
 # ── Multimodal image attachments ──
 # Uploaded images are saved as files under the per-user data dir (the DB stores
 # only filenames, kept lean) and re-encoded to base64 data URLs when fed to the
@@ -287,10 +338,11 @@ async def _build_memory_context(user_message: str, user_id: str) -> str:
 
 # Per-message caps when feeding the conversation to the summarizer.
 # User turns are short questions; AI turns carry the substance (tables/code/design),
-# so they get a much larger budget. The old flat 1000-char cut destroyed long answers
-# and sliced Markdown tables mid-row.
-QA_USER_CAP = 2000
-QA_ASSISTANT_CAP = 16000
+# so they get a much larger budget. With a large model context (≥256k) these are
+# raised to near-pass-through — a deep design answer used to get cut at 16k chars,
+# losing exactly the trade-offs/pitfalls section. They only act as a runaway safety now.
+QA_USER_CAP = 6000
+QA_ASSISTANT_CAP = 48000
 
 
 def _truncate_on_boundary(text: str, cap: int) -> str:
@@ -635,8 +687,13 @@ async def stream_qa_regenerate(
         yield event
 
 
-SINGLE_PASS_BUDGET = 40000  # formatted-conversation chars that still fit one summary call
-CHUNK_SIZE = 12000          # per-chunk size for the map phase on longer conversations
+# With a large model context (≥256k) almost every real session fits in ONE pass —
+# both faster (a single streamed call, no sequential map-reduce) and higher quality
+# (full fidelity, no summary-of-summaries loss). Map-reduce is now a rare fallback for
+# extreme sessions; its chunks are large and mapped in parallel.
+SINGLE_PASS_BUDGET = 120000  # formatted-conversation chars that still go single-pass
+CHUNK_SIZE = 48000           # per-chunk size for the (rare) map phase
+MAP_CONCURRENCY = 4          # parallel map calls (bounded so a burst can't trip rate limits)
 
 
 def _chunk_conversation(messages: list[dict], chunk_size: int = CHUNK_SIZE) -> list[str]:
@@ -699,17 +756,36 @@ async def stream_generate_summary(
 
     conversation = _format_conversation(messages)
 
-    # Long conversations: map-reduce so no part of the session is silently dropped.
+    # Almost all sessions fit one pass (large model context) → a single streamed call,
+    # full fidelity. Only an extreme session falls back to map-reduce — and then the
+    # chunks are mapped in PARALLEL (bounded) and merged with a dedicated reduce prompt,
+    # so it's both faster and cleaner than the old sequential summary-of-summaries.
     if len(conversation) > SINGLE_PASS_BUDGET:
         chunks = _chunk_conversation(messages)
-        notes: list[str] = []
-        for i, chunk in enumerate(chunks, 1):
-            yield f"data: {json.dumps({'type': 'progress', 'message': f'正在整理第 {i}/{len(chunks)} 段...'}, ensure_ascii=False)}\n\n"
-            notes.append(await _map_chunk_to_notes(chunk, i, len(chunks), reasoning_effort=reasoning_effort))
-        conversation = "\n\n---\n\n".join(notes)
-        yield f"data: {json.dumps({'type': 'progress', 'message': '正在汇总知识卡片...'}, ensure_ascii=False)}\n\n"
+        total = len(chunks)
+        yield f"data: {json.dumps({'type': 'progress', 'message': f'对话较长，正在并行整理 {total} 段...'}, ensure_ascii=False)}\n\n"
 
-    prompt_text = SUMMARY_USER_TEMPLATE.format(conversation=conversation, date=today)
+        sem = asyncio.Semaphore(MAP_CONCURRENCY)
+
+        async def _map_one(idx: int, chunk: str):
+            async with sem:
+                return idx, await _map_chunk_to_notes(chunk, idx, total, reasoning_effort=reasoning_effort)
+
+        tasks = [asyncio.ensure_future(_map_one(i, c)) for i, c in enumerate(chunks, 1)]
+        results: dict[int, str] = {}
+        done = 0
+        # as_completed: emit progress as each chunk finishes (keeps the SSE alive and
+        # shows real progress) while they run concurrently; order restored via the index.
+        for fut in asyncio.as_completed(tasks):
+            idx, note = await fut
+            results[idx] = note
+            done += 1
+            yield f"data: {json.dumps({'type': 'progress', 'message': f'正在整理段落 {done}/{total}...'}, ensure_ascii=False)}\n\n"
+        notes = [results[i] for i in range(1, total + 1)]
+        yield f"data: {json.dumps({'type': 'progress', 'message': '正在汇总知识卡片...'}, ensure_ascii=False)}\n\n"
+        prompt_text = REDUCE_PROMPT.format(notes="\n\n---\n\n".join(notes), date=today)
+    else:
+        prompt_text = SUMMARY_USER_TEMPLATE.format(conversation=conversation, date=today)
 
     content = ""
     try:
