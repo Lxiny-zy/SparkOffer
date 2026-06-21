@@ -59,7 +59,17 @@ def _get_knowledge_for_jd(jd_text: str, user_id: str) -> str:
             [(k, "核心知识点 面试常见问题") for k in matched[:5]], user_id, top_k=2,
         )
         chunks = [c for topic_chunks in per_topic for c in topic_chunks]
-        result = "\n\n---\n\n".join(c[:500] for c in chunks)[:3000] if chunks else ""
+        if chunks:
+            # Token-budget knowledge (~40% of the input window) instead of the old
+            # per-chunk [:500] + total [:3000] two-stage char starvation. Cached below
+            # and shared by the preview / question-gen / eval prompts.
+            from backend.context_assembler import ContextBudget, Section, resolve_input_budget
+            kb_budget = max(1000, int(resolve_input_budget() * 0.4))
+            result = ContextBudget(kb_budget).pack(
+                [Section("kb", "\n\n---\n\n".join(chunks), priority=1, min_tokens=200)]
+            ).get("kb")
+        else:
+            result = ""
         cache.set_json(ck, result, _JD_KNOWLEDGE_TTL)
         return result
     except Exception as e:
@@ -84,7 +94,12 @@ def _get_resume_context(user_id: str, use_resume: bool) -> tuple[str, bool]:
             user_id,
             top_k=4,
         )
-        return str(resume_context)[:5000], True
+        # Token-budget the resume context (~30% of the input window) instead of [:5000].
+        from backend.context_assembler import ContextBudget, Section, resolve_input_budget
+        fit = ContextBudget(max(1000, int(resolve_input_budget() * 0.3))).pack(
+            [Section("resume", str(resume_context), priority=1, min_tokens=200)]
+        ).get("resume")
+        return fit, True
     except Exception as exc:
         logger.warning(f"Failed to load resume context for JD prep: {exc}")
         return "简历检索失败，本次按无简历联动处理", False

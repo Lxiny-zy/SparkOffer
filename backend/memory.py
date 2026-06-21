@@ -869,11 +869,23 @@ async def update_profile_after_interview(
             for s in scores
         )
 
+    # Window-derived budget for the two big extraction inputs (profile + transcript)
+    # instead of the old [:2000]-char profile / last-60-lines transcript cuts. The
+    # transcript is the primary extraction signal so it wins the budget; the prior
+    # profile is secondary.
+    from backend.context_assembler import ContextBudget, Section, resolve_input_budget, count_tokens
+    _fixed_extract = EXTRACT_PROMPT.format(
+        current_profile="", mode=mode, topic=topic or "综合", transcript="", scores=score_text or "无",
+    )
+    _ex_packed = ContextBudget(max(1000, resolve_input_budget() - count_tokens(_fixed_extract))).pack([
+        Section("transcript", "\n".join(transcript_lines), priority=1, min_tokens=300),
+        Section("profile", json.dumps(profile, ensure_ascii=False), priority=2, min_tokens=200),
+    ])
     extract_msg = EXTRACT_PROMPT.format(
-        current_profile=json.dumps(profile, ensure_ascii=False)[:2000],
+        current_profile=_ex_packed.get("profile"),
         mode=mode,
         topic=topic or "综合",
-        transcript="\n".join(transcript_lines[-60:]),  # last 60 lines
+        transcript=_ex_packed.get("transcript"),
         scores=score_text or "无",
     )
 

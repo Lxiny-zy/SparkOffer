@@ -15,10 +15,10 @@ from backend.redis_cache import get_cache
 
 logger = logging.getLogger("uvicorn")
 
-# rerank 是轻量 cross-encoder，正常亚秒级返回；read 不必给到 90s。
-# 外层 drill 总预算仅 100s（drill_pipeline.py），rerank 卡满会连带把已检索好的
-# chunk 一起超时丢弃，故把 read 收紧到 30s（connect/write/pool 保持）。
-_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+# rerank 是轻量 cross-encoder，正常亚秒级返回；read 不必给到 90s。外层 drill 总预算
+# 有限，rerank 卡满会连带把已检索好的 chunk 一起超时丢弃，故 read 收紧（默认 30s）。
+# read 在 rerank() 内按 tuning.retrieval.reranker_read_timeout 取值（call-time，
+# 设置界面「检索」可调、热生效）；connect/write/pool 保持小值。
 
 # 送去打分的输入上限（仅影响打分入参，不影响回传的完整原文）：
 # - MAX_RERANK_DOCS: 候选条数上限。调用方传 top_n=len(chunks)，评测 --top-k 50
@@ -141,9 +141,12 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
         "return_documents": False,
     }
 
+    from backend.ai_config import get_retrieval_setting
+    read_to = get_retrieval_setting("reranker_read_timeout")
+
     try:
         client_kw: dict = {
-            "timeout": _TIMEOUT,
+            "timeout": httpx.Timeout(connect=10.0, read=read_to, write=10.0, pool=10.0),
             "headers": {"User-Agent": "curl/7.88.1"},
             "follow_redirects": True,
         }
@@ -185,7 +188,7 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
         return reordered, "applied"
 
     except httpx.TimeoutException:
-        logger.warning("Reranker timeout (%ds read): query=%r, %d chunks", _TIMEOUT.read, query[:50], len(chunks))
+        logger.warning("Reranker timeout (%ds read): query=%r, %d chunks", read_to, query[:50], len(chunks))
         _report(channel_id, False)
     except httpx.HTTPStatusError as e:
         status = e.response.status_code

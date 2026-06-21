@@ -25,9 +25,6 @@ logger = logging.getLogger("uvicorn")
 # Subtracted from the resolved window so prompt-template overhead and tokenizer
 # drift never push the real request over the model's limit.
 _SAFETY_MARGIN = 2000
-# Mirrors llm_provider's default max_tokens — the output we must leave room for
-# when no channel declares its own.
-_DEFAULT_OUTPUT_RESERVE = 16384
 # Never hand back a budget so small the prompt becomes useless.
 _MIN_INPUT_BUDGET = 4000
 
@@ -100,10 +97,10 @@ def _resolve_window() -> int:
     """Smallest declared input window across enabled LLM channels.
 
     Conservative on purpose: failover may land on any enabled channel, so we
-    budget for the tightest one. Falls back to ``settings.default_context_window``
-    when no channel declares an explicit ``context_window``.
+    budget for the tightest one. Falls back to the runtime
+    ``tuning.default_context_window`` when no channel declares an explicit
+    ``context_window``.
     """
-    from backend.config import settings
     try:
         from backend.channel_manager import get_all_channels
         windows = [
@@ -115,7 +112,8 @@ def _resolve_window() -> int:
             return min(windows)
     except Exception as e:
         logger.debug("context window resolution fell back to default: %s", e)
-    return settings.default_context_window
+    from backend.ai_config import get_tuning
+    return get_tuning("default_context_window")
 
 
 def _resolve_output_reserve() -> int:
@@ -131,7 +129,8 @@ def _resolve_output_reserve() -> int:
             return max(reserves)
     except Exception:
         pass
-    return _DEFAULT_OUTPUT_RESERVE
+    from backend.ai_config import get_tuning
+    return get_tuning("max_output_tokens")
 
 
 def resolve_input_budget(reserve_output: int | None = None) -> int:

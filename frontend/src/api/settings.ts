@@ -110,3 +110,21 @@ export async function getChannelsHealth(): Promise<any> {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
+
+// ── Runtime tuning (context budget + retrieval) ──
+
+export async function getTuning(): Promise<any> {
+  const res = await authFetch(`${API_BASE}/settings/tuning`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function saveTuning(config: any): Promise<any> {
+  const res = await authFetch(`${API_BASE}/settings/tuning`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}

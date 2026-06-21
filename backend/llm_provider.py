@@ -9,7 +9,7 @@ import httpx
 from langchain_openai import ChatOpenAI
 from llama_index.llms.openai_like import OpenAILike
 
-from backend.ai_config import get_effective, get_config_version
+from backend.ai_config import get_effective, get_config_version, get_tuning
 
 logger = logging.getLogger("uvicorn")
 
@@ -56,6 +56,17 @@ _EMBED_INDEX_HTTP_TIMEOUT = httpx.Timeout(
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 _MAX_SAME_CHANNEL_ATTEMPTS = 2          # 1 original + 1 retry
 _SAME_CHANNEL_BACKOFF_SECONDS = 1.5
+
+
+def _default_max_output() -> int:
+    """Fallback LLM output cap (max_tokens) when a channel declares none.
+
+    Reads the runtime ``tuning.max_output_tokens`` at call time, so a settings
+    save hot-applies. Replaces the old hard-coded ``16384`` that was duplicated
+    across every LLM builder — a reasoning model's max_tokens budget covers
+    thinking + visible output, so the default is raised (32k) and centrally tunable.
+    """
+    return get_tuning("max_output_tokens")
 
 # 上游可接受的 reasoning_effort 档位。当某 provider 新增档位（如 OpenAI gpt-5.x 的
 # "xhigh"）时在此集合补一项即可；集合外的取值会被 _resolve_reasoning_effort 丢成 None。
@@ -217,7 +228,7 @@ class ResilientChatModel:
             api_key=channel.get("api_key", ""),
             base_url=channel.get("api_base", ""),
             temperature=float(channel.get("temperature", 0.7)),
-            max_tokens=int(channel.get("max_tokens") or 16384),
+            max_tokens=int(channel.get("max_tokens") or _default_max_output()),
             http_client=sync_c,
             http_async_client=async_c,
             default_headers=_CUSTOM_HEADERS,
@@ -339,7 +350,7 @@ def get_langchain_llm(tier: str | None = None, reasoning_effort: str | None = No
         api_key=get_effective("llm", "api_key"),
         base_url=get_effective("llm", "api_base"),
         temperature=float(get_effective("llm", "temperature") or 0.7),
-        max_tokens=16384,
+        max_tokens=_default_max_output(),
         http_client=sync_c,
         http_async_client=async_c,
         default_headers=_CUSTOM_HEADERS,
@@ -363,7 +374,7 @@ def get_llama_llm():
                 _llama_llm_instance = OpenAILike(
                     model=ch["model"], api_key=ch["api_key"], api_base=ch["api_base"],
                     temperature=float(ch.get("temperature", 0.7)),
-                    max_tokens=int(ch.get("max_tokens") or 16384),
+                    max_tokens=int(ch.get("max_tokens") or _default_max_output()),
                     timeout=float(ch.get("timeout")) if ch.get("timeout") else 240.0,
                     is_chat_model=True,
                     additional_kwargs=add_kw,
@@ -379,7 +390,7 @@ def get_llama_llm():
             api_key=get_effective("llm", "api_key"),
             api_base=get_effective("llm", "api_base"),
             temperature=float(get_effective("llm", "temperature") or 0.7),
-            max_tokens=16384,
+            max_tokens=_default_max_output(),
             timeout=240.0,
             is_chat_model=True,
             additional_kwargs=add_kw,

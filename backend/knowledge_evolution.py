@@ -202,9 +202,20 @@ async def ingest_qa_card_to_knowledge(card_content: str, user_id: str) -> dict:
     #    high effort would only add latency (and a long "thinking" wait on the button).
     classify_llm = get_langchain_llm(reasoning_effort="minimal")
     topic_list = "\n".join(f"- {k}: {v.get('name', k)}" for k, v in topics.items())
+    # Window-derived budget for the card text instead of the old [:3000] / [:8000]
+    # char cuts. Helper trims card_content to fit whatever room the template leaves.
+    from backend.context_assembler import ContextBudget, Section, resolve_input_budget, count_tokens
+
+    def _fit_card(template_filled_blank: str) -> str:
+        budget = max(1000, resolve_input_budget() - count_tokens(template_filled_blank))
+        return ContextBudget(budget).pack([Section("card", card_content, priority=1)]).get("card")
+
     try:
         resp = await classify_llm.ainvoke([HumanMessage(
-            content=QA_TOPIC_CLASSIFY_PROMPT.format(topics=topic_list, card=card_content[:3000])
+            content=QA_TOPIC_CLASSIFY_PROMPT.format(
+                topics=topic_list,
+                card=_fit_card(QA_TOPIC_CLASSIFY_PROMPT.format(topics=topic_list, card="")),
+            )
         )])
         raw_key = (resp.content or "").strip()
     except Exception as e:
@@ -222,7 +233,7 @@ async def ingest_qa_card_to_knowledge(card_content: str, user_id: str) -> dict:
     clean_llm = get_langchain_llm(reasoning_effort="low")
     try:
         resp2 = await clean_llm.ainvoke([HumanMessage(
-            content=QA_KNOWLEDGE_CLEAN_PROMPT.format(card=card_content[:8000])
+            content=QA_KNOWLEDGE_CLEAN_PROMPT.format(card=_fit_card(QA_KNOWLEDGE_CLEAN_PROMPT.format(card="")))
         )])
         cleaned = (resp2.content or "").strip()
     except Exception as e:

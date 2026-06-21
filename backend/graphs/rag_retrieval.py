@@ -60,9 +60,9 @@ async def retrieve_for_drill(
     weak_points: list[str],
     fallback_query: str,
     *,
-    per_query_top_k: int = PER_QUERY_TOP_K,
-    final_top_n: int = FINAL_TOP_N,
-    timeout: float = 45.0,
+    per_query_top_k: int | None = None,
+    final_top_n: int | None = None,
+    timeout: float | None = None,
 ) -> tuple[list[str], RetrievalStats]:
     """Run the Phase 3 retrieval pipeline.
 
@@ -77,13 +77,21 @@ async def retrieve_for_drill(
         (chunks, stats) where chunks is the final fused+deduped list and
         stats summarizes what happened (for the timeline UI).
     """
+    # Resolve retrieval knobs at call time so a settings save hot-applies. An
+    # explicit arg (e.g. from an eval harness) still wins over the configured value.
+    from backend.ai_config import get_retrieval_setting
+    per_query_top_k = per_query_top_k or get_retrieval_setting("per_query_top_k")
+    final_top_n = final_top_n or get_retrieval_setting("final_top_n")
+    timeout = timeout or get_retrieval_setting("per_query_timeout")
+    embed_concurrency = get_retrieval_setting("embed_concurrency")
+
     queries: list[str] = list(weak_points[:5])  # cap, prevent fanout abuse
     if not queries:
         queries.append(fallback_query)
     elif len(queries) < 3:
         queries.append(fallback_query)
 
-    sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
+    sem = asyncio.Semaphore(embed_concurrency)
 
     async def _bounded(query: str):
         async with sem:
@@ -194,6 +202,8 @@ async def _semantic_dedup(chunks: list[str]) -> tuple[list[str], int, int, list]
     if not chunks:
         return [], 0, 0, []
 
+    from backend.ai_config import get_retrieval_setting
+    threshold = get_retrieval_setting("dedup_threshold")
     embeddings, hits, misses = await _embed_many(chunks)
     kept: list[str] = []
     kept_embs: list = []
@@ -210,7 +220,7 @@ async def _semantic_dedup(chunks: list[str]) -> tuple[list[str], int, int, list]
             kept_matrix = emb[np.newaxis, :]
             continue
         sims = _cosine_similarity(emb, kept_matrix)
-        if float(np.max(sims)) >= SIMILARITY_THRESHOLD:
+        if float(np.max(sims)) >= threshold:
             continue
         kept.append(chunk)
         kept_embs.append(emb)
@@ -261,7 +271,8 @@ async def _embed_many(texts: list[str]) -> tuple[list[np.ndarray | None], int, i
     # SAME embedding key, and an unbounded gather (one task per miss, easily 20+
     # on a cold cache) tripped the per-key throttle, stalling every request to
     # its timeout and silently voiding dedup.
-    sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
+    from backend.ai_config import get_retrieval_setting
+    sem = asyncio.Semaphore(get_retrieval_setting("embed_concurrency"))
 
     def _embed_and_cache(text: str) -> np.ndarray:
         # Both the sync LlamaIndex embed call and the cache write run in the

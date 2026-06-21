@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from backend.channel_manager import get_all_channels
+from backend.ai_config import get_tuning
 
 logger = logging.getLogger("uvicorn")
 
@@ -150,7 +151,10 @@ async def _ask_channel(channel: dict, prompt: str) -> tuple[float | None, str]:
             api_key=channel.get("api_key", ""),
             base_url=channel.get("api_base", ""),
             temperature=0.0,
-            max_tokens=300,
+            # Respect the channel's real output cap (or the tuning default); the old
+            # hard 300 starved reasoning models — thinking tokens alone exceed it, so
+            # the judge returned empty and every vote was discarded.
+            max_tokens=int(channel.get("max_tokens") or get_tuning("max_output_tokens")),
             http_client=httpx.Client(timeout=httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=30.0)),
             http_async_client=httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=30.0)),
         )

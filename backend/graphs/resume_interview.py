@@ -12,12 +12,10 @@ from backend.llm_provider import get_langchain_llm
 from backend.graphs.checkpointer import get_checkpointer
 from backend.indexer import query_resume, gather_topic_contexts, load_topics
 from backend.memory import get_profile_summary
-from backend.context_assembler import resolve_input_budget, count_tokens
+from backend.context_assembler import resolve_input_budget, count_tokens, ContextBudget, Section
 from backend.prompts.interviewer import RESUME_INTERVIEWER_SYSTEM, RESUME_TURN_CONTEXT
 
 logger = logging.getLogger("uvicorn")
-
-_KNOWLEDGE_LIMIT = 3000
 
 
 def _retrieve_all_topic_knowledge(user_id: str, query: str = "") -> str:
@@ -37,7 +35,13 @@ def _retrieve_all_topic_knowledge(user_id: str, query: str = "") -> str:
         chunks = [c for topic_chunks in per_topic for c in topic_chunks]
         if not chunks:
             return ""
-        return "\n\n---\n\n".join(c[:500] for c in chunks)[:_KNOWLEDGE_LIMIT]
+        # Token-budget knowledge to a share of the input window (leave room for the
+        # resume + profile prefix and the live conversation history) instead of the
+        # old 3000-char total / 500-char-per-chunk hard cuts.
+        kb_budget = max(1000, int(resolve_input_budget() * 0.4))
+        return ContextBudget(kb_budget).pack(
+            [Section("kb", "\n\n---\n\n".join(chunks), priority=1, min_tokens=200)]
+        ).get("kb")
     except Exception as e:
         logger.warning("Knowledge retrieval for resume interview failed: %s", e)
         return ""

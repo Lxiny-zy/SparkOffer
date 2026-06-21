@@ -39,6 +39,7 @@ from backend.graphs.validators import (
 from backend.indexer import safe_retrieve_topic_context, topic_index_exists
 from backend.llm_provider import get_langchain_llm
 from backend.context_assembler import ContextBudget, Section, resolve_input_budget, count_tokens
+from backend.ai_config import get_retrieval_setting
 from backend.live_store import drill_sessions, save_live
 from backend.memory import get_profile_summary_for_drill, get_topic_context_for_drill, _load_profile
 from backend.prompts.interviewer import (
@@ -267,19 +268,20 @@ class DrillPipeline:
                     weak_points=all_weak,
                     fallback_query=fallback_query,
                 ),
-                timeout=100.0,
+                timeout=get_retrieval_setting("end_to_end_timeout"),
             )
         except asyncio.TimeoutError:
-            logger.warning("Phase 3 RAG exceeded 100s budget; continuing with empty context")
+            logger.warning("Phase 3 RAG exceeded its end-to-end budget; continuing with empty context")
             chunks, stats = [], None
         except Exception as exc:
             logger.warning("Phase 3 RAG failed (%s); falling back to empty context", exc)
             chunks, stats = [], None
 
-        # Join with a generous char safety ceiling only — the real bound is the
-        # token budget applied in _stage_generate (ContextBudget), so the model's
-        # actual input window governs how much knowledge survives, not a fixed cut.
-        knowledge_ctx = "\n\n---\n\n".join(chunks)[:12000]
+        # No char ceiling here — the real bound is the token budget applied in
+        # _stage_generate (ContextBudget), so the model's actual input window
+        # governs how much knowledge survives. Chunks are already bounded
+        # (final_top_n × per-chunk token cap), so the joined string can't blow up.
+        knowledge_ctx = "\n\n---\n\n".join(chunks)
         self.ctx["knowledge_ctx"] = knowledge_ctx
         self.ctx["knowledge_chunks"] = len(chunks)
         self.ctx["retrieval_queries"] = stats.queries if stats else 0
@@ -570,9 +572,21 @@ class DrillPipeline:
     async def _generate_cold_start(self) -> AsyncGenerator[str, None]:
         """Phase 7b: shorter diagnostic prompt for never-trained users."""
         topic_name = self.ctx["topic_name"]
+        knowledge_raw = self.ctx.get("knowledge_ctx", "")
+        # Cold start keeps knowledge deliberately lighter than the personalized path
+        # (a diagnostic prompt needs less), but window-derived via ContextBudget rather
+        # than a fixed char cut — half the remaining input budget after the template.
+        fixed_cold = COLD_START_DRILL_PROMPT.format(
+            topic_name=topic_name, knowledge_context="",
+            rag_quality_hint=self._rag_quality_hint(),
+        )
+        cold_budget = max(1000, (resolve_input_budget() - count_tokens(fixed_cold)) // 2)
+        cold_packed = ContextBudget(cold_budget).pack([
+            Section("knowledge", knowledge_raw, priority=1, min_tokens=100),
+        ])
         prompt = COLD_START_DRILL_PROMPT.format(
             topic_name=topic_name,
-            knowledge_context=self.ctx.get("knowledge_ctx", "")[:2500],  # 比正常更短
+            knowledge_context=cold_packed.get("knowledge"),
             rag_quality_hint=self._rag_quality_hint(),
         )
 

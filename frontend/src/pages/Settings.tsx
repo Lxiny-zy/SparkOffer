@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   Bot, Database, Mic, Cloud, Eye, EyeOff, Loader2,
-  CheckCircle2, XCircle, Save, RotateCcw, User, Lock, Activity, ListOrdered,
+  CheckCircle2, XCircle, Save, RotateCcw, User, Lock, Activity, ListOrdered, SlidersHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -16,6 +16,7 @@ import {
 } from "@/api/settings";
 import { useAuth } from "@/contexts/AuthContext";
 import ChannelManager from "@/components/ChannelManager";
+import TuningSettings from "@/components/TuningSettings";
 
 // ─────────────────────────────────────────────────────────────
 // 网关健康仪表盘 ── L1 hero
@@ -495,6 +496,24 @@ export default function Settings() {
         </CardHeader>
         <CardContent>
           <ChannelManager section="reranker" />
+        </CardContent>
+      </Card>
+
+      {/* 输出 & 检索调参 */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center">
+              <SlidersHorizontal className="w-5 h-5 text-primary" />
+            </div>
+            <div>
+              <CardTitle className="text-base">输出 & 检索调参</CardTitle>
+              <CardDescription>输出上限 / 窗口兜底与 RAG 检索档位（保存即全局生效，留空回退默认）</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <TuningSettings />
         </CardContent>
       </Card>
 

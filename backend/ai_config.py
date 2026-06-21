@@ -295,3 +295,144 @@ def get_all_effective() -> dict:
 def get_raw_value(section: str, key: str):
     """Return the raw (unmasked) effective value. For internal use only."""
     return get_effective(section, key)
+
+
+# ── Runtime tuning: context budget + retrieval knobs ─────────────────────────
+# Centralizes magic numbers that used to live as scattered module constants
+# (LLM output cap, fallback context window, the RAG retrieval knobs). Stored
+# under the "tuning" key of ai_config.json. The resolvers below apply defaults
+# AND clamp to a safe range, and are meant to be read at CALL TIME so a settings
+# save hot-applies on the next request (no restart). "Empty/missing → default"
+# is the rule everywhere: defaults are a floor, never the only source.
+
+RETRIEVAL_PRESETS: dict[str, dict] = {
+    "fast":     {"per_query_top_k": 3, "final_top_n": 6,  "embed_concurrency": 2,
+                 "dedup_threshold": 0.85, "end_to_end_timeout": 40,
+                 "per_query_timeout": 20, "reranker_read_timeout": 15},
+    "balanced": {"per_query_top_k": 5, "final_top_n": 10, "embed_concurrency": 2,
+                 "dedup_threshold": 0.85, "end_to_end_timeout": 100,
+                 "per_query_timeout": 45, "reranker_read_timeout": 30},
+    "thorough": {"per_query_top_k": 8, "final_top_n": 15, "embed_concurrency": 3,
+                 "dedup_threshold": 0.88, "end_to_end_timeout": 150,
+                 "per_query_timeout": 60, "reranker_read_timeout": 45},
+}
+
+# (min, max) clamp per retrieval key — an operator typo must not wedge retrieval.
+_RETRIEVAL_CLAMP: dict[str, tuple[float, float]] = {
+    "per_query_top_k": (1, 20),
+    "final_top_n": (1, 50),
+    "embed_concurrency": (1, 16),
+    "dedup_threshold": (0.5, 0.99),
+    "end_to_end_timeout": (10, 600),
+    "per_query_timeout": (5, 300),
+    "reranker_read_timeout": (5, 120),
+}
+_RETRIEVAL_INT_KEYS = {
+    "per_query_top_k", "final_top_n", "embed_concurrency",
+    "end_to_end_timeout", "per_query_timeout", "reranker_read_timeout",
+}
+
+TUNING_DEFAULTS: dict = {
+    "max_output_tokens": 32768,        # output reserve / per-call max_tokens fallback
+    "default_context_window": 200000,  # used when a channel declares no context_window
+    "retrieval": dict(RETRIEVAL_PRESETS["balanced"]),
+}
+_TUNING_CLAMP: dict[str, tuple[int, int]] = {
+    "max_output_tokens": (256, 200000),
+    "default_context_window": (1000, 2_000_000),
+}
+
+
+def _clamp(val, lo, hi):
+    return max(lo, min(hi, val))
+
+
+def get_tuning(key: str, default=None):
+    """Resolve a scalar tuning value (``max_output_tokens`` / ``default_context_window``).
+
+    Reads the ai_config.json "tuning" overlay, falls back to ``TUNING_DEFAULTS``
+    (then ``default``), and clamps to a safe range. Read at call time.
+    """
+    with _lock:
+        raw = (_cache.get("tuning") or {}).get(key)
+    if raw is None or raw == "":
+        raw = TUNING_DEFAULTS.get(key, default)
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return TUNING_DEFAULTS.get(key, default)
+    if key in _TUNING_CLAMP:
+        lo, hi = _TUNING_CLAMP[key]
+        val = int(_clamp(val, lo, hi))
+    return val
+
+
+def get_retrieval_setting(key: str):
+    """Resolve one retrieval knob (overlay → balanced default), clamped to range.
+
+    Int-valued keys come back as ``int``; ``dedup_threshold`` as ``float``.
+    """
+    default = RETRIEVAL_PRESETS["balanced"].get(key)
+    with _lock:
+        raw = ((_cache.get("tuning") or {}).get("retrieval") or {}).get(key)
+    if raw is None or raw == "":
+        raw = default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        val = float(default)
+    if key in _RETRIEVAL_CLAMP:
+        lo, hi = _RETRIEVAL_CLAMP[key]
+        val = _clamp(val, lo, hi)
+    return int(val) if key in _RETRIEVAL_INT_KEYS else float(val)
+
+
+def get_tuning_config() -> dict:
+    """Full resolved tuning for the settings UI: current values + defaults + presets."""
+    with _lock:
+        retrieval_overlay = dict((_cache.get("tuning") or {}).get("retrieval") or {})
+    values = {
+        "max_output_tokens": get_tuning("max_output_tokens"),
+        "default_context_window": get_tuning("default_context_window"),
+        "retrieval": {
+            "preset": retrieval_overlay.get("preset", "balanced"),
+            **{k: get_retrieval_setting(k) for k in RETRIEVAL_PRESETS["balanced"]},
+        },
+    }
+    return {"values": values, "defaults": TUNING_DEFAULTS, "presets": RETRIEVAL_PRESETS}
+
+
+def save_tuning(cfg: dict):
+    """Merge tuning overlay into cache, write to disk, bump version, reload.
+
+    Mirrors save_ai_config/save_channels: mutate under the lock, then reload the
+    channel manager OUTSIDE the lock. Empty/None values delete the key so it
+    reverts to the default.
+    """
+    global _cache, _config_version
+    with _lock:
+        existing = dict(_cache.get("tuning") or {})
+        for key in ("max_output_tokens", "default_context_window"):
+            if key in cfg:
+                v = cfg[key]
+                if v is None or v == "":
+                    existing.pop(key, None)
+                else:
+                    existing[key] = int(v)
+        if isinstance(cfg.get("retrieval"), dict):
+            r_in = cfg["retrieval"]
+            r_existing = dict(existing.get("retrieval") or {})
+            if "preset" in r_in:
+                r_existing["preset"] = r_in["preset"] or "balanced"
+            for k in RETRIEVAL_PRESETS["balanced"]:
+                if k in r_in:
+                    v = r_in[k]
+                    if v is None or v == "":
+                        r_existing.pop(k, None)
+                    else:
+                        r_existing[k] = v
+            existing["retrieval"] = r_existing
+        _cache["tuning"] = existing
+        _write_and_bump()
+    _reload_channel_manager()
+    logger.info(f"Tuning config saved (version {_config_version})")

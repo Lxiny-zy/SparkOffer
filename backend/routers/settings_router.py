@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from backend.models import (
     AIConfigUpdate, TestLLMRequest, TestEmbeddingRequest,
     TestASRRequest, TestQiniuRequest,
-    ChannelsConfig, TestChannelRequest,
+    ChannelsConfig, TestChannelRequest, TuningConfig,
 )
 from backend.auth import require_owner
 
@@ -256,5 +256,27 @@ def get_channels_health(user_id: str = Depends(require_owner)):
         "asr": get_health("asr"),
         "reranker": get_health("reranker"),
     }
+
+
+# ── Runtime tuning (context budget + retrieval) ──
+
+@router.get("/settings/tuning")
+def get_tuning_settings(user_id: str = Depends(require_owner)):
+    """Resolved tuning values + defaults + retrieval presets for the settings UI."""
+    from backend.ai_config import get_tuning_config
+    return get_tuning_config()
+
+
+@router.put("/settings/tuning")
+def update_tuning_settings(req: TuningConfig, user_id: str = Depends(require_owner)):
+    """Persist tuning overlay. Read at call time everywhere, so this hot-applies;
+    invalidate_singletons() additionally refreshes the cached LlamaIndex LLM whose
+    max_tokens is built at construction time."""
+    from backend.ai_config import save_tuning
+    from backend.llm_provider import invalidate_singletons
+
+    save_tuning(req.model_dump())
+    invalidate_singletons()
+    return {"ok": True}
 
 

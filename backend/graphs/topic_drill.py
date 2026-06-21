@@ -141,7 +141,14 @@ def generate_drill_questions(topic: str, user_id: str) -> list[dict]:
         if key not in seen:
             seen.add(key)
             unique_chunks.append(c)
-    knowledge_ctx = "\n\n---\n\n".join(unique_chunks)[:5000]
+    # Token-budget knowledge against the model's real input window (give it up to
+    # half the budget) instead of the old [:5000] char cut. The legacy non-stream
+    # path doesn't pack every field like drill_pipeline, so reserve the other half
+    # for the rest of the prompt.
+    from backend.context_assembler import ContextBudget, Section, resolve_input_budget
+    knowledge_ctx = ContextBudget(max(1000, resolve_input_budget() // 2)).pack(
+        [Section("knowledge", "\n\n---\n\n".join(unique_chunks), priority=1, min_tokens=200)]
+    ).get("knowledge")
 
     # Format past insights from vector retrieval
     past_insights_text = "\n".join(
