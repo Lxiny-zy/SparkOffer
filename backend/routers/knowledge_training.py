@@ -54,11 +54,12 @@ async def generate_cards(
 
         yield sse_event({"type": "progress", "message": "正在抽取知识片段..."})
         try:
+            source_count = min(20, max(body.count, body.count * 2))
             sections, effective_seed = await asyncio.to_thread(
                 sample_topic_sections,
                 user_id,
                 body.topic,
-                body.count,
+                source_count,
                 body.mode,
                 body.seed,
             )
@@ -92,7 +93,7 @@ async def generate_cards(
         if llm_failed:
             return
 
-        cards = normalize_training_cards(raw, topic=body.topic, sections=sections)
+        cards = normalize_training_cards(raw, topic=body.topic, sections=sections)[:body.count]
         if not cards:
             yield sse_event({"type": "error", "message": "训练卡片解析失败，请稍后重试。"})
             return

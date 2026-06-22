@@ -27,6 +27,23 @@ MIN_SECTION_CHARS = 80
 SUPPORTED_MODES = {"random", "high_freq"}
 SUPPORTED_DEPTHS = {"basic", "understand", "interview_expression"}
 
+NON_KNOWLEDGE_HEADING_RE = re.compile(
+    r"(目录|大纲|计划|安排|冲刺|进度|打卡|复盘|刷题建议|每天固定时间|今日任务|todo|待办)",
+    re.IGNORECASE,
+)
+SCHEDULE_CONTENT_RE = re.compile(
+    r"(Day\s*\d+|第\s*\d+\s*天|周计划|题量|每天|固定时间|做不出|第二天复盘)",
+    re.IGNORECASE,
+)
+KNOWLEDGE_SIGNAL_RE = re.compile(
+    r"("
+    r"定义|原理|机制|区别|适用|边界|优缺点|场景|流程|步骤|模式|策略|注意|陷阱|复杂度|"
+    r"命令|参数|示例|代码|实现|源码|协议|事务|索引|缓存|锁|并发|线程|进程|内存|网络|"
+    r"Docker|Linux|Python|Java|Redis|SQL|Kubernetes|Service|Ingress|Volume|tmpfs|grep|sed|awk"
+    r")",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class KnowledgeSection:
@@ -78,6 +95,38 @@ def _is_usable_section(content: str) -> bool:
     return True
 
 
+def _section_quality_score(section: KnowledgeSection) -> int:
+    text = f"{section.header_path}\n{section.content}"
+    compact = re.sub(r"\s+", "", section.content)
+    score = 0
+
+    if NON_KNOWLEDGE_HEADING_RE.search(section.header_path):
+        score -= 5
+    if len(SCHEDULE_CONTENT_RE.findall(section.content)) >= 2:
+        score -= 4
+
+    lines = [line.strip() for line in section.content.splitlines() if line.strip()]
+    if lines:
+        short_lines = sum(1 for line in lines if len(line) <= 24)
+        if short_lines / len(lines) > 0.75 and not re.search(r"```|\|", section.content):
+            score -= 2
+
+    signals = KNOWLEDGE_SIGNAL_RE.findall(text)
+    score += min(6, len(signals))
+    if re.search(r"```|\|.+\|", section.content):
+        score += 2
+    if re.search(r"(是什么|为什么|如何|怎么|用于|表示|意味着|区别|对比)", section.content):
+        score += 2
+    if len(compact) >= 220:
+        score += 1
+
+    return score
+
+
+def _is_trainable_section(section: KnowledgeSection) -> bool:
+    return _section_quality_score(section) >= 1
+
+
 def _clip_section(content: str) -> str:
     content = content.strip()
     if len(content) <= MAX_SECTION_CHARS:
@@ -120,10 +169,11 @@ def split_knowledge_sections(filename: str, text: str) -> list[KnowledgeSection]
         return _split_long_plain_text(text, filename)
 
     heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-    stack: list[str] = []
+    stack: list[tuple[int, str]] = []
     current_path = Path(filename).stem
     current_lines: list[str] = []
     sections: list[KnowledgeSection] = []
+    in_fence = False
 
     def flush() -> None:
         content = "\n".join(current_lines).strip()
@@ -131,14 +181,19 @@ def split_knowledge_sections(filename: str, text: str) -> list[KnowledgeSection]
             sections.append(KnowledgeSection(filename, current_path, _clip_section(content)))
 
     for line in text.splitlines():
-        m = heading_re.match(line)
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            current_lines.append(line)
+            continue
+
+        m = heading_re.match(line) if not in_fence else None
         if m:
             flush()
             level = len(m.group(1))
             title = _clean_heading(m.group(2))
-            stack[:] = stack[: max(0, level - 1)]
-            stack.append(title)
-            current_path = " > ".join(stack) if stack else Path(filename).stem
+            stack[:] = [(prev_level, prev_title) for prev_level, prev_title in stack if prev_level < level]
+            stack.append((level, title))
+            current_path = " > ".join(prev_title for _, prev_title in stack) if stack else Path(filename).stem
             current_lines = []
         else:
             current_lines.append(line)
@@ -183,7 +238,9 @@ def collect_topic_sections(user_id: str, topic: str, mode: str = "random") -> li
         if len(sections) >= MAX_CANDIDATE_SECTIONS:
             break
 
-    return _dedupe_sections(sections)
+    deduped = _dedupe_sections(sections)
+    trainable = [section for section in deduped if _is_trainable_section(section)]
+    return trainable or deduped
 
 
 def sample_topic_sections(
@@ -195,7 +252,7 @@ def sample_topic_sections(
 ) -> tuple[list[KnowledgeSection], str]:
     if mode not in SUPPORTED_MODES:
         raise ValueError("当前版本仅支持随机知识点和高频考点模式")
-    count = max(1, min(10, int(count or 5)))
+    count = max(1, min(20, int(count or 5)))
     seed_value = seed or f"{topic}:{time.time_ns()}"
     sections = collect_topic_sections(user_id, topic, mode=mode)
     rnd = random.Random(hashlib.sha256(seed_value.encode("utf-8")).hexdigest())
@@ -268,6 +325,29 @@ def _coerce_text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def _looks_like_low_quality_card(title: str, knowledge: str, example: str, question: str, answer: str) -> bool:
+    text = "\n".join([title, knowledge, example, question, answer])
+    if NON_KNOWLEDGE_HEADING_RE.search(title):
+        return True
+    if len(SCHEDULE_CONTENT_RE.findall(text)) >= 2:
+        return True
+    if len(answer) < 18 or len(question) < 10:
+        return True
+
+    lines = [line.strip() for line in knowledge.splitlines() if line.strip()]
+    if lines:
+        complete = 0
+        for line in lines:
+            if len(line) >= 22 or re.search(r"[，。；：:（）()、`]", line):
+                complete += 1
+        if complete / len(lines) < 0.5:
+            return True
+
+    if not KNOWLEDGE_SIGNAL_RE.search(text):
+        return True
+    return False
+
+
 def _normalize_source_refs(value: Any, fallback: KnowledgeSection) -> list[dict[str, str]]:
     refs: list[dict[str, str]] = []
     if isinstance(value, list):
@@ -299,6 +379,8 @@ def normalize_training_cards(
         question = _coerce_text(item.get("question"))
         answer = _coerce_text(item.get("answer"))
         if not all([title, knowledge, example, question, answer]):
+            continue
+        if _looks_like_low_quality_card(title, knowledge, example, question, answer):
             continue
 
         raw_tags = item.get("tags")
