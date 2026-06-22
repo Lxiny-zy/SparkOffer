@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from "react-router-dom";
 import {
   Home, User, BookOpen, GitFork, Clock, Star, Mic, BriefcaseBusiness, Code2,
   Sun, Moon, LogOut, Menu, X, ChevronLeft, ChevronRight, Settings, MessageSquare, BarChart3,
-  LucideIcon,
+  Brain, LucideIcon,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { cn } from "@/lib/utils";
@@ -34,6 +34,7 @@ const NAV_GROUPS: NavGroup[] = [
       { path: "/", label: "我的基地", icon: Home },
       { path: "/algorithm", label: "算法竞技场", icon: Code2 },
       { path: "/qa-arena", label: "问答演练场", icon: MessageSquare },
+      { path: "/knowledge-training", label: "知识训练场", icon: Brain },
       { path: "/job-prep", label: "定向备战", icon: BriefcaseBusiness },
       { path: "/recording", label: "回放实验室", icon: Mic },
     ],

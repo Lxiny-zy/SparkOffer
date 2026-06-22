@@ -19,6 +19,7 @@ const History = lazy(() => import("./pages/History"));
 const Profile = lazy(() => import("./pages/Profile"));
 const TopicDetail = lazy(() => import("./pages/TopicDetail"));
 const Knowledge = lazy(() => import("./pages/Knowledge"));
+const KnowledgeTraining = lazy(() => import("./pages/KnowledgeTraining"));
 const Graph = lazy(() => import("./pages/Graph"));
 const RecordingAnalysis = lazy(() => import("./pages/RecordingAnalysis"));
 const JobPrep = lazy(() => import("./pages/JobPrep"));
@@ -111,6 +112,7 @@ function AppRoutes() {
                 <Route path="/profile" element={<Profile />} />
                 <Route path="/profile/topic/:topic" element={<TopicDetail />} />
                 <Route path="/knowledge" element={<Knowledge />} />
+                <Route path="/knowledge-training" element={<KnowledgeTraining />} />
                 <Route path="/graph" element={<Graph />} />
                 <Route path="/recording" element={<RecordingAnalysis />} />
                 <Route path="/job-prep" element={<JobPrep />} />

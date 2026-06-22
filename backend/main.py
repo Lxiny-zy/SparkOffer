@@ -9,6 +9,7 @@ from backend.routers import (
     auth, settings_router, resume, interview, recording,
     profile, knowledge, job_prep, algorithm, favorites,
     assistant, graph_router, qa_arena, rag_eval, debug,
+    knowledge_training,
 )
 
 logger = logging.getLogger("uvicorn")
@@ -108,6 +109,7 @@ app.include_router(interview.router)
 app.include_router(recording.router)
 app.include_router(profile.router)
 app.include_router(knowledge.router)
+app.include_router(knowledge_training.router)
 app.include_router(job_prep.router)
 app.include_router(algorithm.router)
 app.include_router(favorites.router)

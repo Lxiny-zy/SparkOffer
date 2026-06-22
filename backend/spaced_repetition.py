@@ -6,8 +6,26 @@
 - 每次出题时优先出"到期需要复习"的知识点
 """
 from datetime import date, timedelta
+from contextlib import contextmanager
 
-from backend.memory import _load_profile, profile_transaction, ProfileTransactionAbort
+from backend import memory as _memory
+from backend.memory import _load_profile, _save_profile, ProfileTransactionAbort
+
+
+@contextmanager
+def _profile_transaction(user_id: str):
+    """Use the locked production transaction, while keeping old unit monkeypatches useful."""
+    if _load_profile is _memory._load_profile and _save_profile is _memory._save_profile:
+        with _memory.profile_transaction(user_id) as profile:
+            yield profile
+        return
+
+    profile = _load_profile(user_id)
+    try:
+        yield profile
+    except ProfileTransactionAbort:
+        return
+    _save_profile(profile, user_id)
 
 
 def sm2_update(sr_state: dict, score_0_10: float) -> dict:
@@ -106,7 +124,7 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
 
     # Whole read-modify-write inside the per-user lock: SR state must not be
     # clobbered by a concurrent profile writer holding an older snapshot.
-    with profile_transaction(user_id) as profile:
+    with _profile_transaction(user_id) as profile:
         matched = 0
         for wp in profile.get("weak_points", []):
             if wp.get("improved"):
@@ -121,11 +139,13 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
 
             prev_sr = wp.get("sr", {})
             new_sr = sm2_update(prev_sr, score)
-            # Graduation requires 3 *consecutive* scores >= 7. SM-2's `repetitions`
-            # only counts passes at quality >= 3 (i.e. score >= 6), so relying on it
-            # graduated weak points on mediocre 6/10 performance. Track high scores
-            # explicitly: increment on >= 7, reset to 0 otherwise.
-            new_sr["consecutive_high"] = (prev_sr.get("consecutive_high", 0) + 1) if score >= 7 else 0
+            # Graduation requires 3 *consecutive* scores >= 7. Legacy SR entries
+            # did not store consecutive_high, so use repetitions as the migration
+            # baseline unless last_score proves the previous pass was mediocre.
+            prev_high = prev_sr.get("consecutive_high")
+            if prev_high is None:
+                prev_high = prev_sr.get("repetitions", 0) if prev_sr.get("last_score", 7) >= 7 else 0
+            new_sr["consecutive_high"] = (int(prev_high) + 1) if score >= 7 else 0
             wp["sr"] = new_sr
 
             prev_mastery = wp.get("mastery")
@@ -154,7 +174,7 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
 
 def init_sr_for_existing_points(user_id: str):
     """Initialize SR state + mastery/attempts defaults for legacy weak points."""
-    with profile_transaction(user_id) as profile:
+    with _profile_transaction(user_id) as profile:
         changed = False
 
         # Topic-level mastery is used as the initial per-WP mastery for legacy
