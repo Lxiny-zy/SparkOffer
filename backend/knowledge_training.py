@@ -26,6 +26,7 @@ MAX_CANDIDATE_SECTIONS = 600
 MIN_SECTION_CHARS = 80
 SUPPORTED_MODES = {"random", "high_freq"}
 SUPPORTED_DEPTHS = {"basic", "understand", "interview_expression"}
+MAX_SECTION_GROUP_SPAN = 3
 
 NON_KNOWLEDGE_HEADING_RE = re.compile(
     r"(目录|大纲|计划|安排|冲刺|进度|打卡|复盘|刷题建议|每天固定时间|今日任务|todo|待办)",
@@ -219,6 +220,51 @@ def _dedupe_sections(sections: list[KnowledgeSection]) -> list[KnowledgeSection]
     return out
 
 
+def _section_group_key(section: KnowledgeSection) -> tuple[str, ...]:
+    parts = [part.strip() for part in section.header_path.split(">") if part.strip()]
+    if parts:
+        return (section.filename, parts[0])
+    return (section.filename,)
+
+
+def _coherent_section_sample(
+    sections: list[KnowledgeSection],
+    count: int,
+    rnd: random.Random,
+) -> list[KnowledgeSection]:
+    if count >= len(sections):
+        return sections[:]
+
+    groups: dict[tuple[str, ...], list[KnowledgeSection]] = {}
+    for section in sections:
+        groups.setdefault(_section_group_key(section), []).append(section)
+
+    grouped = list(groups.values())
+    rnd.shuffle(grouped)
+
+    selected: list[KnowledgeSection] = []
+    seen: set[int] = set()
+    for group in grouped:
+        remaining = count - len(selected)
+        if remaining <= 0:
+            break
+        take = min(len(group), remaining, MAX_SECTION_GROUP_SPAN)
+        start = 0 if len(group) == take else rnd.randrange(0, len(group) - take + 1)
+        for section in group[start:start + take]:
+            marker = id(section)
+            if marker in seen:
+                continue
+            selected.append(section)
+            seen.add(marker)
+
+    if len(selected) < count:
+        rest = [section for section in sections if id(section) not in seen]
+        rnd.shuffle(rest)
+        selected.extend(rest[:count - len(selected)])
+
+    return selected[:count]
+
+
 def collect_topic_sections(user_id: str, topic: str, mode: str = "random") -> list[KnowledgeSection]:
     topics = load_topics(user_id)
     if topic not in topics:
@@ -256,12 +302,16 @@ def sample_topic_sections(
     seed_value = seed or f"{topic}:{time.time_ns()}"
     sections = collect_topic_sections(user_id, topic, mode=mode)
     rnd = random.Random(hashlib.sha256(seed_value.encode("utf-8")).hexdigest())
-    sampled = sections[:]
-    rnd.shuffle(sampled)
-    return sampled[:count], seed_value
+    sampled = _coherent_section_sample(sections, count, rnd)
+    return sampled, seed_value
 
 
-def build_llm_messages(topic_name: str, depth: str, sections: list[KnowledgeSection]) -> list[dict[str, str]]:
+def build_llm_messages(
+    topic_name: str,
+    depth: str,
+    sections: list[KnowledgeSection],
+    target_count: int,
+) -> list[dict[str, str]]:
     if depth not in SUPPORTED_DEPTHS:
         depth = "understand"
     payload = [
@@ -276,7 +326,7 @@ def build_llm_messages(topic_name: str, depth: str, sections: list[KnowledgeSect
     sections_json = json.dumps(payload, ensure_ascii=False, indent=2)
     return [
         {"role": "system", "content": KNOWLEDGE_TRAINING_SYSTEM},
-        {"role": "user", "content": build_knowledge_training_prompt(topic_name, depth, sections_json)},
+        {"role": "user", "content": build_knowledge_training_prompt(topic_name, depth, sections_json, target_count)},
     ]
 
 
@@ -325,6 +375,85 @@ def _coerce_text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def _format_knowledge(value: Any) -> str:
+    if isinstance(value, list):
+        lines: list[str] = []
+        for item in value:
+            line = _coerce_text(item)
+            if not line:
+                continue
+            if re.match(r"^\s*[-*+]\s+", line):
+                lines.append(line)
+            else:
+                lines.append(f"- {line}")
+        return "\n".join(lines).strip()
+
+    text = _coerce_text(value)
+    if not text or "```" in text or re.search(r"(?m)^\s*[-*+]\s+", text):
+        return text
+
+    lines = [
+        re.sub(r"^\s*(?:\d+[.)、]\s+)", "", line).strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+    if len(lines) > 1:
+        return "\n".join(f"- {line}" for line in lines)
+    return text
+
+
+def _section_ref_key(section: KnowledgeSection) -> tuple[str, str]:
+    return (section.filename.strip(), section.header_path.strip())
+
+
+def _ref_key(filename: str, header_path: str) -> tuple[str, str]:
+    return (filename.strip(), header_path.strip())
+
+
+def _section_by_ref(sections: list[KnowledgeSection]) -> dict[tuple[str, str], KnowledgeSection]:
+    return {_section_ref_key(section): section for section in sections}
+
+
+def _source_index_section(value: Any, sections: list[KnowledgeSection]) -> KnowledgeSection | None:
+    try:
+        idx = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= idx <= len(sections):
+        return sections[idx - 1]
+    return None
+
+
+def _fallback_section(
+    item: dict[str, Any],
+    positional: KnowledgeSection,
+    sections: list[KnowledgeSection],
+) -> tuple[KnowledgeSection, bool]:
+    """
+    Resolve the authoritative source section for a card.
+
+    Returns (section, from_index) where from_index is True when the section was
+    resolved from an explicit source_index — in that case source_refs should be
+    overridden by this section rather than trusted.
+    """
+    indexed = _source_index_section(item.get("source_index"), sections)
+    if indexed:
+        return indexed, True
+
+    by_ref = _section_by_ref(sections)
+    raw_refs = item.get("source_refs")
+    if isinstance(raw_refs, list):
+        for ref in raw_refs:
+            if not isinstance(ref, dict):
+                continue
+            filename = _coerce_text(ref.get("filename"))
+            header_path = _coerce_text(ref.get("header_path"))
+            section = by_ref.get(_ref_key(filename, header_path))
+            if section:
+                return section, False
+    return positional, False
+
+
 def _looks_like_low_quality_card(title: str, knowledge: str, example: str, question: str, answer: str) -> bool:
     text = "\n".join([title, knowledge, example, question, answer])
     if NON_KNOWLEDGE_HEADING_RE.search(title):
@@ -334,11 +463,25 @@ def _looks_like_low_quality_card(title: str, knowledge: str, example: str, quest
     if len(answer) < 18 or len(question) < 10:
         return True
 
-    lines = [line.strip() for line in knowledge.splitlines() if line.strip()]
+    # 完整过滤代码块
+    in_code_block = False
+    lines = []
+    for line in knowledge.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        lines.append(stripped)
+
     if lines:
         complete = 0
         for line in lines:
-            if len(line) >= 22 or re.search(r"[，。；：:（）()、`]", line):
+            clean_line = re.sub(r"^\s*[-*+]\s+", "", line)
+            if len(clean_line) >= 22 or re.search(r"[，。；：、,.!?！？;:()（）]", clean_line):
                 complete += 1
         if complete / len(lines) < 0.5:
             return True
@@ -347,16 +490,35 @@ def _looks_like_low_quality_card(title: str, knowledge: str, example: str, quest
         return True
     return False
 
+def _normalize_source_refs(
+    value: Any,
+    fallback: KnowledgeSection,
+    sections: list[KnowledgeSection],
+    prefer_fallback: bool = False,
+) -> list[dict[str, str]]:
+    """
+    Normalize source_refs from LLM output.
 
-def _normalize_source_refs(value: Any, fallback: KnowledgeSection) -> list[dict[str, str]]:
+    Args:
+        value: Raw source_refs from LLM (list of dicts or None)
+        fallback: The authoritative source section (from source_index or positional)
+        sections: All candidate sections for validation
+        prefer_fallback: If True, ignore value and use fallback directly
+                         (set when fallback came from source_index)
+    """
+    if prefer_fallback:
+        return [{"filename": fallback.filename, "header_path": fallback.header_path}]
+
     refs: list[dict[str, str]] = []
+    by_ref = _section_by_ref(sections)
     if isinstance(value, list):
         for ref in value:
             if not isinstance(ref, dict):
                 continue
             filename = _coerce_text(ref.get("filename"))
             header_path = _coerce_text(ref.get("header_path"))
-            if filename:
+            key = _ref_key(filename, header_path)
+            if key in by_ref:
                 refs.append({"filename": filename, "header_path": header_path})
     if not refs:
         refs.append({"filename": fallback.filename, "header_path": fallback.header_path})
@@ -369,12 +531,15 @@ def normalize_training_cards(
     topic: str,
     sections: list[KnowledgeSection],
 ) -> list[dict[str, Any]]:
+    if not sections:
+        return []
     parsed = _parse_llm_cards(raw)
     cards: list[KnowledgeTrainingCard] = []
     for i, item in enumerate(parsed):
-        fallback = sections[min(i, len(sections) - 1)]
+        positional = sections[min(i, len(sections) - 1)]
+        fallback, from_index = _fallback_section(item, positional, sections)
         title = _coerce_text(item.get("title"))[:120]
-        knowledge = _coerce_text(item.get("knowledge"))
+        knowledge = _format_knowledge(item.get("knowledge"))
         example = _coerce_text(item.get("example"))
         question = _coerce_text(item.get("question"))
         answer = _coerce_text(item.get("answer"))
@@ -389,7 +554,9 @@ def normalize_training_cards(
             for tag in (raw_tags if isinstance(raw_tags, list) else [])
             if _coerce_text(tag)
         ][:6]
-        source_refs = _normalize_source_refs(item.get("source_refs"), fallback)
+        source_refs = _normalize_source_refs(
+            item.get("source_refs"), fallback, sections, prefer_fallback=from_index
+        )
         card_hash = hashlib.sha1(
             f"{topic}|{title}|{source_refs[0]['filename']}|{source_refs[0].get('header_path', '')}".encode("utf-8")
         ).hexdigest()[:12]

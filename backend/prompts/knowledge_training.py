@@ -1,17 +1,18 @@
 """Prompts for read-only knowledge training cards."""
 
-KNOWLEDGE_TRAINING_SYSTEM = """你是一个技术知识记忆卡片生成器。
+KNOWLEDGE_TRAINING_SYSTEM = """你是一个技术知识训练卡片生成器。
 
-你的任务是把用户知识库中的原始片段改写成便于主动回忆的训练卡片。
+你的任务是把用户知识库中的原始片段改写成便于主动回忆的训练卡片。卡片要像一个讲得清楚的小知识点，而不是原文摘抄。
 
 必须遵守：
 - 只使用给定来源片段中的事实，不补充来源外知识。
-- 输出严格 JSON 数组，不要 Markdown 代码块，不要解释性文字。
-- 每张卡片都必须包含 title、knowledge、example、question、answer、tags、source_refs。
-- knowledge 必须是 3-5 条“完整句子”的知识要点，不要把命令、路径、天数安排拆成孤立短语。
+- 输出严格 JSON 数组，不要把整个 JSON 包在 Markdown 代码块里，不要输出解释性文字。
+- 字段值可以使用 Markdown；如果原始片段包含代码、命令、配置或 SQL，必须保留为行内代码或 fenced code block。
+- 每张卡片都必须包含 title、knowledge、example、question、answer、tags、source_index、source_refs。
+- knowledge 必须是 3-5 条 Markdown 列表项，每条都是完整句子，按“概念/机制 -> 用法/场景 -> 边界/易错点”的顺序组织。
 - question 用于主动回忆，不是面试评分题，不要包含评分标准。
 - answer 要能独立回答 question，包含关键判断和适用边界，但保持精炼。
-- source_refs 必须引用输入片段中的 filename 和 header_path。
+- source_index 必须引用输入片段中的 index；source_refs 必须引用同一片段的 filename 和 header_path。
 - 如果片段只是学习计划、目录、题量安排、打卡清单、泛泛建议，而不是技术知识点，直接跳过，不要生成卡片。
 """
 
@@ -22,37 +23,39 @@ DEPTH_HINTS = {
 }
 
 
-def build_knowledge_training_prompt(topic_name: str, depth: str, sections_json: str) -> str:
+def build_knowledge_training_prompt(topic_name: str, depth: str, sections_json: str, target_count: int) -> str:
     depth_hint = DEPTH_HINTS.get(depth, DEPTH_HINTS["understand"])
-    return f"""请基于下面的知识库片段，为「{topic_name}」生成同等数量的记忆训练卡片。
-
+    return f"""请基于下面的知识库片段，为「{topic_name}」生成最多 {target_count} 张高质量记忆训练卡片。
 训练深度：{depth_hint}
 
 输出 JSON 数组，数组元素结构如下：
 {{
-  "title": "知识点标题",
-  "knowledge": "3-5 条完整知识要点，每条都必须能独立理解，用换行分隔",
-  "example": "一个能帮助理解该知识点的具体例子、命令或工程场景",
+  "title": "知识点标题，聚焦一个可讲清楚的概念",
+  "knowledge": "- 第一条完整知识要点\n- 第二条完整知识要点\n- 第三条完整知识要点",
+  "example": "一个能帮助理解该知识点的具体例子、命令、配置、代码或工程场景",
   "question": "用于遮住答案时主动回忆的问题",
-  "answer": "精炼参考答案",
+  "answer": "精炼参考答案，可以用 Markdown 列表或代码块",
   "tags": ["标签1", "标签2"],
+  "source_index": 1,
   "source_refs": [
     {{"filename": "来源文件名", "header_path": "标题路径"}}
   ]
 }}
 
-要求：
-1. 每个输入片段最多生成一张卡片；非知识片段可以不生成，所以输出数组长度可以少于输入片段数。
-2. 不生成考试分数、评分维度、难度等级。
-3. 不要自动扩展到来源外知识。
-4. 不要照抄原文碎句；必须把零散命令/列表综合成“概念 + 用法 + 边界”的可记忆表述。
-5. 对命令类片段，knowledge 应说明命令用途、关键参数含义、典型场景；example 放完整命令。
-6. 对对比类片段，knowledge 应说明差异维度、适用场景和选择依据。
-7. 如果片段信息不足，就生成更窄的问题，不要编造。
+生成要求：
+1. 不要追求覆盖所有片段，优先选择信息密度高、能讲清楚、能形成完整卡片的片段。
+2. 每张卡片只讲一个中心知识点；如果一个片段很散，只抽取其中最清晰的一点。
+3. knowledge 必须按阅读顺序组织：先给定义或结论，再说明使用场景，再补充限制、边界或易错点。
+4. example 必须具体；命令、代码、配置、SQL、正则表达式要使用 Markdown 代码格式。
+5. question 要问“为什么/如何/什么时候/有什么区别/会踩什么坑”，避免只问“请解释 XX”。
+6. answer 要能直接回应 question，不要只重复 knowledge。
+7. source_index 必须是输入片段里的 index；source_refs 必须与 source_index 对应。
+8. 不生成考试分数、评分维度、难度等级。
+9. 不要自动扩展到来源外知识；信息不足就跳过该片段。
 
 坏例子（不要这样写）：
 - "示例路径是 /app/cache"
-- "mount 写法中 target=/app/cache"
+- "mount 写法为 target=/app/cache"
 - "Day 1-3：数组 + 字符串，25 题"
 
 好例子（应该这样写）：

@@ -139,3 +139,131 @@ def test_normalize_training_cards_rejects_fragmented_schedule_card():
     ]"""
 
     assert kt.normalize_training_cards(raw, topic="python", sections=sections) == []
+
+
+def test_normalize_training_cards_formats_markdown_and_repairs_source_refs():
+    sections = [
+        kt.KnowledgeSection(
+            filename="docker.md",
+            header_path="Docker > volume",
+            content=_long("Docker volume persists container data on disk and is suitable for durable state."),
+        ),
+        kt.KnowledgeSection(
+            filename="docker.md",
+            header_path="Docker > tmpfs",
+            content=_long("Docker tmpfs stores temporary files in memory and is useful for cache or sensitive transient data."),
+        ),
+    ]
+    raw = """[
+      {
+        "title": "Docker tmpfs 的适用场景",
+        "knowledge": [
+          "Docker tmpfs 会把临时文件系统挂载在内存中，适合缓存或敏感临时数据。",
+          "`--tmpfs /app/cache` 是快速写法，`--mount type=tmpfs,target=/app/cache` 适合声明更多参数。",
+          "tmpfs 不会像 volume 一样持久化到磁盘，容器删除后数据会消失。"
+        ],
+        "example": "```bash\\ndocker run --tmpfs /app/cache myapp\\n```",
+        "question": "什么时候应该使用 Docker tmpfs，而不是 volume？",
+        "answer": "当数据只需要临时存在、希望放在内存中并避免磁盘持久化时适合使用 tmpfs；需要跨容器生命周期保存的数据应使用 volume。",
+        "tags": ["Docker", "缓存"],
+        "source_index": 2,
+        "source_refs": [{"filename": "docker.md", "header_path": "Docker > volume"}]
+      }
+    ]"""
+
+    cards = kt.normalize_training_cards(raw, topic="docker", sections=sections)
+
+    assert len(cards) == 1
+    card = cards[0]
+    assert card["knowledge"].startswith("- Docker tmpfs")
+    assert "\n- `--tmpfs /app/cache`" in card["knowledge"]
+    assert "```bash" in card["example"]
+    # source_index=2 优先级高于错误的 source_refs，修复后应指向 tmpfs
+    assert card["source_refs"] == [{"filename": "docker.md", "header_path": "Docker > tmpfs"}]
+
+
+def test_normalize_training_cards_preserves_valid_multi_source_refs():
+    sections = [
+        kt.KnowledgeSection(
+            filename="docker.md",
+            header_path="Docker > volume",
+            content=_long("Docker volume persists container data on disk."),
+        ),
+        kt.KnowledgeSection(
+            filename="docker.md",
+            header_path="Docker > tmpfs",
+            content=_long("Docker tmpfs stores data in memory."),
+        ),
+        kt.KnowledgeSection(
+            filename="docker.md",
+            header_path="Docker > bind mount",
+            content=_long("Docker bind mount maps host directory to container."),
+        ),
+    ]
+    raw = """[
+      {
+        "title": "Docker 存储对比",
+        "knowledge": ["volume 持久化到磁盘，tmpfs 存在内存，bind mount 映射宿主目录。"],
+        "example": "根据数据生命周期选择不同的存储方式。",
+        "question": "Docker 的三种存储方式有什么区别？",
+        "answer": "volume 适合持久化，tmpfs 适合临时数据，bind mount 适合开发环境。",
+        "tags": ["Docker"],
+        "source_refs": [
+          {"filename": "docker.md", "header_path": "Docker > volume"},
+          {"filename": "docker.md", "header_path": "Docker > tmpfs"},
+          {"filename": "docker.md", "header_path": "Docker > bind mount"}
+        ]
+      }
+    ]"""
+
+    cards = kt.normalize_training_cards(raw, topic="docker", sections=sections)
+
+    assert len(cards) == 1
+    card = cards[0]
+    # 所有 source_refs 都在 sections 中存在，应保留全部（最多3个）
+    assert len(card["source_refs"]) == 3
+    assert {"filename": "docker.md", "header_path": "Docker > volume"} in card["source_refs"]
+    assert {"filename": "docker.md", "header_path": "Docker > tmpfs"} in card["source_refs"]
+    assert {"filename": "docker.md", "header_path": "Docker > bind mount"} in card["source_refs"]
+
+
+def test_sample_topic_sections_keeps_related_sections_contiguous(monkeypatch, tmp_path):
+    root = tmp_path / "data" / "users" / "u" / "knowledge" / "docker"
+    root.mkdir(parents=True)
+    body = "\n\n".join(
+        f"### Part {i}\n\n{_long(f'Docker tmpfs part {i} explains memory-backed cache behavior and mount parameters.')}"
+        for i in range(6)
+    )
+    (root / "README.md").write_text(f"## Docker Storage\n\n{body}", encoding="utf-8")
+
+    monkeypatch.setattr(kt, "load_topics", lambda user_id: {"docker": {"dir": "docker", "name": "Docker"}})
+    monkeypatch.setattr(kt.settings, "base_dir", tmp_path)
+
+    sections, _ = kt.sample_topic_sections("u", "docker", 3, seed="adjacent")
+    parts = [int(section.header_path.rsplit(" ", 1)[1]) for section in sections]
+
+    assert len(parts) == 3
+    assert parts == list(range(parts[0], parts[0] + 3))
+
+
+def test_looks_like_low_quality_card_does_not_reject_code_blocks():
+    """Bug fix: 旧逻辑只过滤 ``` 开头的行，代码块内的短命令会被误判为碎片。"""
+    title = "Docker volume 管理"
+    knowledge = """- Docker volume 是独立于容器生命周期的持久化存储机制，删除容器后数据仍然保留。
+- 使用 docker volume 相关命令管理卷，支持创建、列出、查看和删除操作。
+```bash
+docker volume ls
+docker volume rm a
+docker volume rm b
+docker volume rm c
+docker volume prune
+docker system df
+```
+- 适合数据库文件等需要长期保存的关键数据，不应用于临时缓存或日志文件。"""
+    example = "docker volume create mydata"
+    question = "如何创建和管理 Docker volume？"
+    answer = "使用 docker volume create 创建新卷，docker volume ls 列出所有卷，docker volume rm 删除指定卷。"
+
+    is_low = kt._looks_like_low_quality_card(title, knowledge, example, question, answer)
+    assert not is_low, "包含代码块的高质量卡片不应被误判为低质量"
+

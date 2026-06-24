@@ -54,12 +54,12 @@ async def generate_cards(
 
         yield sse_event({"type": "progress", "message": "正在抽取知识片段..."})
         try:
-            source_count = min(20, max(body.count, body.count * 2))
+            candidate_count = min(20, int(body.count * 1.5) + 3)
             sections, effective_seed = await asyncio.to_thread(
                 sample_topic_sections,
                 user_id,
                 body.topic,
-                source_count,
+                candidate_count,
                 body.mode,
                 body.seed,
             )
@@ -75,7 +75,7 @@ async def generate_cards(
             return
 
         topic_name = topics[body.topic].get("name", body.topic)
-        messages = build_llm_messages(topic_name, body.depth, sections)
+        messages = build_llm_messages(topic_name, body.depth, sections, body.count)
         raw = ""
         llm_failed = False
         async for kind, value in stream_llm_sse(messages, progress_prefix="正在生成训练卡片"):

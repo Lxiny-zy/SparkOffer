@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { Markdown } from "@/components/ChatBubble";
 import { getTopicIcon } from "../utils/topicIcons";
 import {
   generateKnowledgeTrainingCards,
@@ -43,12 +44,31 @@ const DEPTH_OPTIONS: { value: KnowledgeTrainingDepth; label: string }[] = [
   { value: "interview_expression", label: "面试表达" },
 ];
 
-function splitKnowledge(text: string): string[] {
-  const lines = text
+function hasBlockMarkdown(text: string): boolean {
+  return /```|^\s{0,3}(?:[-*+]\s+|\d+[.)、]\s+|#{1,6}\s+|>\s+|\|.+\|)/m.test(text);
+}
+
+function normalizeKnowledgeMarkdown(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return trimmed;
+
+  // 新数据后端已格式化为 Markdown，含块级结构时直接渲染
+  if (hasBlockMarkdown(trimmed)) return trimmed;
+
+  // 旧数据兜底：多行无标记纯文本转成列表，单行原样作为段落
+  const lines = trimmed
     .split(/\n+/)
-    .map((line) => line.replace(/^[-*•\d.)、\s]+/, "").trim())
+    .map((line) => line.replace(/^\s*(?:[-*+]\s+|\d+[.)、]\s+)/, "").trim())
     .filter(Boolean);
-  return lines.length > 1 ? lines : [text.trim()].filter(Boolean);
+  return lines.length > 1 ? lines.map((line) => `- ${line}`).join("\n") : trimmed;
+}
+
+function CardMarkdown({ children, className }: { children: string; className?: string }) {
+  return (
+    <div className={cn("md-content text-sm leading-7 text-text/90", className)}>
+      <Markdown>{children}</Markdown>
+    </div>
+  );
 }
 
 function sourceLabel(card: KnowledgeTrainingCard): string {
@@ -323,19 +343,14 @@ export default function KnowledgeTraining() {
                       <Brain size={15} className="text-primary" />
                       核心知识
                     </div>
-                    <div className="space-y-2">
-                      {splitKnowledge(currentCard.knowledge).map((item, idx) => (
-                        <div key={idx} className="flex gap-2 rounded-md border border-border/60 bg-secondary/30 px-3 py-2 text-sm leading-6">
-                          <span className="font-mono text-xs text-primary">{String(idx + 1).padStart(2, "0")}</span>
-                          <span>{item}</span>
-                        </div>
-                      ))}
+                    <div className="rounded-md border border-border/60 bg-secondary/30 px-3 py-3">
+                      <CardMarkdown>{normalizeKnowledgeMarkdown(currentCard.knowledge)}</CardMarkdown>
                     </div>
                   </section>
 
                   <section className="rounded-md border border-border/70 bg-secondary/20 p-3">
                     <div className="mb-1.5 text-sm font-semibold">例子</div>
-                    <p className="text-sm leading-7 text-text/90">{currentCard.example}</p>
+                    <CardMarkdown>{currentCard.example}</CardMarkdown>
                   </section>
 
                   <section className="rounded-md border border-primary/35 bg-primary/5 p-3">
@@ -343,7 +358,7 @@ export default function KnowledgeTraining() {
                       <HelpCircle size={15} className="text-primary" />
                       自测问题
                     </div>
-                    <p className="text-sm leading-7">{currentCard.question}</p>
+                    <CardMarkdown className="text-text">{currentCard.question}</CardMarkdown>
                   </section>
 
                   <section className="rounded-md border border-border/70 p-3">
@@ -355,7 +370,7 @@ export default function KnowledgeTraining() {
                       </Button>
                     </div>
                     {revealedAnswers[currentCard.id] ? (
-                      <p className="text-sm leading-7 text-text/90">{currentCard.answer}</p>
+                      <CardMarkdown>{currentCard.answer}</CardMarkdown>
                     ) : (
                       <div className="rounded-md bg-secondary/40 px-3 py-5 text-center text-sm text-dim">
                         答案已隐藏，先在脑中复述后再查看。
