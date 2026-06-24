@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   Brain,
@@ -22,6 +23,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Markdown } from "@/components/ChatBubble";
 import { getTopicIcon } from "../utils/topicIcons";
+import useDraftPersist, { readDraft } from "../hooks/useDraftPersist";
 import {
   generateKnowledgeTrainingCards,
   getKnowledgeTrainingAvailability,
@@ -92,6 +94,7 @@ function familiarityClass(value?: Familiarity) {
 }
 
 export default function KnowledgeTraining() {
+  const [searchParams] = useSearchParams();
   const [availability, setAvailability] = useState<Record<string, KnowledgeTrainingAvailabilityItem>>({});
   const [selected, setSelected] = useState<string>("");
   const [count, setCount] = useState(5);
@@ -117,17 +120,33 @@ export default function KnowledgeTraining() {
       const data = await getKnowledgeTrainingAvailability();
       setAvailability(data.topics);
       const keys = Object.keys(data.topics);
-      setSelected((prev) => (prev && data.topics[prev] ? prev : keys[0] || ""));
+      // Prefer ?topic= URL param (e.g. from Profile weak-point links), then
+      // existing state, then first available topic.
+      const urlTopic = searchParams.get("topic");
+      const preferredTopic = urlTopic && data.topics[urlTopic] ? urlTopic : null;
+      setSelected((prev) => preferredTopic || (prev && data.topics[prev] ? prev : keys[0] || ""));
     } catch (e: any) {
       setError(e.message || "加载知识库模块失败");
     } finally {
       setLoadingTopics(false);
     }
-  }, []);
+  }, [searchParams]);
 
   useEffect(() => {
     loadAvailability();
   }, [loadAvailability]);
+
+  const sessionKey = selected ? `knowledge-training:session:${selected}` : "";
+
+  const clearFamiliarity = useCallback(() => {
+    setFamiliarity({});
+    if (!familiarityKey) return;
+    try {
+      localStorage.removeItem(familiarityKey);
+    } catch {
+      /* noop */
+    }
+  }, [familiarityKey]);
 
   useEffect(() => {
     if (!familiarityKey) return;
@@ -136,11 +155,26 @@ export default function KnowledgeTraining() {
     } catch {
       setFamiliarity({});
     }
-    setCards([]);
-    setCurrentIndex(0);
+    // Restore a previously generated card session (survives refresh / nav away),
+    // avoiding a wasted LLM regeneration.
+    const saved = readDraft<{ cards: KnowledgeTrainingCard[]; currentIndex: number }>(sessionKey);
+    if (saved?.cards?.length) {
+      setCards(saved.cards);
+      setCurrentIndex(Math.min(saved.currentIndex || 0, saved.cards.length - 1));
+    } else {
+      setCards([]);
+      setCurrentIndex(0);
+    }
     setRevealedAnswers({});
     setError("");
-  }, [familiarityKey]);
+  }, [familiarityKey, sessionKey]);
+
+  // Persist the generated card session per topic.
+  useDraftPersist({
+    key: cards.length > 0 ? sessionKey : null,
+    value: { cards, currentIndex },
+    isEmpty: (s) => !s.cards.length,
+  });
 
   useEffect(() => {
     if (familiarityKey) localStorage.setItem(familiarityKey, JSON.stringify(familiarity));
@@ -160,12 +194,20 @@ export default function KnowledgeTraining() {
 
   const startTraining = useCallback(async () => {
     if (!selected || generating) return;
+    // Warn when re-generating discards marked progress.
+    const marked = Object.keys(familiarity).filter((id) => cards.some((card) => card.id === id)).length;
+    if (cards.length > 0 && marked > 0) {
+      if (!confirm(`当前已标记 ${marked} 张卡片的熟悉度，换一组将清空标记进度。确定继续？`)) {
+        return;
+      }
+    }
     setGenerating(true);
     setProgress("正在准备训练卡片...");
     setError("");
     setCards([]);
     setCurrentIndex(0);
     setRevealedAnswers({});
+    clearFamiliarity();
     try {
       const result = await generateKnowledgeTrainingCards(
         { topic: selected, count, mode, depth },
@@ -186,7 +228,7 @@ export default function KnowledgeTraining() {
     } finally {
       setGenerating(false);
     }
-  }, [count, depth, generating, mode, selected]);
+  }, [cards, clearFamiliarity, count, depth, familiarity, generating, mode, selected]);
 
   const setCardFamiliarity = (value: Familiarity) => {
     if (!currentCard) return;

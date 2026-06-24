@@ -67,6 +67,7 @@ export default function Favorites() {
   useEffect(() => { loadData(); }, [topicFilter, tagFilter, sortBy]);
 
   const handleDelete = async (id: string) => {
+    if (!confirm("确定删除这条收藏？")) return;
     try {
       await deleteFavorite(id);
       setItems((prev) => prev.filter((it) => it.id !== id));
@@ -78,6 +79,7 @@ export default function Favorites() {
   };
 
   const handleBulkDelete = async () => {
+    if (!confirm(`确定删除选中的 ${selected.size} 条收藏？`)) return;
     for (const id of selected) {
       await deleteFavorite(id);
     }

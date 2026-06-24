@@ -64,6 +64,10 @@ export default function JobPrep() {
   const canStart = !!preview && !previewStale && !starting;
 
   const handlePreview = async () => {
+    // Warn on re-analysis, as it discards "你现在能打的点" and other analysis results.
+    if (preview && !confirm('重新分析将覆盖当前的岗位分析结果（含"你现在能打的点"），确定继续？')) {
+      return;
+    }
     setPreviewing(true);
     setPreviewProgress("");
     setError("");

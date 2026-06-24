@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
-import { ChevronRight, TrendingUp, Download, BarChart3, Target } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { ChevronRight, TrendingUp, Download, BarChart3, Target, Brain } from "lucide-react";
 import { getProfile, exportProfile } from "../api/interview";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -54,12 +54,25 @@ export default function Profile() {
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
-  useEffect(() => {
+  const loadProfile = useCallback(() => {
     getProfile()
       .then(setProfile)
       .catch(() => setProfile(null))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    loadProfile();
+  }, [loadProfile]);
+
+  // Auto-refresh profile when user returns to the page (e.g. after training).
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") loadProfile();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [loadProfile]);
 
   if (loading) {
     return (
@@ -296,12 +309,21 @@ export default function Profile() {
               </div>
               <CollapsibleList items={weakActive} limit={3} renderItem={(w, i) => (
                 <Card key={i}>
-                  <CardContent className="p-3.5 flex justify-between items-center">
-                    <span className="flex-1 text-sm">{w.point}</span>
-                    <div className="flex items-center gap-2 text-xs text-dim shrink-0">
-                      {w.topic && <Badge variant="default">{profile!.topic_names?.[w.topic] ?? w.topic}</Badge>}
-                      <span>出现 {w.times_seen} 次</span>
+                  <CardContent className="p-3.5 flex justify-between items-start gap-3">
+                    <div className="flex-1 min-w-0">
+                      <span className="text-sm block mb-1">{w.point}</span>
+                      <div className="flex items-center gap-2 text-xs text-dim">
+                        {w.topic && <Badge variant="default">{profile!.topic_names?.[w.topic] ?? w.topic}</Badge>}
+                        <span>出现 {w.times_seen} 次</span>
+                      </div>
                     </div>
+                    {w.topic && (
+                      <Link to={`/knowledge-training?topic=${encodeURIComponent(w.topic)}`}>
+                        <Button variant="outline" size="sm" className="shrink-0 h-8 text-xs">
+                          <Brain size={12} /> 去训练
+                        </Button>
+                      </Link>
+                    )}
                   </CardContent>
                 </Card>
               )} />

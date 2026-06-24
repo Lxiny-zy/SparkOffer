@@ -159,6 +159,7 @@ def build_graph(topic: str, user_id: str) -> dict:
             "focus_area": q["focus_area"],
             "difficulty": q["difficulty"],
             "date": q["date"],
+            "session_id": q["session_id"],
         })
 
     # Compute pairwise similarity → links

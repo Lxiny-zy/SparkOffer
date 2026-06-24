@@ -204,6 +204,35 @@ def generate_retrospective(topic: str, user_id: str = Depends(get_current_user))
     topic_name = topic_display.get(topic, topic)
     mastery = profile.get("topic_mastery", {}).get(topic, {})
 
+    # Short-circuit if the cached retrospective is already up-to-date (no newer sessions).
+    retrospective_at = mastery.get("retrospective_at")
+    if retrospective_at:
+        def _parse_dt(value: str | None) -> datetime | None:
+            if not value:
+                return None
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
+
+        retrospective_dt = _parse_dt(retrospective_at)
+        session_update_times = [
+            dt for dt in (_parse_dt(s.get("updated_at") or s.get("created_at")) for s in sessions)
+            if dt is not None
+        ]
+        newest_session_at = max(session_update_times, default=None)
+        if retrospective_dt and newest_session_at and newest_session_at <= retrospective_dt:
+            # No new data since last retrospective: return cached result immediately.
+            from backend.utils.sse_helpers import streaming_response, sse_event
+            cached_retrospective = mastery.get("retrospective", "")
+            async def _cached():
+                yield sse_event({"type": "complete", "data": {
+                    "topic": topic, "topic_name": topic_name,
+                    "retrospective": cached_retrospective, "session_count": len(sessions),
+                }})
+                yield sse_event({"type": "done"})
+            return streaming_response(_cached())
+
     history_lines = []
     for s in sessions:
         date = s["created_at"][:10]

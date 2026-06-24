@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Menu, X, Sparkles, ChevronRight, ChevronDown, Activity, Clock, FileText, RefreshCw, Loader2, CheckCircle2, XCircle, CircleDashed, Upload, Layers } from "lucide-react";
 import { toast } from "sonner";
 import { getTopicIcon, ICON_OPTIONS } from "../utils/topicIcons";
@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import useDraftPersist, { readDraft } from "../hooks/useDraftPersist";
 import type { TopicInfo } from "../types/api";
 
 interface CoreFile {
@@ -106,6 +107,13 @@ export default function Knowledge() {
       setExpandedFile(null);
       const buf: Record<string, string> = {};
       files.forEach((f) => { buf[f.filename] = f.content; });
+      // Reconcile with an unsaved draft (survives refresh / accidental close).
+      const draft = readDraft<Record<string, string>>(`knowledge:core:${topic}`);
+      if (draft) {
+        Object.entries(draft).forEach(([name, content]) => {
+          if (name in buf && content !== buf[name]) buf[name] = content;
+        });
+      }
       setEditContent(buf);
     } catch { setCoreFiles([]); }
   }, []);
@@ -114,7 +122,8 @@ export default function Knowledge() {
     try {
       const data = await getHighFreq(topic);
       setHighFreq(data.content || "");
-      setHighFreqDraft(data.content || "");
+      const draft = readDraft<string>(`knowledge:hf:${topic}`);
+      setHighFreqDraft(draft ?? (data.content || ""));
       setHighFreqMtime(data.mtime || 0);
     } catch { setHighFreq(""); setHighFreqDraft(""); setHighFreqMtime(0); }
   }, []);
@@ -133,12 +142,39 @@ export default function Knowledge() {
     loadStats(selected);
   }, [selected, loadCore, loadHighFreq, loadStats]);
 
+  const dirtyCoreDraft = useMemo(() => {
+    const dirty: Record<string, string> = {};
+    coreFiles.forEach((f) => {
+      const current = editContent[f.filename] ?? f.content;
+      if (current !== f.content) dirty[f.filename] = current;
+    });
+    return dirty;
+  }, [coreFiles, editContent]);
+
+  const hfDirty = highFreqDraft !== highFreq;
+
+  // Draft persistence — only unsaved core-file edits are stored.
+  useDraftPersist({
+    key: selected ? `knowledge:core:${selected}` : null,
+    value: dirtyCoreDraft,
+    isEmpty: (obj) => Object.keys(obj).length === 0,
+  });
+
+  // Draft persistence — high-freq knowledge.
+  const { clear: clearHfDraft } = useDraftPersist({
+    key: selected ? `knowledge:hf:${selected}` : null,
+    value: highFreqDraft,
+    isEmpty: () => !hfDirty,
+  });
+
   const handleSaveCore = async (filename: string) => {
     setCoreSaving(filename);
     try {
       await updateCoreKnowledge(selected!, filename, editContent[filename] || "");
       const now = Date.now();
-      setCoreFiles((prev) => prev.map((f) => f.filename === filename ? { ...f, content: editContent[filename], mtime: now } : f));
+      const savedContent = editContent[filename] || "";
+      setCoreFiles((prev) => prev.map((f) => f.filename === filename ? { ...f, content: savedContent, mtime: now } : f));
+      setEditContent((prev) => ({ ...prev, [filename]: savedContent }));
       loadStats(selected!);
       toast.success(`${filename} 已保存`);
     } catch (e: any) { toast.error("保存失败: " + e.message); }
@@ -152,6 +188,7 @@ export default function Knowledge() {
       setHighFreq(highFreqDraft);
       setHighFreqMtime(Date.now());
       loadStats(selected!);
+      clearHfDraft(); // Persisted to server — clear draft
       toast.success("高频题库已保存");
     } catch (e: any) { toast.error("保存失败: " + e.message); }
     setTimeout(() => setHfSaving(false), 1500);
@@ -233,8 +270,7 @@ export default function Knowledge() {
     (coreFiles.length === 1 && coreFiles[0].filename === "README.md" && (coreFiles[0].content?.length || 0) <= 20);
 
   // ── Dirty tracking for unsaved-change protection ──
-  const coreDirty = coreFiles.some((f) => (editContent[f.filename] ?? f.content) !== f.content);
-  const hfDirty = highFreqDraft !== highFreq;
+  const coreDirty = Object.keys(dirtyCoreDraft).length > 0;
   const anyDirty = coreDirty || hfDirty;
 
   const handleSelectTopic = (key: string) => {

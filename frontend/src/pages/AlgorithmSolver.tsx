@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import ChatBubble, { Markdown } from "@/components/ChatBubble";
+import useDraftPersist from "../hooks/useDraftPersist";
 import type { ChatMessage } from "../types/api";
 
 const LANGUAGES = [
@@ -81,6 +82,15 @@ export default function AlgorithmSolver() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages, solution]);
 
+  // Draft persistence — backup the unsubmitted problem description. Disabled
+  // once a session starts (problem submitted) or in read-only review mode.
+  const { clear: clearProblemDraft } = useDraftPersist({
+    key: !sessionId && !reviewing ? "algo:draft:problem" : null,
+    value: problemText,
+    onRestore: (restored) => setProblemText((cur) => cur || restored),
+    isEmpty: (text) => !text.trim(),
+  });
+
   const handleSolve = async () => {
     if (!problemText.trim()) return;
     setSolving(true);
@@ -96,6 +106,7 @@ export default function AlgorithmSolver() {
       });
       setSessionId(data.session_id);
       setSolution(data.solution);
+      clearProblemDraft(); // Problem committed — clear draft
     } catch (e) {
       console.error("解题失败:", e);
       setSolution("解题请求失败，请检查后端服务是否正常运行。");
@@ -165,6 +176,7 @@ export default function AlgorithmSolver() {
     setChatInput("");
     setShowSave(false);
     setReviewing(false);
+    clearProblemDraft();
   };
 
   return (

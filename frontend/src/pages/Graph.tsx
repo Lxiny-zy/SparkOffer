@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
+import { RefreshCw } from "lucide-react";
 import ForceGraph2D from "react-force-graph-2d";
 import { getTopics, getGraphData } from "../api/interview";
 import { getTopicIcon } from "../utils/topicIcons";
@@ -17,6 +19,7 @@ function scoreToColor(score: number): string {
 }
 
 export default function Graph() {
+  const navigate = useNavigate();
   const [topics, setTopics] = useState<Record<string, TopicInfo>>({});
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
   const [graphData, setGraphData] = useState<any>(null);
@@ -42,7 +45,7 @@ export default function Graph() {
     return () => ro.disconnect();
   }, []);
 
-  const handleSelectTopic = async (key: string) => {
+  const handleSelectTopic = useCallback(async (key: string) => {
     setSelectedTopic(key);
     setGraphData(null);
     setLoading(true);
@@ -55,7 +58,18 @@ export default function Graph() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  // Auto-refresh when user returns (e.g. after training).
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && selectedTopic) {
+        handleSelectTopic(selectedTopic);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [selectedTopic, handleSelectTopic]);
 
   // Read hover from a ref so this callback stays referentially stable (deps []).
   // A [hoveredNode] dep rebuilt it on every hover, changing the nodeCanvasObject
@@ -119,7 +133,7 @@ export default function Graph() {
         <h1 className="sig-display text-2xl md:text-[28px]">能力星图<span className="sig-accent-c">.</span></h1>
       </div>
 
-      <div className="flex flex-wrap gap-2 mb-6 animate-fade-in-up">
+      <div className="flex flex-wrap gap-2 mb-6 animate-fade-in-up items-center">
         {topicEntries.map(([key, info]) => (
           <Button
             key={key}
@@ -131,6 +145,11 @@ export default function Graph() {
             <span className="inline-flex align-middle mr-1">{getTopicIcon(info.icon, 14)}</span>{info.name}
           </Button>
         ))}
+        {selectedTopic && !loading && (
+          <Button variant="ghost" size="sm" onClick={() => handleSelectTopic(selectedTopic)} className="shrink-0">
+            <RefreshCw size={14} /> 刷新
+          </Button>
+        )}
       </div>
 
       <Card ref={containerRef} className="relative animate-fade-in-up [animation-delay:0.1s]" style={{ minHeight: 280 }}>
@@ -192,6 +211,9 @@ export default function Graph() {
               }}
               linkCanvasObject={paintLink}
               onNodeHover={handleNodeHover}
+              onNodeClick={(node: any) => {
+                if (node?.session_id) navigate(`/review/${node.session_id}`);
+              }}
               cooldownTicks={80}
               d3AlphaDecay={0.03}
               d3VelocityDecay={0.3}
@@ -206,6 +228,7 @@ export default function Graph() {
                 {hoveredNode.focus_area && <span>{hoveredNode.focus_area}</span>}
                 {hoveredNode.date && <span>{hoveredNode.date}</span>}
               </div>
+              {hoveredNode.session_id && <div className="mt-1.5 text-[11px] text-primary">点击查看本题回顾 →</div>}
             </div>
           )}
         </CardContent>

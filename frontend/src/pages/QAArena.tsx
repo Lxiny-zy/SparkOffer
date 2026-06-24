@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { Markdown } from "../components/ChatBubble";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import useDraftPersist from "../hooks/useDraftPersist";
 import {
   createQASession,
   listQASessions,
@@ -134,6 +135,14 @@ export default function QAArena() {
     if (activeId) inputRef.current?.focus();
   }, [activeId]);
 
+  // Draft persistence — per-session input backup
+  const { clear: clearDraft } = useDraftPersist({
+    key: activeId ? `qa:draft:${activeId}` : null,
+    value: input,
+    onRestore: (restored) => setInput(restored),
+    isEmpty: (text) => !text.trim(),
+  });
+
   const switchReqRef = useRef<string | null>(null);
   const switchSession = useCallback(async (id: string) => {
     // Stop any in-flight stream first — its callbacks would otherwise clobber
@@ -147,6 +156,7 @@ export default function QAArena() {
     setSummaryResult(null);
     setShowSummary(false);
     setStreamError(null);
+    setInput("");
     setAttachments((prev) => { prev.forEach((a) => URL.revokeObjectURL(a.preview)); return []; });
     const msgs = await loadQAMessages(id);
     // Guard against out-of-order responses: if the user switched again while this
@@ -162,6 +172,7 @@ export default function QAArena() {
     activeIdRef.current = session.id;
     setActiveId(session.id);
     setMessages([]);
+    setInput("");
     setSummaryResult(null);
     setShowSummary(false);
     setStreamError(null);
@@ -179,6 +190,7 @@ export default function QAArena() {
       } else {
         setActiveId(null);
         setMessages([]);
+        setInput("");
       }
     }
   };
@@ -370,6 +382,7 @@ export default function QAArena() {
       { role: "assistant", content: "", created_at: "" },
     ]);
     setInput("");
+    clearDraft();
     // Hand the previews off to the message bubble — don't revoke them here.
     setAttachments([]);
     // Reset textarea height
