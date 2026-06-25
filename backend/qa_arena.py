@@ -14,7 +14,7 @@ from backend.config import settings
 from backend.llm_provider import get_langchain_llm
 from backend.storage import qa_sessions as store
 from backend.context_assembler import resolve_input_budget, count_tokens, pack_messages
-from backend.utils.sse_helpers import chunk_text as _chunk_text, chunk_reasoning as _chunk_reasoning
+from backend.utils.sse_helpers import chunk_text as _chunk_text, chunk_reasoning as _chunk_reasoning, iter_chunks_with_idle
 
 logger = logging.getLogger("uvicorn")
 
@@ -559,36 +559,33 @@ async def _stream_chat_answer(
     try:
         llm = get_langchain_llm()
         aiter = llm.astream(lc_messages).__aiter__()
-        while True:
-            try:
-                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=IDLE_HEARTBEAT_SECONDS)
-                if _DIAG_CHUNKS["n"] < _DIAG_CHUNKS["limit"]:
-                    _DIAG_CHUNKS["n"] += 1
-                    _c = getattr(chunk, "content", None)
-                    logger.warning(
-                        "QA chunk diag #%d: content_type=%s content=%.60r akw_keys=%s meta_keys=%s",
-                        _DIAG_CHUNKS["n"], type(_c).__name__, _c,
-                        list(getattr(chunk, "additional_kwargs", {}) or {}),
-                        list(getattr(chunk, "response_metadata", {}) or {}),
-                    )
-                reasoning = _chunk_reasoning(chunk)
-                if reasoning:
-                    had_reasoning = True
-                    yield _sse({"type": "reasoning", "content": reasoning})
-                token = _chunk_text(chunk)
-                if token:
-                    if not answering:
-                        answering = True
-                        yield _sse({"type": "stage", "stage": "answering", "message": "正在作答…"})
-                    content += token
-                    yield _sse({"type": "token", "content": token})
-            except asyncio.TimeoutError:
-                # No chunk at all for IDLE_HEARTBEAT_SECONDS — upstream is genuinely silent
-                # (deep reasoning with no streamed trace, or a stalled relay). Ping to keep
-                # the proxy from closing the idle connection.
+        async for _kind, chunk in iter_chunks_with_idle(aiter, IDLE_HEARTBEAT_SECONDS):
+            if _kind == "idle":
+                # No chunk for IDLE_HEARTBEAT_SECONDS — upstream is genuinely silent (deep
+                # reasoning with no streamed trace, or a stalled relay). Ping to keep the
+                # proxy from closing the idle connection; the read itself stays in flight.
                 yield _sse({"type": "ping"})
-            except StopAsyncIteration:
-                break
+                continue
+            if _DIAG_CHUNKS["n"] < _DIAG_CHUNKS["limit"]:
+                _DIAG_CHUNKS["n"] += 1
+                _c = getattr(chunk, "content", None)
+                logger.warning(
+                    "QA chunk diag #%d: content_type=%s content=%.60r akw_keys=%s meta_keys=%s",
+                    _DIAG_CHUNKS["n"], type(_c).__name__, _c,
+                    list(getattr(chunk, "additional_kwargs", {}) or {}),
+                    list(getattr(chunk, "response_metadata", {}) or {}),
+                )
+            reasoning = _chunk_reasoning(chunk)
+            if reasoning:
+                had_reasoning = True
+                yield _sse({"type": "reasoning", "content": reasoning})
+            token = _chunk_text(chunk)
+            if token:
+                if not answering:
+                    answering = True
+                    yield _sse({"type": "stage", "stage": "answering", "message": "正在作答…"})
+                content += token
+                yield _sse({"type": "token", "content": token})
     except Exception as e:
         # astream can't fail over once the first chunk is out, so a mid-stream drop
         # propagates here. Whatever streamed before the drop is preserved below.
@@ -795,20 +792,17 @@ async def stream_generate_summary(
             {"role": "user", "content": prompt_text},
         ]).__aiter__()
         chars_since_heartbeat = 0
-        while True:
-            try:
-                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=IDLE_HEARTBEAT_SECONDS)
-                token = _chunk_text(chunk)
-                if token:
-                    content += token
-                    chars_since_heartbeat += len(token)
-                    if chars_since_heartbeat >= 200:
-                        yield f"data: {json.dumps({'type': 'progress', 'message': f'正在生成知识卡片... ({len(content)} 字)'}, ensure_ascii=False)}\n\n"
-                        chars_since_heartbeat = 0
-            except asyncio.TimeoutError:
+        async for _kind, chunk in iter_chunks_with_idle(aiter, IDLE_HEARTBEAT_SECONDS):
+            if _kind == "idle":
                 yield f"data: {json.dumps({'type': 'ping'})}\n\n"
-            except StopAsyncIteration:
-                break
+                continue
+            token = _chunk_text(chunk)
+            if token:
+                content += token
+                chars_since_heartbeat += len(token)
+                if chars_since_heartbeat >= 200:
+                    yield f"data: {json.dumps({'type': 'progress', 'message': f'正在生成知识卡片... ({len(content)} 字)'}, ensure_ascii=False)}\n\n"
+                    chars_since_heartbeat = 0
     except Exception as e:
         logger.error("Summary generation failed: %s", e)
         yield f"data: {json.dumps({'type': 'error', 'message': '生成失败，请稍后重试'}, ensure_ascii=False)}\n\n"

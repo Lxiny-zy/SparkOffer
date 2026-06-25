@@ -107,6 +107,59 @@ def chunk_reasoning(chunk) -> str:
     return ""
 
 
+async def iter_chunks_with_idle(aiter, idle_timeout: float):
+    """Iterate an async LLM stream, surfacing idle windows WITHOUT cancelling the read.
+
+    Yields ``("chunk", chunk)`` for each streamed chunk and ``("idle", None)`` whenever
+    ``idle_timeout`` seconds pass with no chunk, so the caller can emit a heartbeat ping.
+
+    Why this primitive exists — the obvious idiom is WRONG for an httpx-backed stream::
+
+        chunk = await asyncio.wait_for(aiter.__anext__(), timeout=idle_timeout)  # ✗
+
+    On timeout ``wait_for`` *cancels* the in-flight ``__anext__()``. That cancellation tears
+    the underlying httpx read down and finalizes the LangChain async generator, so the NEXT
+    ``__anext__()`` ends the stream early (``StopAsyncIteration``) or raises. A reasoning model
+    whose first token — or any inter-chunk gap — takes longer than ``idle_timeout`` then gets
+    killed mid-flight even though the upstream is perfectly healthy and goes on to complete:
+    the client sees an error / empty reply while the provider logs a success (✓ 200 + tokens).
+
+    Here the pull task SURVIVES across idle windows (``asyncio.wait`` does not cancel its
+    awaitable on timeout). Liveness is therefore bounded only by httpx's own read timeout — a
+    genuinely stalled upstream still fails, a slow-but-alive one (long reasoning) no longer does.
+    """
+    pull = asyncio.ensure_future(aiter.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({pull}, timeout=idle_timeout)
+            if not done:
+                yield ("idle", None)          # silent window — the read is STILL in flight
+                continue
+            try:
+                chunk = pull.result()
+            except StopAsyncIteration:
+                return
+            # Schedule the next read before handing this chunk to the caller, so the
+            # provider keeps streaming while the caller processes/yields downstream.
+            pull = asyncio.ensure_future(aiter.__anext__())
+            yield ("chunk", chunk)
+    finally:
+        # Release the in-flight read + underlying stream on any exit (normal end, mid-stream
+        # error, or consumer disconnect). Cancel the pending pull BEFORE aclose() — calling
+        # aclose() on a generator that still has a live __anext__() task raises RuntimeError.
+        pull.cancel()
+        try:
+            await asyncio.gather(pull, return_exceptions=True)
+        except Exception:
+            pass
+        aclose = getattr(aiter, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
+
+
 async def iter_llm_stream(
     llm, lc_messages, *,
     idle_timeout: float = IDLE_HEARTBEAT_SECONDS,
@@ -125,6 +178,9 @@ async def iter_llm_stream(
     reasoning model's thinking phase (chunks arrive steadily but carry empty ``content``,
     so neither a token nor the idle ping fires) until httpx/nginx times out → blank reply.
 
+    Chunk pulling is delegated to ``iter_chunks_with_idle`` so the idle heartbeat never
+    cancels the in-flight read (see that function's docstring for the failure mode it avoids).
+
     Pass ``keepalive_interval=0`` to forward every reasoning delta unbatched (smooth live
     thinking, e.g. interactive chat). Mid-stream errors propagate to the caller, matching
     ``ResilientChatModel`` (no failover once streaming has begun); the caller decides how to
@@ -133,18 +189,14 @@ async def iter_llm_stream(
     aiter = llm.astream(lc_messages).__aiter__()
     rbuf = ""
     last_emit = time.monotonic()
-    while True:
-        try:
-            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=idle_timeout)
-        except asyncio.TimeoutError:
+    async for kind, chunk in iter_chunks_with_idle(aiter, idle_timeout):
+        if kind == "idle":
             if rbuf:
                 yield ("reasoning", rbuf)
                 rbuf = ""
             last_emit = time.monotonic()
             yield ("idle", "")
             continue
-        except StopAsyncIteration:
-            break
         r = chunk_reasoning(chunk)
         if r:
             rbuf += r

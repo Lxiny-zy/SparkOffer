@@ -17,7 +17,7 @@ from backend.storage.assistant_chats import save_message
 from backend.spaced_repetition import get_due_reviews
 from backend.vector_memory import search_memory
 from backend.indexer import load_topics, retrieve_topic_context
-from backend.utils.sse_helpers import chunk_text, chunk_reasoning
+from backend.utils.sse_helpers import chunk_text, chunk_reasoning, iter_chunks_with_idle
 
 logger = logging.getLogger("uvicorn")
 
@@ -779,31 +779,28 @@ async def stream_assistant_chat(
         try:
             aiter = llm_with_tools.astream(lc_messages).__aiter__()
             last_beat = time.monotonic()
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(aiter.__anext__(), timeout=IDLE_HEARTBEAT_SECONDS)
-                    full_response = chunk if full_response is None else full_response + chunk
-
-                    if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
-                        has_tool_chunks = True
-
-                    # Forward thinking as a (throttled) keep-alive: a reasoning model streams
-                    # chunks with empty content during its thinking phase, so neither a token
-                    # nor the idle ping fires — the stream would go byte-silent until timeout.
-                    if chunk_reasoning(chunk) and time.monotonic() - last_beat >= 2.0:
-                        last_beat = time.monotonic()
-                        yield f"data: {json.dumps({'type': 'ping'})}\n\n"
-
-                    token = chunk_text(chunk)
-                    if token and not has_tool_chunks:
-                        streamed_content += token
-                        last_beat = time.monotonic()
-                        yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
-                except asyncio.TimeoutError:
+            async for _kind, chunk in iter_chunks_with_idle(aiter, IDLE_HEARTBEAT_SECONDS):
+                if _kind == "idle":
                     last_beat = time.monotonic()
                     yield f"data: {json.dumps({'type': 'ping'})}\n\n"
-                except StopAsyncIteration:
-                    break
+                    continue
+                full_response = chunk if full_response is None else full_response + chunk
+
+                if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
+                    has_tool_chunks = True
+
+                # Forward thinking as a (throttled) keep-alive: a reasoning model streams
+                # chunks with empty content during its thinking phase, so neither a token
+                # nor the idle ping fires — the stream would go byte-silent until timeout.
+                if chunk_reasoning(chunk) and time.monotonic() - last_beat >= 2.0:
+                    last_beat = time.monotonic()
+                    yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+
+                token = chunk_text(chunk)
+                if token and not has_tool_chunks:
+                    streamed_content += token
+                    last_beat = time.monotonic()
+                    yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error("Assistant LLM call failed: %s", e)
             if not streamed_content:
