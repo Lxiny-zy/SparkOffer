@@ -55,6 +55,24 @@ _index_cache_lock = threading.Lock()
 # GC'd instead of accumulating one entry per (user, topic) forever.
 _rebuild_locks: "weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock]" = weakref.WeakValueDictionary()
 
+# Thread-level build lock — serializes build_topic_index() per (user, topic) across
+# ALL callers (the async rebuild path AND the embedding task-queue path, both of
+# which run build_topic_index(force_rebuild=True) in worker threads). Without this
+# the two paths could concurrently persist/delete the same index → half-written
+# index or a Qdrant collection deleted mid-rebuild. Threading (not asyncio) lock
+# because the critical section runs in thread pools, not the event loop.
+_build_locks: "weakref.WeakValueDictionary[tuple[str, str], threading.Lock]" = weakref.WeakValueDictionary()
+_build_locks_guard = threading.Lock()
+
+
+def _get_build_lock(cache_key: tuple[str, str]) -> threading.Lock:
+    with _build_locks_guard:
+        lock = _build_locks.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _build_locks[cache_key] = lock
+        return lock
+
 
 def _cache_get(key: tuple[str, str]) -> "VectorStoreIndex | None":
     """Get index from cache, returning None if expired or missing."""
@@ -436,39 +454,58 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False,
     if cached is not None and not force_rebuild:
         return cached
 
-    _init_llama_settings()
+    # Serialize the actual build per (user, topic) so concurrent rebuild paths
+    # don't corrupt the persisted index / Qdrant collection. A local strong ref
+    # keeps the WeakValueDictionary entry alive for the duration of the hold.
+    build_lock = _get_build_lock(cache_key)
+    # Request-path callers (build_if_missing=False) must not block behind a long
+    # in-progress rebuild — treat "lock held" as "not ready yet".
+    blocking = build_if_missing or force_rebuild
+    if not build_lock.acquire(blocking=blocking):
+        raise IndexNotReady(f"index rebuild in progress: {topic}")
+    try:
+        # Double-check: a concurrent builder may have populated the cache while we
+        # waited. Only short-circuit for non-forced loads.
+        if not force_rebuild:
+            cached = _cache_get(cache_key)
+            if cached is not None:
+                return cached
 
-    topic_map = get_topic_map(user_id)
-    if topic not in topic_map:
-        raise ValueError(f"Unknown topic: {topic}. Available: {list(topic_map.keys())}")
+        _init_llama_settings()
 
-    dir_name = topic_map[topic]
-    topic_dir = settings.user_knowledge_path(user_id) / dir_name
-    cache_dir = settings.user_index_cache_path(user_id) / topic
-    exts = [".md", ".txt", ".py"]
+        topic_map = get_topic_map(user_id)
+        if topic not in topic_map:
+            raise ValueError(f"Unknown topic: {topic}. Available: {list(topic_map.keys())}")
 
-    if _use_qdrant_kb():
-        # Qdrant-only：配置走 Qdrant 时绝不退本地。任何 Qdrant 错误（缺 collection /
-        # 连接失败）都收敛成 IndexNotReady —— 请求路径据此降级空上下文 + 调度后台重建；
-        # 后台重建失败则由任务队列重试。全程不读写本地 .index_cache。
-        try:
-            index = _build_or_load_qdrant_index(
-                _kb_collection_name(user_id, topic), topic_dir, force_rebuild,
-                required_exts=exts, progress_cb=progress_cb, build_if_missing=build_if_missing,
+        dir_name = topic_map[topic]
+        topic_dir = settings.user_knowledge_path(user_id) / dir_name
+        cache_dir = settings.user_index_cache_path(user_id) / topic
+        exts = [".md", ".txt", ".py"]
+
+        if _use_qdrant_kb():
+            # Qdrant-only：配置走 Qdrant 时绝不退本地。任何 Qdrant 错误（缺 collection /
+            # 连接失败）都收敛成 IndexNotReady —— 请求路径据此降级空上下文 + 调度后台重建；
+            # 后台重建失败则由任务队列重试。全程不读写本地 .index_cache。
+            try:
+                index = _build_or_load_qdrant_index(
+                    _kb_collection_name(user_id, topic), topic_dir, force_rebuild,
+                    required_exts=exts, progress_cb=progress_cb, build_if_missing=build_if_missing,
+                )
+            except IndexNotReady:
+                raise
+            except Exception as e:
+                logger.warning("Qdrant KB 操作失败（%s/%s）：%s", topic, user_id, e)
+                raise IndexNotReady(f"qdrant kb unavailable: {topic}") from e
+        else:
+            index = _build_or_load_local_index(
+                cache_dir, topic_dir, force_rebuild, required_exts=exts,
+                progress_cb=progress_cb, build_if_missing=build_if_missing,
             )
-        except IndexNotReady:
-            raise
-        except Exception as e:
-            logger.warning("Qdrant KB 操作失败（%s/%s）：%s", topic, user_id, e)
-            raise IndexNotReady(f"qdrant kb unavailable: {topic}") from e
-    else:
-        index = _build_or_load_local_index(
-            cache_dir, topic_dir, force_rebuild, required_exts=exts,
-            progress_cb=progress_cb, build_if_missing=build_if_missing,
-        )
 
-    _cache_set(cache_key, index)
-    return index
+        _cache_set(cache_key, index)
+        return index
+    finally:
+        build_lock.release()
 
 
 def topic_index_exists(topic: str, user_id: str) -> bool:

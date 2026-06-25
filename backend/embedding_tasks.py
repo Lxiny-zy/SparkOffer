@@ -252,20 +252,11 @@ class EmbeddingTaskQueue:
         Optional metadata (user_id / topic / label / file_count) is surfaced via
         get_status() / list_statuses() so UI can poll progress.
         """
-        if not self._started:
-            # Auto-start in background, then submit. Best-effort: the real
-            # enqueue happens inside _auto_start_and_submit once the loop is up.
-            self._track(self._auto_start_and_submit(
-                task_id, func, args, kwargs, priority, max_retries,
-                user_id, topic, label, file_count,
-            ))
-            return True
-
         if task_id in self._pending_ids or task_id in self._active_tasks:
             logger.debug(f"Embedding task deduplicated: {task_id}")
             return False
 
-        if self._queue.full():
+        if self._started and self._queue.full():
             self._stats["dropped"] += 1
             logger.warning(f"Embedding task queue full, dropping: {task_id}")
             return False
@@ -282,25 +273,34 @@ class EmbeddingTaskQueue:
             label=label,
             file_count=file_count,
         )
+        # Reserve dedup id + publish a pending status synchronously, even when the
+        # loop isn't up yet — otherwise concurrent submits in the startup window
+        # would each enqueue a duplicate and get_status() would return None.
         self._pending_ids.add(task_id)
-        self._queue.put_nowait(task)
         self._statuses[task_id] = TaskStatus(
             task_id=task_id, user_id=user_id, topic=topic, label=label,
             state="pending", submitted_at=time.time(),
             file_count=file_count, message="队列中，等待执行",
         )
         self._gc_statuses()
+
+        if self._started:
+            self._queue.put_nowait(task)
+        else:
+            # Loop not started yet: start it, then enqueue this exact task.
+            self._track(self._auto_start_and_enqueue(task))
         return True
 
-    async def _auto_start_and_submit(self, task_id, func, args, kwargs, priority, max_retries,
-                                     user_id="", topic="", label="", file_count=0):
+    async def _auto_start_and_enqueue(self, task: "EmbeddingTask"):
         await self.start()
-        self.submit(
-            task_id, func, *args,
-            priority=priority, max_retries=max_retries,
-            user_id=user_id, topic=topic, label=label, file_count=file_count,
-            **kwargs,
-        )
+        try:
+            self._queue.put_nowait(task)
+        except asyncio.QueueFull:
+            self._pending_ids.discard(task.task_id)
+            self._stats["dropped"] += 1
+            logger.warning(f"Embedding task queue full, dropping: {task.task_id}")
+            self._update_status(task.task_id, state="failed",
+                                finished_at=time.time(), error="队列已满")
 
     def _track(self, coro) -> asyncio.Task:
         """Run a detached coroutine, keeping a reference so it isn't GC'd mid-flight

@@ -255,7 +255,7 @@ def evaluate_job_prep_answers(
     user_id: str,
 ) -> dict:
     """Evaluate answers against the JD's real hiring bar."""
-    answer_map = {a["question_id"]: a["answer"] for a in answers}
+    answer_map = {a["question_id"]: a.get("answer", "") for a in answers if a.get("question_id")}
     answered_questions = [q for q in questions if answer_map.get(q["id"])]
 
     qa_lines = []
@@ -283,15 +283,16 @@ def evaluate_job_prep_answers(
         SystemMessage(content="你是 JD 备面评估引擎。只返回 JSON。"),
         HumanMessage(content=prompt),
     ])
+    raw = chunk_text(response)
 
     try:
-        result = _parse_json_response(response.content)
+        result = _parse_json_response(raw)
         if not isinstance(result, dict):
             raise ValueError(f"Expected dict, got {type(result)}")
         return result
     except Exception as exc:
         logger.error(f"JD prep evaluation failed: {exc}")
-        logger.error(f"LLM raw response: {response.content[:800]}")
+        logger.error(f"LLM raw response: {raw[:800]}")
         return {
             "scores": [
                 {
@@ -436,7 +437,7 @@ async def stream_evaluate_job_prep_answers(
     questions: list[dict], answers: list[dict], preview: dict, user_id: str,
 ) -> AsyncGenerator[str, None]:
     """Stream SSE events while evaluating JD prep answers."""
-    answer_map = {a["question_id"]: a["answer"] for a in answers}
+    answer_map = {a["question_id"]: a.get("answer", "") for a in answers if a.get("question_id")}
     answered_questions = [q for q in questions if answer_map.get(q["id"])]
 
     yield f"data: {json.dumps({'type': 'eval_start', 'total': len(answered_questions)}, ensure_ascii=False)}\n\n"

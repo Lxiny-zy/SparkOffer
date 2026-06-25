@@ -113,13 +113,17 @@ export default function QAArena() {
 
   // Load sessions on mount
   useEffect(() => {
-    listQASessions().then((data) => {
-      setSessions(data.sessions);
-      if (data.sessions.length > 0) {
-        switchSession(data.sessions[0].id);
-      }
-      setLoaded(true);
-    });
+    listQASessions()
+      .then((data) => {
+        setSessions(data.sessions);
+        if (data.sessions.length > 0) {
+          switchSession(data.sessions[0].id);
+        }
+      })
+      // A network-layer reject (e.g. offline) would otherwise leave `loaded`
+      // false forever, freezing the page on the full-screen loader.
+      .catch(() => {})
+      .finally(() => setLoaded(true));
   }, []);
 
   // Auto-scroll: instant during streaming, smooth on new user message

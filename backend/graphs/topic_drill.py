@@ -247,7 +247,7 @@ def evaluate_drill_answers(topic: str, questions: list[dict], answers: list[dict
     """Batch evaluate all answers. 1 LLM call."""
     topic_display = _get_topic_display(user_id)
     topic_name = topic_display.get(topic, topic)
-    answer_map = {a["question_id"]: a["answer"] for a in answers}
+    answer_map = {a["question_id"]: a.get("answer", "") for a in answers if a.get("question_id")}
 
     # Only evaluate answered questions
     answered_questions = [q for q in questions if answer_map.get(q["id"])]
@@ -305,7 +305,7 @@ async def stream_evaluate_drill_answers(
     """Stream SSE events while evaluating drill answers. Yields SSE lines."""
     topic_display = _get_topic_display(user_id)
     topic_name = topic_display.get(topic, topic)
-    answer_map = {a["question_id"]: a["answer"] for a in answers}
+    answer_map = {a["question_id"]: a.get("answer", "") for a in answers if a.get("question_id")}
     answered_questions = [q for q in questions if answer_map.get(q["id"])]
 
     yield f"data: {json.dumps({'type': 'eval_start', 'total': len(answered_questions)}, ensure_ascii=False)}\n\n"

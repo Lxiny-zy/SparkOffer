@@ -90,6 +90,7 @@ export async function fetchSSE<T>(
   url: string,
   options: RequestInit,
   callbacks?: SSECallbacks,
+  externalSignal?: AbortSignal,
 ): Promise<T> {
   return withSSETimeout<T>(async (signal) => {
     const res = await fetch(url, {
@@ -138,5 +139,5 @@ export async function fetchSSE<T>(
 
     if (!result) throw new Error("请求失败：未收到结果");
     return result;
-  });
+  }, SSE_TIMEOUT_MS, externalSignal);
 }

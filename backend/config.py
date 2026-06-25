@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     default_password: str = "legend"
     default_name: str = "Legend"
     allow_registration: bool = False
+    # Comma-separated allowed CORS origins. Default "*" keeps current behavior;
+    # set to your frontend origin(s) in production (e.g. "https://app.example.com").
+    cors_allow_origins: str = "*"
 
     # Interview settings
     max_questions_per_phase: int = 5

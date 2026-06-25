@@ -26,6 +26,12 @@ export default function AlgorithmSolver() {
   const navigate = useNavigate();
   const location = useLocation();
   const chatEndRef = useRef<HTMLDivElement>(null);
+  // Aborts the in-flight solve/chat stream on unmount or when a new one starts,
+  // so the SSE connection is released immediately instead of lingering to the
+  // 6-minute timeout and firing setState on an unmounted component.
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   // Input state
   const [problemText, setProblemText] = useState("");
@@ -99,19 +105,25 @@ export default function AlgorithmSolver() {
     setChatMessages([]);
     setSessionId(null);
     setReviewing(false);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const data = await solveAlgorithm(problemText.trim(), language, sourceUrl.trim(), {
         onProgress: (msg) => setSolveProgress(msg),
         onContent: (delta) => setSolution((prev) => prev + delta),
-      });
+      }, controller.signal);
       setSessionId(data.session_id);
       setSolution(data.solution);
       clearProblemDraft(); // Problem committed — clear draft
     } catch (e) {
+      if (controller.signal.aborted) return;
       console.error("解题失败:", e);
       setSolution("解题请求失败，请检查后端服务是否正常运行。");
+    } finally {
+      if (!controller.signal.aborted) setSolving(false);
+      if (abortRef.current === controller) abortRef.current = null;
     }
-    setSolving(false);
   };
 
   const handleChat = async () => {
@@ -129,11 +141,14 @@ export default function AlgorithmSolver() {
         if (last && last.role === "assistant") next[next.length - 1] = { ...last, content: last.content + delta };
         return next;
       });
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const data = await chatAlgorithm(sessionId, userMsg, {
         onProgress: (msg) => setChatProgress(msg),
         onContent: appendToLast,
-      });
+      }, controller.signal);
       // 用 complete 事件的完整文本兜底校正（防止逐字增量在边界丢字）
       setChatMessages((prev) => {
         const next = [...prev];
@@ -142,6 +157,7 @@ export default function AlgorithmSolver() {
         return next;
       });
     } catch (e) {
+      if (controller.signal.aborted) return;
       console.error("对话失败:", e);
       setChatMessages((prev) => {
         const next = [...prev];
@@ -149,8 +165,10 @@ export default function AlgorithmSolver() {
         if (last && last.role === "assistant") next[next.length - 1] = { role: "assistant", content: "请求失败，请重试。" };
         return next;
       });
+    } finally {
+      if (!controller.signal.aborted) setChatLoading(false);
+      if (abortRef.current === controller) abortRef.current = null;
     }
-    setChatLoading(false);
   };
 
   const handleSave = async () => {

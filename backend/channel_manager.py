@@ -8,10 +8,16 @@ logger = logging.getLogger("uvicorn")
 
 COOLDOWN_SECONDS = 60.0
 MAX_ERRORS_BEFORE_COOLDOWN = 3
+# Max time a single HALF_OPEN probe may hold the gate before another is allowed.
+# Guards against a probe request that dies without ever reporting success/error.
+PROBE_TIMEOUT_SECONDS = 30.0
 
 
 class ChannelState:
-    __slots__ = ("channel_id", "healthy", "error_count", "cooldown_until", "current_key_index")
+    __slots__ = (
+        "channel_id", "healthy", "error_count", "cooldown_until",
+        "current_key_index", "probing", "probe_started",
+    )
 
     def __init__(self, channel_id: str):
         self.channel_id = channel_id
@@ -19,6 +25,8 @@ class ChannelState:
         self.error_count = 0
         self.cooldown_until = 0.0
         self.current_key_index = 0
+        self.probing = False
+        self.probe_started = 0.0
 
     def next_key(self, keys: list[str]) -> str:
         if not keys:
@@ -28,6 +36,7 @@ class ChannelState:
         return key
 
     def mark_error(self):
+        self.probing = False
         self.error_count += 1
         if self.error_count >= MAX_ERRORS_BEFORE_COOLDOWN:
             self.healthy = False
@@ -42,19 +51,23 @@ class ChannelState:
             logger.info("Channel %s recovered", self.channel_id)
         self.error_count = 0
         self.healthy = True
+        self.probing = False
 
     def is_available(self) -> bool:
         if self.healthy:
             return True
-        if time.time() >= self.cooldown_until:
-            # HALF_OPEN probe: selectable again, but one error short of re-tripping.
-            # mark_success() clears it on a real success; a single mark_error()
-            # pushes error_count back to MAX and re-cools immediately — so the
-            # channel is never fully trusted until it actually succeeds once.
-            self.healthy = True
-            self.error_count = MAX_ERRORS_BEFORE_COOLDOWN - 1
-            return True
-        return False
+        now = time.time()
+        if now < self.cooldown_until:
+            return False
+        # Cooldown elapsed → HALF_OPEN. Admit exactly ONE probe request at a time;
+        # concurrent callers are rejected until the probe reports success/error,
+        # so a recovering channel isn't hammered by the whole recovery burst.
+        # healthy stays False until a real mark_success() so the gate keeps holding.
+        if self.probing and (now - self.probe_started) < PROBE_TIMEOUT_SECONDS:
+            return False
+        self.probing = True
+        self.probe_started = now
+        return True
 
 
 class ChannelManager:

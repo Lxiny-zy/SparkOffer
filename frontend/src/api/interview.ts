@@ -116,20 +116,20 @@ export async function startInterviewStream(mode: string, topic: string | null, {
   }, undefined, externalSignal);
 }
 
-export async function previewJobPrep(payload: any, callbacks?: SSECallbacks): Promise<any> {
+export async function previewJobPrep(payload: any, callbacks?: SSECallbacks, signal?: AbortSignal): Promise<any> {
   return fetchSSE(`${API_BASE}/job-prep/preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  }, callbacks);
+  }, callbacks, signal);
 }
 
-export async function startJobPrep(payload: any, callbacks?: SSECallbacks): Promise<any> {
+export async function startJobPrep(payload: any, callbacks?: SSECallbacks, signal?: AbortSignal): Promise<any> {
   return fetchSSE(`${API_BASE}/job-prep/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  }, callbacks);
+  }, callbacks, signal);
 }
 
 export async function sendMessage(sessionId: string, message: string, callbacks?: SSECallbacks): Promise<any> {
@@ -575,20 +575,20 @@ export async function exportFavorites(format: string, ids: string[] | null = nul
 
 // ── Algorithm Solver ──
 
-export async function solveAlgorithm(problemText: string, language: string = "python", sourceUrl: string = "", callbacks?: SSECallbacks): Promise<any> {
+export async function solveAlgorithm(problemText: string, language: string = "python", sourceUrl: string = "", callbacks?: SSECallbacks, signal?: AbortSignal): Promise<any> {
   return fetchSSE(`${API_BASE}/algorithm/solve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ problem_text: problemText, language, source_url: sourceUrl }),
-  }, callbacks);
+  }, callbacks, signal);
 }
 
-export async function chatAlgorithm(sessionId: string, message: string, callbacks?: SSECallbacks): Promise<any> {
+export async function chatAlgorithm(sessionId: string, message: string, callbacks?: SSECallbacks, signal?: AbortSignal): Promise<any> {
   return fetchSSE(`${API_BASE}/algorithm/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, message }),
-  }, callbacks);
+  }, callbacks, signal);
 }
 
 export async function saveAlgorithmCard(sessionId: string, title: string, difficulty: string = "", tags: string[] = [], note: string = ""): Promise<any> {

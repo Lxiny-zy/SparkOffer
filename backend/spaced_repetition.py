@@ -140,11 +140,14 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
             prev_sr = wp.get("sr", {})
             new_sr = sm2_update(prev_sr, score)
             # Graduation requires 3 *consecutive* scores >= 7. Legacy SR entries
-            # did not store consecutive_high, so use repetitions as the migration
-            # baseline unless last_score proves the previous pass was mediocre.
+            # did not store consecutive_high. `repetitions` counts SM-2 passes
+            # (score >= 6), NOT high scores (>= 7), so it must NOT be used as the
+            # high-streak baseline — that would let a long run of mediocre passes
+            # graduate a weak point on its first real high score. Credit at most
+            # the single known last score so graduation still needs fresh highs.
             prev_high = prev_sr.get("consecutive_high")
             if prev_high is None:
-                prev_high = prev_sr.get("repetitions", 0) if prev_sr.get("last_score", 7) >= 7 else 0
+                prev_high = 1 if prev_sr.get("last_score", 0) >= 7 else 0
             new_sr["consecutive_high"] = (int(prev_high) + 1) if score >= 7 else 0
             wp["sr"] = new_sr
 
@@ -159,11 +162,16 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
                 wp["improved"] = True
                 wp["improved_at"] = datetime.now().isoformat()
                 wp["improved_reason"] = "spaced_repetition_mastery"
-                profile.setdefault("strong_points", []).append({
-                    "point": f"已掌握: {wp['point']}",
-                    "topic": wp.get("topic", ""),
-                    "first_seen": datetime.now().isoformat(),
-                })
+                strong = profile.setdefault("strong_points", [])
+                marker = f"已掌握: {wp['point']}"
+                # Dedup: repeated graduations (or replayed history) must not pile
+                # up duplicate "已掌握" entries — matches memory.py's merge guard.
+                if not any(isinstance(sp, dict) and sp.get("point") == marker for sp in strong):
+                    strong.append({
+                        "point": marker,
+                        "topic": wp.get("topic", ""),
+                        "first_seen": datetime.now().isoformat(),
+                    })
             matched += 1
 
         if not matched:

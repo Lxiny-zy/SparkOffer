@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.config import settings
 from backend.routers import (
     auth, settings_router, resume, interview, recording,
     profile, knowledge, job_prep, algorithm, favorites,
@@ -95,9 +96,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SparkOffer", version="0.3.0", lifespan=lifespan)
 
+_cors_origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()] or ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

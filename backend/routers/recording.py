@@ -13,6 +13,8 @@ from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api")
 
+MAX_AUDIO_BYTES = 50 * 1024 * 1024    # 50MB — short interview-answer clips
+
 
 @router.post("/recording/transcribe")
 async def recording_transcribe(
@@ -20,7 +22,19 @@ async def recording_transcribe(
     mode: str = Form("dual"),
     user_id: str = Depends(get_current_user),
 ):
-    audio_bytes = await file.read()
+    # Read with a size cap so an oversized upload can't balloon memory and then
+    # pin a to_thread worker inside the transcriber. Mirrors resume.py /transcribe.
+    parts = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_AUDIO_BYTES:
+            raise HTTPException(413, f"音频过大（>{MAX_AUDIO_BYTES // (1024*1024)}MB）")
+        parts.append(chunk)
+    audio_bytes = b"".join(parts)
     if not audio_bytes:
         raise HTTPException(400, "Empty audio file.")
 

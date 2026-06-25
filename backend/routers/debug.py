@@ -14,7 +14,7 @@ from collections import Counter
 
 from fastapi import APIRouter, Depends
 
-from backend.auth import get_current_user
+from backend.auth import require_owner
 
 router = APIRouter(prefix="/api")
 
@@ -87,8 +87,8 @@ def _tracemalloc_top(top: int = 15) -> dict:
 
 
 @router.get("/debug/memory")
-def debug_memory(_user_id: str = Depends(get_current_user)):
-    """内存诊断快照（只读）。gc 段会遍历全部对象，可能短暂耗时 ~1s。"""
+def debug_memory(_user_id: str = Depends(require_owner)):
+    """内存诊断快照（只读，仅 owner）。gc 段会遍历全部对象，可能短暂耗时 ~1s。"""
     return {
         "process_mb": _process_mem(),
         "modules_loaded": len(sys.modules),

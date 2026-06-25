@@ -29,6 +29,25 @@ import numpy as np
 
 logger = logging.getLogger("uvicorn")
 
+
+def _redact_url(url: str) -> str:
+    """Mask any password in a redis URL (redis://user:pass@host) before logging
+    or returning it — Redis URLs commonly embed credentials."""
+    if not url:
+        return url
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(url)
+        if parts.password is None:
+            return url
+        host = parts.hostname or ""
+        if parts.port:
+            host += f":{parts.port}"
+        userinfo = (parts.username or "") + ":***@"
+        return urlunsplit((parts.scheme, userinfo + host, parts.path, parts.query, parts.fragment))
+    except Exception:
+        return "redis://<redacted>"
+
 _LRU_MAX = 5000
 _EMBED_TTL = 7 * 24 * 3600   # 7d
 _DEFAULT_JSON_TTL = 3600     # 1h
@@ -118,11 +137,11 @@ class RedisCache:
             # init() call hits a misconfigured URL.
             self._redis = client
             self._url = url
-            logger.info("Redis cache: connected to %s", url)
+            logger.info("Redis cache: connected to %s", _redact_url(url))
         except Exception as exc:
             logger.warning(
                 "Redis cache: connection to %s failed (%s). Keeping existing backend (%s).",
-                url, exc, "redis" if self._redis is not None else "memory",
+                _redact_url(url), exc, "redis" if self._redis is not None else "memory",
             )
 
     def is_ready(self) -> bool:
@@ -257,7 +276,7 @@ class RedisCache:
     def health(self) -> dict:
         return {
             "backend": "redis" if self._redis is not None else "memory",
-            "url": self._url if self._redis is not None else "",
+            "url": _redact_url(self._url) if self._redis is not None else "",
             "hits": self.stats.hits,
             "misses": self.stats.misses,
             "errors": self.stats.errors,

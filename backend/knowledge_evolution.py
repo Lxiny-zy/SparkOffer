@@ -65,6 +65,8 @@ async def extract_and_writeback(
     try:
         worthy = []
         for i, s in enumerate(scores):
+            if i >= len(questions):
+                break
             score_val = s.get("score", 5) if isinstance(s, dict) else 5
             if score_val >= 7 or score_val < 6:
                 q_text = questions[i].get("question", str(questions[i])) if isinstance(questions[i], dict) else str(questions[i])
@@ -112,6 +114,8 @@ async def collect_high_freq(
     try:
         low_score_items = []
         for i, s in enumerate(scores):
+            if i >= len(questions):
+                break
             score_val = s.get("score", 5) if isinstance(s, dict) else 5
             if score_val < 6:
                 q_text = questions[i].get("question", str(questions[i])) if isinstance(questions[i], dict) else str(questions[i])

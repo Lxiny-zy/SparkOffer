@@ -20,6 +20,10 @@ logger = logging.getLogger("uvicorn")
 _DASHSCOPE_SUBMIT = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
 _DASHSCOPE_QUERY = "https://dashscope.aliyuncs.com/api/v1/tasks/"
 
+# (connect, read) timeouts — requests defaults to None (wait forever), which can
+# hang a worker thread indefinitely on a half-open connection.
+_HTTP_TIMEOUT = (10, 30)
+
 
 def _upload_to_qiniu(local_path: str, suffix: str) -> str:
     """Upload file to Qiniu OSS, return public URL."""
@@ -65,7 +69,7 @@ def transcribe_audio(audio_bytes: bytes, suffix: str = ".webm") -> str:
             "parameters": {"channel_id": [0]},
         }
 
-        resp = requests.post(_DASHSCOPE_SUBMIT, headers=headers, json=payload)
+        resp = requests.post(_DASHSCOPE_SUBMIT, headers=headers, json=payload, timeout=_HTTP_TIMEOUT)
         if resp.status_code != 200:
             raise RuntimeError(f"Transcription submit failed: {resp.text}")
 
@@ -76,7 +80,7 @@ def transcribe_audio(audio_bytes: bytes, suffix: str = ".webm") -> str:
         query_headers = {"Authorization": f"Bearer {dashscope_key}"}
         for _ in range(300):
             time.sleep(3)
-            qr = requests.get(_DASHSCOPE_QUERY + task_id, headers=query_headers)
+            qr = requests.get(_DASHSCOPE_QUERY + task_id, headers=query_headers, timeout=_HTTP_TIMEOUT)
             output = qr.json().get("output", {})
             status = output.get("task_status", "").upper()
 
@@ -106,7 +110,7 @@ def _extract_text(output: dict) -> str:
     if not url:
         return ""
 
-    resp = requests.get(url)
+    resp = requests.get(url, timeout=_HTTP_TIMEOUT)
     if resp.status_code != 200:
         return ""
 

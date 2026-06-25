@@ -64,7 +64,7 @@ async def evaluate_decoupled(
     """
     topic_display = _get_topic_display(user_id)
     topic_name = topic_display.get(topic, topic)
-    answer_map = {a["question_id"]: a["answer"] for a in answers}
+    answer_map = {a["question_id"]: a.get("answer", "") for a in answers if a.get("question_id")}
 
     # Empty answers should record a zero-score row, not vanish silently —
     # otherwise the user's profile mastery stays artificially high for

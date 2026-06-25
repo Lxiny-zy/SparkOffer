@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { BriefcaseBusiness, Loader2, Sparkles, FileText, Target, ShieldAlert } from "lucide-react";
 import { getResumeStatus, previewJobPrep, startJobPrep } from "../api/interview";
@@ -36,6 +36,11 @@ export default function JobPrep() {
   const [starting, setStarting] = useState<boolean>(false);
   const [startProgress, setStartProgress] = useState<string>("");
   const [error, setError] = useState<string>("");
+  // Aborts the in-flight preview/start stream on unmount so the SSE connection
+  // is released instead of lingering and firing setState on an unmounted page.
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   useEffect(() => {
     getResumeStatus()
@@ -71,14 +76,19 @@ export default function JobPrep() {
     setPreviewing(true);
     setPreviewProgress("");
     setError("");
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const data = await previewJobPrep(payload, { onProgress: (msg) => setPreviewProgress(msg) });
+      const data = await previewJobPrep(payload, { onProgress: (msg) => setPreviewProgress(msg) }, controller.signal);
       setPreview(data.preview);
       setPreviewSignature(signature);
     } catch (err: any) {
+      if (controller.signal.aborted) return;
       setError("JD 分析失败: " + err.message);
     } finally {
-      setPreviewing(false);
+      if (!controller.signal.aborted) setPreviewing(false);
+      if (abortRef.current === controller) abortRef.current = null;
     }
   };
 
@@ -86,14 +96,20 @@ export default function JobPrep() {
     setStarting(true);
     setStartProgress("");
     setError("");
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const data = await startJobPrep({ ...payload, preview_data: preview }, {
         onProgress: (msg) => setStartProgress(msg),
-      });
+      }, controller.signal);
       navigate(`/interview/${data.session_id}`, { state: data });
     } catch (err: any) {
+      if (controller.signal.aborted) return;
       setError("启动失败: " + err.message);
       setStarting(false);
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
     }
   };
 

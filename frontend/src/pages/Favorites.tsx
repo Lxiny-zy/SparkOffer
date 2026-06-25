@@ -80,12 +80,22 @@ export default function Favorites() {
 
   const handleBulkDelete = async () => {
     if (!confirm(`确定删除选中的 ${selected.size} 条收藏？`)) return;
-    for (const id of selected) {
-      await deleteFavorite(id);
+    // Delete each independently so one failure doesn't leave the UI showing rows
+    // that were actually deleted; only prune the ones that succeeded.
+    const results = await Promise.allSettled(
+      [...selected].map((id) => deleteFavorite(id).then(() => id)),
+    );
+    const deleted = new Set(
+      results.filter((r) => r.status === "fulfilled").map((r) => (r as PromiseFulfilledResult<string>).value),
+    );
+    if (deleted.size) {
+      setItems((prev) => prev.filter((it) => !deleted.has(it.id)));
+      setTotal((prev) => prev - deleted.size);
+      setSelected((prev) => new Set([...prev].filter((id) => !deleted.has(id))));
     }
-    setItems((prev) => prev.filter((it) => !selected.has(it.id)));
-    setTotal((prev) => prev - selected.size);
-    setSelected(new Set());
+    if (deleted.size < selected.size) {
+      alert(`有 ${selected.size - deleted.size} 条删除失败，请重试。`);
+    }
   };
 
   const handleExport = async (format: string, ids?: string[] | null) => {

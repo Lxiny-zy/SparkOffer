@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import threading
 import time
 from urllib.parse import urlparse, urlunparse, quote
 
@@ -100,6 +101,7 @@ def _normalize_proxy_url(proxy: str) -> str:
 
 
 _http_client_cache: dict[tuple, tuple[httpx.Client, httpx.AsyncClient]] = {}
+_http_client_cache_lock = threading.Lock()
 
 
 def _build_http_clients(proxy: str = "", *, timeout: httpx.Timeout | None = _LLM_TIMEOUT):
@@ -114,14 +116,20 @@ def _build_http_clients(proxy: str = "", *, timeout: httpx.Timeout | None = _LLM
     cached = _http_client_cache.get(cache_key)
     if cached is not None:
         return cached
-    kw: dict = {"headers": _CUSTOM_HEADERS, "follow_redirects": True}
-    if timeout:
-        kw["timeout"] = timeout
-    if proxy:
-        kw["proxy"] = _normalize_proxy_url(proxy)
-    pair = (httpx.Client(**kw), httpx.AsyncClient(**kw))
-    _http_client_cache[cache_key] = pair
-    return pair
+    # Lock the build+store so concurrent first-time callers don't each create a
+    # client pair where all but one get orphaned (leaking sockets/FDs).
+    with _http_client_cache_lock:
+        cached = _http_client_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        kw: dict = {"headers": _CUSTOM_HEADERS, "follow_redirects": True}
+        if timeout:
+            kw["timeout"] = timeout
+        if proxy:
+            kw["proxy"] = _normalize_proxy_url(proxy)
+        pair = (httpx.Client(**kw), httpx.AsyncClient(**kw))
+        _http_client_cache[cache_key] = pair
+        return pair
 
 
 def _channel_timeout(channel: dict) -> httpx.Timeout:
