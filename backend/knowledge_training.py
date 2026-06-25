@@ -295,6 +295,7 @@ def sample_topic_sections(
     count: int,
     mode: str = "random",
     seed: str | None = None,
+    exclude_section_keys: set[tuple[str, str]] | None = None,
 ) -> tuple[list[KnowledgeSection], str]:
     if mode not in SUPPORTED_MODES:
         raise ValueError("当前版本仅支持随机知识点和高频考点模式")
@@ -302,6 +303,21 @@ def sample_topic_sections(
     seed_value = seed or f"{topic}:{time.time_ns()}"
     sections = collect_topic_sections(user_id, topic, mode=mode)
     rnd = random.Random(hashlib.sha256(seed_value.encode("utf-8")).hexdigest())
+
+    # Section-coverage dedup: steer sampling toward sections that haven't been
+    # turned into cards yet, so each round covers new ground. Only fall back to
+    # already-carded sections when there aren't enough fresh ones.
+    if exclude_section_keys:
+        uncovered = [s for s in sections if _section_ref_key(s) not in exclude_section_keys]
+        if len(uncovered) >= count:
+            sampled = _coherent_section_sample(uncovered, count, rnd)
+            return sampled, seed_value
+        if uncovered:
+            covered = [s for s in sections if _section_ref_key(s) in exclude_section_keys]
+            fill = _coherent_section_sample(covered, count - len(uncovered), rnd)
+            return (_coherent_section_sample(uncovered, len(uncovered), rnd) + fill)[:count], seed_value
+        # Everything is already covered → allow re-coverage (review-by-regeneration).
+
     sampled = _coherent_section_sample(sections, count, rnd)
     return sampled, seed_value
 

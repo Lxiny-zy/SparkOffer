@@ -14,6 +14,7 @@ import {
   Loader2,
   Play,
   RefreshCw,
+  RotateCcw,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -26,14 +27,17 @@ import { getTopicIcon } from "../utils/topicIcons";
 import useDraftPersist, { readDraft } from "../hooks/useDraftPersist";
 import {
   generateKnowledgeTrainingCards,
+  getDueKnowledgeCards,
   getKnowledgeTrainingAvailability,
+  reviewKnowledgeCard,
+  type Familiarity,
   type KnowledgeTrainingAvailabilityItem,
   type KnowledgeTrainingCard,
   type KnowledgeTrainingDepth,
   type KnowledgeTrainingMode,
 } from "../api/knowledgeTraining";
 
-type Familiarity = "known" | "uncertain" | "unknown";
+type StudyMode = "new" | "review";
 
 const COUNT_OPTIONS = [3, 5, 10];
 const MODE_OPTIONS: { value: KnowledgeTrainingMode; label: string }[] = [
@@ -108,11 +112,13 @@ export default function KnowledgeTraining() {
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
+  // 新卡生成 vs 到期复习 (SM-2 driven).
+  const [studyMode, setStudyMode] = useState<StudyMode>("new");
 
   const topicKeys = Object.keys(availability);
   const selectedInfo = selected ? availability[selected] : null;
   const currentCard = cards[currentIndex] || null;
-  const familiarityKey = selected ? `knowledge-training:familiarity:${selected}` : "";
+  const dueCount = selectedInfo?.due_count ?? 0;
 
   const loadAvailability = useCallback(async () => {
     setLoadingTopics(true);
@@ -138,47 +144,43 @@ export default function KnowledgeTraining() {
 
   const sessionKey = selected ? `knowledge-training:session:${selected}` : "";
 
-  const clearFamiliarity = useCallback(() => {
-    setFamiliarity({});
-    if (!familiarityKey) return;
-    try {
-      localStorage.removeItem(familiarityKey);
-    } catch {
-      /* noop */
+  // Familiarity now lives server-side on each card (SM-2 state). Build the
+  // in-view lookup from the cards' own familiarity field.
+  const hydrateFamiliarity = useCallback((list: KnowledgeTrainingCard[]) => {
+    const map: Record<string, Familiarity> = {};
+    for (const c of list) {
+      if (c.familiarity === "known" || c.familiarity === "uncertain" || c.familiarity === "unknown") {
+        map[c.id] = c.familiarity;
+      }
     }
-  }, [familiarityKey]);
+    setFamiliarity(map);
+  }, []);
 
+  // On topic / mode switch: reset, and in "new" mode restore the last generated
+  // session (survives refresh / nav away, avoiding a wasted LLM regeneration).
   useEffect(() => {
-    if (!familiarityKey) return;
-    try {
-      setFamiliarity(JSON.parse(localStorage.getItem(familiarityKey) || "{}"));
-    } catch {
-      setFamiliarity({});
-    }
-    // Restore a previously generated card session (survives refresh / nav away),
-    // avoiding a wasted LLM regeneration.
-    const saved = readDraft<{ cards: KnowledgeTrainingCard[]; currentIndex: number }>(sessionKey);
-    if (saved?.cards?.length) {
-      setCards(saved.cards);
-      setCurrentIndex(Math.min(saved.currentIndex || 0, saved.cards.length - 1));
-    } else {
-      setCards([]);
-      setCurrentIndex(0);
-    }
     setRevealedAnswers({});
     setError("");
-  }, [familiarityKey, sessionKey]);
+    setCurrentIndex(0);
+    if (studyMode === "new") {
+      const saved = readDraft<{ cards: KnowledgeTrainingCard[]; currentIndex: number }>(sessionKey);
+      if (saved?.cards?.length) {
+        setCards(saved.cards);
+        setCurrentIndex(Math.min(saved.currentIndex || 0, saved.cards.length - 1));
+        hydrateFamiliarity(saved.cards);
+        return;
+      }
+    }
+    setCards([]);
+    setFamiliarity({});
+  }, [sessionKey, studyMode, hydrateFamiliarity]);
 
-  // Persist the generated card session per topic.
+  // Persist the generated card session per topic (new mode only).
   useDraftPersist({
-    key: cards.length > 0 ? sessionKey : null,
+    key: studyMode === "new" && cards.length > 0 ? sessionKey : null,
     value: { cards, currentIndex },
     isEmpty: (s) => !s.cards.length,
   });
-
-  useEffect(() => {
-    if (familiarityKey) localStorage.setItem(familiarityKey, JSON.stringify(familiarity));
-  }, [familiarity, familiarityKey]);
 
   const markedStats = useMemo(() => {
     const visibleIds = new Set(cards.map((card) => card.id));
@@ -194,20 +196,13 @@ export default function KnowledgeTraining() {
 
   const startTraining = useCallback(async () => {
     if (!selected || generating) return;
-    // Warn when re-generating discards marked progress.
-    const marked = Object.keys(familiarity).filter((id) => cards.some((card) => card.id === id)).length;
-    if (cards.length > 0 && marked > 0) {
-      if (!confirm(`当前已标记 ${marked} 张卡片的熟悉度，换一组将清空标记进度。确定继续？`)) {
-        return;
-      }
-    }
     setGenerating(true);
     setProgress("正在准备训练卡片...");
     setError("");
     setCards([]);
     setCurrentIndex(0);
     setRevealedAnswers({});
-    clearFamiliarity();
+    setFamiliarity({});
     try {
       const result = await generateKnowledgeTrainingCards(
         { topic: selected, count, mode, depth },
@@ -220,19 +215,63 @@ export default function KnowledgeTraining() {
       );
       setCards(result.cards);
       setCurrentIndex(0);
+      hydrateFamiliarity(result.cards);
       setProgress("");
       toast.success(`已生成 ${result.total} 张训练卡片`);
+      loadAvailability(); // refresh saved/due badges
     } catch (e: any) {
       setError(e.message || "训练卡片生成失败");
       setProgress("");
     } finally {
       setGenerating(false);
     }
-  }, [cards, clearFamiliarity, count, depth, familiarity, generating, mode, selected]);
+  }, [count, depth, generating, hydrateFamiliarity, loadAvailability, mode, selected]);
 
-  const setCardFamiliarity = (value: Familiarity) => {
+  const startReview = useCallback(async () => {
+    if (!selected || generating) return;
+    setGenerating(true);
+    setProgress("正在加载到期卡片...");
+    setError("");
+    setCards([]);
+    setCurrentIndex(0);
+    setRevealedAnswers({});
+    setFamiliarity({});
+    try {
+      const { cards: due } = await getDueKnowledgeCards(selected);
+      setCards(due);
+      setCurrentIndex(0);
+      hydrateFamiliarity(due);
+      setProgress("");
+      if (due.length === 0) toast.info("当前没有到期需要复习的卡片");
+      else toast.success(`加载了 ${due.length} 张到期卡片`);
+    } catch (e: any) {
+      setError(e.message || "加载到期卡片失败");
+      setProgress("");
+    } finally {
+      setGenerating(false);
+    }
+  }, [generating, hydrateFamiliarity, selected]);
+
+  const startSession = studyMode === "review" ? startReview : startTraining;
+
+  const setCardFamiliarity = async (value: Familiarity) => {
     if (!currentCard) return;
-    setFamiliarity((prev) => ({ ...prev, [currentCard.id]: value }));
+    const cardId = currentCard.id;
+    const prevValue = familiarity[cardId];
+    // Optimistic mark; the server applies the SM-2 schedule update.
+    setFamiliarity((prev) => ({ ...prev, [cardId]: value }));
+    try {
+      await reviewKnowledgeCard(cardId, value);
+      loadAvailability(); // due/saved counts shifted
+    } catch (e: any) {
+      setFamiliarity((prev) => {
+        const next = { ...prev };
+        if (prevValue) next[cardId] = prevValue;
+        else delete next[cardId];
+        return next;
+      });
+      toast.error(e?.message || "保存熟悉度失败");
+    }
   };
 
   const revealCurrent = () => {
@@ -240,7 +279,7 @@ export default function KnowledgeTraining() {
     setRevealedAnswers((prev) => ({ ...prev, [currentCard.id]: !prev[currentCard.id] }));
   };
 
-  const canGenerate = !!selected && !generating && !!selectedInfo?.available;
+  const canStart = !!selected && !generating && (studyMode === "review" || !!selectedInfo?.available);
 
   return (
     <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
@@ -251,6 +290,34 @@ export default function KnowledgeTraining() {
             <h1 className="text-xl font-semibold tracking-normal">知识训练场</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <div className="flex rounded-md border border-[color:var(--sig-line-2)] p-0.5 text-sm">
+              <button
+                className={cn(
+                  "rounded px-3 py-1 transition-colors",
+                  studyMode === "new" ? "bg-primary text-primary-foreground" : "text-dim hover:text-text",
+                )}
+                onClick={() => setStudyMode("new")}
+                disabled={generating}
+              >
+                新卡生成
+              </button>
+              <button
+                className={cn(
+                  "flex items-center gap-1 rounded px-3 py-1 transition-colors",
+                  studyMode === "review" ? "bg-primary text-primary-foreground" : "text-dim hover:text-text",
+                )}
+                onClick={() => setStudyMode("review")}
+                disabled={generating}
+              >
+                到期复习
+                {dueCount > 0 && (
+                  <span className={cn(
+                    "rounded-full px-1.5 text-[10px] font-mono",
+                    studyMode === "review" ? "bg-primary-foreground/20" : "bg-red/15 text-red",
+                  )}>{dueCount}</span>
+                )}
+              </button>
+            </div>
             <select
               className="h-9 min-w-[150px] rounded-md border border-[color:var(--sig-line-2)] bg-transparent px-3 text-sm focus:outline-none focus:border-[color:var(--sig-accent)]"
               value={selected}
@@ -258,36 +325,43 @@ export default function KnowledgeTraining() {
               disabled={loadingTopics || generating}
             >
               {topicKeys.map((key) => (
-                <option key={key} value={key}>{availability[key]?.name || key}</option>
+                <option key={key} value={key}>
+                  {availability[key]?.name || key}
+                  {availability[key]?.due_count ? ` · ${availability[key]?.due_count} 到期` : ""}
+                </option>
               ))}
             </select>
-            <select
-              className="h-9 rounded-md border border-[color:var(--sig-line-2)] bg-transparent px-3 text-sm focus:outline-none focus:border-[color:var(--sig-accent)]"
-              value={count}
-              onChange={(e) => setCount(Number(e.target.value))}
-              disabled={generating}
-            >
-              {COUNT_OPTIONS.map((n) => <option key={n} value={n}>{n} 张</option>)}
-            </select>
-            <select
-              className="h-9 rounded-md border border-[color:var(--sig-line-2)] bg-transparent px-3 text-sm focus:outline-none focus:border-[color:var(--sig-accent)]"
-              value={mode}
-              onChange={(e) => setMode(e.target.value as KnowledgeTrainingMode)}
-              disabled={generating}
-            >
-              {MODE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-            </select>
-            <select
-              className="h-9 rounded-md border border-[color:var(--sig-line-2)] bg-transparent px-3 text-sm focus:outline-none focus:border-[color:var(--sig-accent)]"
-              value={depth}
-              onChange={(e) => setDepth(e.target.value as KnowledgeTrainingDepth)}
-              disabled={generating}
-            >
-              {DEPTH_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-            </select>
-            <Button onClick={startTraining} disabled={!canGenerate} size="sm" className="shrink-0">
-              {generating ? <Loader2 className="animate-spin" /> : <Play />}
-              开始训练
+            {studyMode === "new" && (
+              <>
+                <select
+                  className="h-9 rounded-md border border-[color:var(--sig-line-2)] bg-transparent px-3 text-sm focus:outline-none focus:border-[color:var(--sig-accent)]"
+                  value={count}
+                  onChange={(e) => setCount(Number(e.target.value))}
+                  disabled={generating}
+                >
+                  {COUNT_OPTIONS.map((n) => <option key={n} value={n}>{n} 张</option>)}
+                </select>
+                <select
+                  className="h-9 rounded-md border border-[color:var(--sig-line-2)] bg-transparent px-3 text-sm focus:outline-none focus:border-[color:var(--sig-accent)]"
+                  value={mode}
+                  onChange={(e) => setMode(e.target.value as KnowledgeTrainingMode)}
+                  disabled={generating}
+                >
+                  {MODE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
+                <select
+                  className="h-9 rounded-md border border-[color:var(--sig-line-2)] bg-transparent px-3 text-sm focus:outline-none focus:border-[color:var(--sig-accent)]"
+                  value={depth}
+                  onChange={(e) => setDepth(e.target.value as KnowledgeTrainingDepth)}
+                  disabled={generating}
+                >
+                  {DEPTH_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
+              </>
+            )}
+            <Button onClick={startSession} disabled={!canStart} size="sm" className="shrink-0">
+              {generating ? <Loader2 className="animate-spin" /> : studyMode === "review" ? <RotateCcw /> : <Play />}
+              {studyMode === "review" ? "开始复习" : "开始训练"}
             </Button>
           </div>
         </div>
@@ -328,14 +402,30 @@ export default function KnowledgeTraining() {
               <CardContent className="flex min-h-[420px] flex-col items-center justify-center p-6 text-center">
                 {loadingTopics ? (
                   <Loader2 className="mb-3 h-6 w-6 animate-spin text-primary" />
+                ) : studyMode === "review" ? (
+                  <>
+                    <RotateCcw className="mb-3 h-9 w-9 text-primary" />
+                    <h2 className="mb-2 text-base font-semibold">到期复习 · 遗忘曲线</h2>
+                    <p className="max-w-md text-sm leading-6 text-dim">
+                      已标记的卡片按 SM-2 间隔重复安排复习，到期后回到这里。
+                      {dueCount > 0
+                        ? `当前 ${dueCount} 张到期。`
+                        : "当前没有到期卡片，先去「新卡生成」标记熟悉度。"}
+                    </p>
+                    <Button className="mt-5" onClick={startReview} disabled={!canStart}>
+                      {generating ? <Loader2 className="animate-spin" /> : <RotateCcw />}
+                      开始复习
+                    </Button>
+                  </>
                 ) : selectedInfo?.available ? (
                   <>
                     <Brain className="mb-3 h-9 w-9 text-primary" />
                     <h2 className="mb-2 text-base font-semibold">选择配置后开始本轮记忆训练</h2>
                     <p className="max-w-md text-sm leading-6 text-dim">
-                      卡片会从当前知识库原文抽样生成，答案默认隐藏，本轮标记只保存在本地。
+                      卡片从当前知识库原文抽样生成（自动避开已出过的知识点），答案默认隐藏，
+                      熟悉度标记会保存并按遗忘曲线安排复习。
                     </p>
-                    <Button className="mt-5" onClick={startTraining} disabled={!canGenerate}>
+                    <Button className="mt-5" onClick={startTraining} disabled={!canStart}>
                       {generating ? <Loader2 className="animate-spin" /> : <Play />}
                       开始训练
                     </Button>
@@ -373,9 +463,9 @@ export default function KnowledgeTraining() {
                       <span className="truncate">{sourceLabel(currentCard)}</span>
                     </div>
                   </div>
-                  <Button variant="outline" size="sm" onClick={startTraining} disabled={generating} className="shrink-0">
+                  <Button variant="outline" size="sm" onClick={startSession} disabled={generating} className="shrink-0">
                     <RefreshCw />
-                    换一组
+                    {studyMode === "review" ? "刷新到期" : "换一组"}
                   </Button>
                 </div>
 
@@ -451,8 +541,10 @@ export default function KnowledgeTraining() {
           <Card interactive={false}>
             <CardContent className="p-4">
               <div className="mb-3 flex items-center justify-between gap-2">
-                <div className="text-sm font-semibold">本轮卡片</div>
-                <Badge variant="outline" className="font-mono text-[10px]">{cards.length}/{count}</Badge>
+                <div className="text-sm font-semibold">{studyMode === "review" ? "到期卡片" : "本轮卡片"}</div>
+                <Badge variant="outline" className="font-mono text-[10px]">
+                  {studyMode === "review" ? cards.length : `${cards.length}/${count}`}
+                </Badge>
               </div>
               <div className="mb-4 grid grid-cols-3 gap-2 text-center text-xs">
                 <div className="rounded-md border border-green/30 bg-green/10 px-2 py-2 text-green">

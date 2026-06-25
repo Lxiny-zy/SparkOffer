@@ -9,6 +9,8 @@ export interface KnowledgeTrainingSourceRef {
   header_path?: string;
 }
 
+export type Familiarity = "known" | "uncertain" | "unknown";
+
 export interface KnowledgeTrainingCard {
   id: string;
   topic: string;
@@ -19,6 +21,10 @@ export interface KnowledgeTrainingCard {
   answer: string;
   tags: string[];
   source_refs: KnowledgeTrainingSourceRef[];
+  // Present on persisted/reviewed cards (absent on freshly-streamed ones).
+  familiarity?: Familiarity | "";
+  next_review?: string | null;
+  review_count?: number;
 }
 
 export interface KnowledgeTrainingAvailabilityItem {
@@ -27,6 +33,8 @@ export interface KnowledgeTrainingAvailabilityItem {
   file_count: number;
   chunk_count: number;
   available: boolean;
+  due_count?: number;
+  saved_count?: number;
 }
 
 export interface KnowledgeTrainingAvailability {
@@ -91,4 +99,37 @@ export async function generateKnowledgeTrainingCards(
     }
     throw new Error("训练卡片生成失败：未收到结果");
   });
+}
+
+export async function getDueKnowledgeCards(topic?: string): Promise<{ cards: KnowledgeTrainingCard[]; total: number }> {
+  const qs = topic ? `?topic=${encodeURIComponent(topic)}` : "";
+  const res = await authFetch(`${API_BASE}/knowledge-training/due${qs}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getSavedKnowledgeCards(
+  topic?: string,
+  familiarity?: Familiarity,
+): Promise<{ items: KnowledgeTrainingCard[]; total: number }> {
+  const params = new URLSearchParams();
+  if (topic) params.set("topic", topic);
+  if (familiarity) params.set("familiarity", familiarity);
+  const qs = params.toString() ? `?${params.toString()}` : "";
+  const res = await authFetch(`${API_BASE}/knowledge-training/cards/saved${qs}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function reviewKnowledgeCard(
+  cardId: string,
+  familiarity: Familiarity,
+): Promise<{ card: KnowledgeTrainingCard }> {
+  const res = await authFetch(`${API_BASE}/knowledge-training/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ card_id: cardId, familiarity }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }

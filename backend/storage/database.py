@@ -319,5 +319,39 @@ def init_all_tables():
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE rag_eval_runs ADD COLUMN hit_at_k_strict REAL")
 
+    # ── knowledge_cards ──
+    # Persisted knowledge-training flashcards + SM-2 spaced-repetition state. The
+    # card id is the deterministic kt-hash (topic|title|source), so re-generating
+    # an identical card is an INSERT OR IGNORE no-op (exact dedup). source_file /
+    # source_header back the section-coverage dedup at generation time.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_cards (
+            id              TEXT NOT NULL,
+            user_id         TEXT NOT NULL,
+            topic           TEXT NOT NULL,
+            title           TEXT NOT NULL,
+            knowledge       TEXT NOT NULL,
+            example         TEXT DEFAULT '',
+            question        TEXT DEFAULT '',
+            answer          TEXT DEFAULT '',
+            tags            TEXT DEFAULT '[]',
+            source_refs     TEXT DEFAULT '[]',
+            source_file     TEXT DEFAULT '',
+            source_header   TEXT DEFAULT '',
+            depth           TEXT DEFAULT 'understand',
+            familiarity     TEXT DEFAULT '',
+            sr_state        TEXT DEFAULT '{}',
+            next_review     TEXT,
+            review_count    INTEGER DEFAULT 0,
+            last_reviewed_at TEXT,
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_cards_topic ON knowledge_cards(user_id, topic, created_at DESC)")
+    # Due-review queue lookup: cards whose next_review has elapsed, per (user, topic).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_cards_due ON knowledge_cards(user_id, topic, next_review)")
+
     conn.commit()
     logger.info("All database tables and indexes initialized.")
