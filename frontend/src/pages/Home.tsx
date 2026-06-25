@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { FileText, ChevronRight, Sparkles, Target, TrendingUp, Zap, BriefcaseBusiness, AlertCircle, CheckCircle2 } from "lucide-react";
+import { FileText, ChevronRight, Sparkles, Target, TrendingUp, Zap, BriefcaseBusiness, AlertCircle, CheckCircle2, Brain } from "lucide-react";
 import { toast } from "sonner";
 import TopicCard from "../components/TopicCard";
 import { getTopics, startInterview, startInterviewStream, getResumeStatus, uploadResume, getProfile, getDueReviews } from "../api/interview";
@@ -43,6 +43,13 @@ const MODE_CARDS: ModeCard[] = [
     title: "岗位特训营",
     desc: "贴入岗位 JD，AI 拆解岗位重点，结合简历生成高概率问题和岗位匹配复盘。",
     tag: "定向突破",
+  },
+  {
+    mode: "knowledge_training",
+    icon: Brain,
+    title: "知识训练场",
+    desc: "AI 把知识库拆成记忆卡片，正反翻面强化记忆，三档深度循序渐进，配合 SM-2 到期复习。",
+    tag: "记忆强化",
   },
 ];
 
@@ -128,6 +135,7 @@ export default function Home() {
   const handleStart = async () => {
     if (!mode) return;
     if (mode === "job_prep") { navigate("/job-prep"); return; }
+    if (mode === "knowledge_training") { navigate("/knowledge-training"); return; }
     if (mode === "topic_drill" && !selectedTopic) return;
 
     if (mode === "topic_drill") {
@@ -227,7 +235,7 @@ export default function Home() {
     }
   };
 
-  const canStart = (mode === "resume" && resumeFile) || (mode === "topic_drill" && selectedTopic) || mode === "job_prep";
+  const canStart = (mode === "resume" && resumeFile) || (mode === "topic_drill" && selectedTopic) || mode === "job_prep" || mode === "knowledge_training";
 
   function renderStats() {
     if (pageLoading) {
@@ -585,7 +593,7 @@ export default function Home() {
             disabled={!canStart || loading}
             onClick={handleStart}
           >
-            {isStreaming ? `出题中 (${streamingQuestions.length}/10)...` : loading ? (startProgress || "正在初始化面试...") : mode === "job_prep" ? "进入 JD 备面" : "开始面试"}
+            {isStreaming ? `出题中 (${streamingQuestions.length}/10)...` : loading ? (startProgress || "正在初始化面试...") : mode === "job_prep" ? "进入 JD 备面" : mode === "knowledge_training" ? "进入知识训练" : "开始面试"}
           </Button>
         </div>
       )}
