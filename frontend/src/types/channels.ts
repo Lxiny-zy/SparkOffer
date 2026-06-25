@@ -31,16 +31,6 @@ export interface EmbeddingChannel {
   proxy?: string;
 }
 
-export interface ASRChannel {
-  id: string;
-  name: string;
-  keys: string[];
-  model: string;
-  priority: number;
-  enabled: boolean;
-  proxy?: string;
-}
-
 export interface RerankerChannel {
   id: string;
   name: string;
@@ -69,6 +59,5 @@ export interface SectionChannels<T> {
 export interface AllChannelsResponse {
   llm: SectionChannels<LLMChannel>;
   embedding: SectionChannels<EmbeddingChannel>;
-  asr: SectionChannels<ASRChannel>;
   reranker: SectionChannels<RerankerChannel>;
 }

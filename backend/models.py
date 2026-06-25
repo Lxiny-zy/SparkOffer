@@ -80,13 +80,6 @@ class EndDrillRequest(BaseModel):
     answers: list[dict] = Field(default_factory=list)  # [{question_id: int, answer: str}]
 
 
-class RecordingAnalyzeRequest(BaseModel):
-    transcript: str
-    recording_mode: str = "dual"  # "dual" | "solo"
-    company: str | None = None
-    position: str | None = None
-
-
 # ── Auth Models ──
 
 class RegisterRequest(BaseModel):
@@ -147,21 +140,9 @@ class EmbeddingConfig(BaseModel):
     local_model: str | None = None
     local_path: str | None = None
 
-class ASRConfig(BaseModel):
-    dashscope_api_key: str | None = None
-    model: str | None = None
-
-class QiniuConfig(BaseModel):
-    access_key: str | None = None
-    secret_key: str | None = None
-    bucket: str | None = None
-    domain: str | None = None
-
 class AIConfigUpdate(BaseModel):
     llm: LLMConfig | None = None
     embedding: EmbeddingConfig | None = None
-    asr: ASRConfig | None = None
-    qiniu: QiniuConfig | None = None
 
 class TestLLMRequest(BaseModel):
     api_base: str
@@ -175,15 +156,6 @@ class TestEmbeddingRequest(BaseModel):
     api_base: str = ""
     api_key: str = ""
     api_model: str = ""
-
-class TestASRRequest(BaseModel):
-    dashscope_api_key: str
-
-class TestQiniuRequest(BaseModel):
-    access_key: str
-    secret_key: str
-    bucket: str
-    domain: str = ""
 
 
 # ── Multi-Channel Config Models ──
@@ -217,15 +189,6 @@ class EmbeddingChannelConfig(BaseModel):
     enabled: bool = True
     proxy: str = ""
 
-class ASRChannelConfig(BaseModel):
-    id: str = ""
-    name: str = "Default"
-    keys: list[str] = Field(default_factory=list)
-    model: str = "qwen3-asr-flash-filetrans"
-    priority: int = 1
-    enabled: bool = True
-    proxy: str = ""
-
 class RerankerChannelConfig(BaseModel):
     id: str = ""
     name: str = "Default"
@@ -239,7 +202,6 @@ class RerankerChannelConfig(BaseModel):
 class ChannelsConfig(BaseModel):
     llm: list[LLMChannelConfig] = Field(default_factory=list)
     embedding: list[EmbeddingChannelConfig] = Field(default_factory=list)
-    asr: list[ASRChannelConfig] = Field(default_factory=list)
     reranker: list[RerankerChannelConfig] = Field(default_factory=list)
 
 class TestChannelRequest(BaseModel):

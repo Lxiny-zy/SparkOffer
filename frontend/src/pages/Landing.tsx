@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Sun, Moon, ArrowRight, ArrowDown, Target, BookOpen, Mic,
+  Sun, Moon, ArrowRight, ArrowDown, Target, BookOpen,
   BriefcaseBusiness, Upload, Brain, ChartLine,
 } from "lucide-react";
 import CatAvatar from "@/components/CatAvatar";
@@ -9,7 +9,6 @@ import CatAvatar from "@/components/CatAvatar";
 const FEATURES = [
   { icon: Target, title: "简历模拟面试", desc: "AI 读取简历，模拟真实面试官，从自我介绍到项目深挖逐层追问。" },
   { icon: BookOpen, title: "专项强化训练", desc: "选定领域集中突破，AI 结合你的能力画像动态调难度，精准命中薄弱点。" },
-  { icon: Mic, title: "录音复盘", desc: "上传录音或文字稿，AI 自动转写并逐题点评，复盘每场真实面试。" },
   { icon: BriefcaseBusiness, title: "JD 定向备面", desc: "粘贴岗位 JD，AI 拆解考察重点，结合简历与知识库生成高概率追问。" },
 ];
 

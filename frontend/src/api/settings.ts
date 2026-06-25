@@ -34,24 +34,6 @@ export async function testEmbedding(params: any): Promise<any> {
   return res.json();
 }
 
-export async function testASR(params: any): Promise<any> {
-  const res = await authFetch(`${API_BASE}/settings/ai/test/asr`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
-  });
-  return res.json();
-}
-
-export async function testQiniu(params: any): Promise<any> {
-  const res = await authFetch(`${API_BASE}/settings/ai/test/qiniu`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
-  });
-  return res.json();
-}
-
 export async function getMe(): Promise<any> {
   const res = await authFetch(`${API_BASE}/auth/me`);
   if (!res.ok) throw new Error(await res.text());

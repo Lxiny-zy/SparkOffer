@@ -26,16 +26,6 @@ class Settings(BaseSettings):
     reranker_api_key: str = ""
     reranker_api_model: str = ""
 
-    # DashScope ASR (speech-to-text)
-    dashscope_api_key: str = ""
-    asr_model: str = "qwen3-asr-flash-filetrans"
-
-    # Qiniu OSS (for uploading audio to get public URL)
-    qiniu_access_key: str = ""
-    qiniu_secret_key: str = ""
-    qiniu_bucket: str = ""
-    qiniu_domain: str = ""
-
     # Paths
     base_dir: Path = Path(__file__).resolve().parent.parent
     resume_path: Path = Path(__file__).resolve().parent.parent / "data" / "resume"

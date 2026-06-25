@@ -1,5 +1,4 @@
-"""Resume upload & speech-to-text routes."""
-import asyncio
+"""Resume upload routes."""
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
@@ -11,7 +10,6 @@ from backend.auth import get_current_user
 router = APIRouter(prefix="/api")
 
 MAX_RESUME_BYTES = 30 * 1024 * 1024   # 30MB — a PDF résumé is well under this
-MAX_AUDIO_BYTES = 50 * 1024 * 1024    # 50MB — short interview-answer clips
 
 
 @router.get("/resume/status")
@@ -65,28 +63,3 @@ async def upload_resume(file: UploadFile = File(...), user_id: str = Depends(get
 
     return {"ok": True, "filename": dest.name, "size": total}
 
-
-@router.post("/transcribe")
-async def transcribe(file: UploadFile = File(...), user_id: str = Depends(get_current_user)):
-    # Read with a size cap so an oversized audio upload can't balloon memory
-    # (and then block a to_thread worker for minutes inside the transcriber).
-    parts = []
-    total = 0
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > MAX_AUDIO_BYTES:
-            raise HTTPException(413, f"音频过大（>{MAX_AUDIO_BYTES // (1024*1024)}MB）")
-        parts.append(chunk)
-    audio_bytes = b"".join(parts)
-    if not audio_bytes:
-        raise HTTPException(400, "Empty audio file.")
-    try:
-        from backend.transcribe import transcribe_audio
-        suffix = "." + (file.filename or "audio.webm").rsplit(".", 1)[-1]
-        text = await asyncio.to_thread(transcribe_audio, audio_bytes, suffix=suffix)
-        return {"text": text}
-    except Exception as e:
-        raise HTTPException(500, f"Transcription failed: {e}")

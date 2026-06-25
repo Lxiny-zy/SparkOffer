@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend.models import (
     AIConfigUpdate, TestLLMRequest, TestEmbeddingRequest,
-    TestASRRequest, TestQiniuRequest,
     ChannelsConfig, TestChannelRequest, TuningConfig,
 )
 from backend.auth import require_owner
@@ -78,35 +77,6 @@ async def test_embedding_connection(req: TestEmbeddingRequest, user_id: str = De
         return {"ok": False, "error": str(e)}
 
 
-@router.post("/settings/ai/test/asr")
-def test_asr_connection(req: TestASRRequest, user_id: str = Depends(require_owner)):
-    import requests as _requests
-    try:
-        resp = _requests.get(
-            "https://dashscope.aliyuncs.com/api/v1/tasks",
-            headers={"Authorization": f"Bearer {req.dashscope_api_key}"},
-            timeout=10,
-        )
-        if resp.status_code == 401:
-            return {"ok": False, "error": "API Key 无效"}
-        return {"ok": True, "message": "API Key 验证通过"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-@router.post("/settings/ai/test/qiniu")
-def test_qiniu_connection(req: TestQiniuRequest, user_id: str = Depends(require_owner)):
-    try:
-        from qiniu import Auth as QiniuAuth
-        q = QiniuAuth(req.access_key, req.secret_key)
-        token = q.upload_token(req.bucket, "test-key", 60)
-        if token:
-            return {"ok": True, "message": "凭据验证通过"}
-        return {"ok": False, "error": "无法生成上传凭证"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
 # ── Multi-Channel Endpoints ──
 
 @router.get("/settings/ai/channels")
@@ -117,7 +87,6 @@ def get_channels_config(user_id: str = Depends(require_owner)):
     return {
         "llm": {"channels": get_channels("llm"), "health": get_health("llm")},
         "embedding": {"channels": get_channels("embedding"), "health": get_health("embedding")},
-        "asr": {"channels": get_channels("asr"), "health": get_health("asr")},
         "reranker": {"channels": get_channels("reranker"), "health": get_health("reranker")},
     }
 
@@ -137,7 +106,6 @@ def update_channels_config(req: ChannelsConfig, user_id: str = Depends(require_o
     config = {
         "llm": [ch.model_dump() for ch in req.llm],
         "embedding": [ch.model_dump() for ch in req.embedding],
-        "asr": [ch.model_dump() for ch in req.asr],
         "reranker": [ch.model_dump() for ch in req.reranker],
     }
     save_channels(config)
@@ -196,20 +164,6 @@ async def test_channel(req: TestChannelRequest, user_id: str = Depends(require_o
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    elif section == "asr":
-        import requests as _requests
-        try:
-            resp = _requests.get(
-                "https://dashscope.aliyuncs.com/api/v1/tasks",
-                headers={"Authorization": f"Bearer {ch.get('api_key', '')}"},
-                timeout=10,
-            )
-            if resp.status_code == 401:
-                return {"ok": False, "error": "API Key 无效"}
-            return {"ok": True, "message": "API Key 验证通过"}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-
     elif section == "reranker":
         try:
             from backend.llm_provider import _normalize_proxy_url
@@ -253,7 +207,6 @@ def get_channels_health(user_id: str = Depends(require_owner)):
     return {
         "llm": get_health("llm"),
         "embedding": get_health("embedding"),
-        "asr": get_health("asr"),
         "reranker": get_health("reranker"),
     }
 

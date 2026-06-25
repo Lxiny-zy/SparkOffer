@@ -73,7 +73,6 @@ SYSTEM_PROMPT = """# 角色设定
 - `/favorites` — 收藏夹
 - `/algorithm` — 算法解题
 - `/job-prep` — JD 备面
-- `/recording` — 录音复盘
 
 ## 禁止行为（硬性约束）
 
@@ -108,7 +107,7 @@ TOOLS = [
                         "enum": [
                             "/", "/profile", "/history", "/knowledge", "/graph",
                             "/favorites", "/algorithm", "/algorithm/collection",
-                            "/job-prep", "/recording",
+                            "/job-prep",
                         ],
                     },
                 },
@@ -124,7 +123,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "mode": {"type": "string", "enum": ["resume", "topic_drill", "job_prep", "recording"]},
+                    "mode": {"type": "string", "enum": ["resume", "topic_drill", "job_prep"]},
                     "topic": {"type": "string", "description": "训练领域（仅 topic_drill 模式需要）"},
                 },
                 "required": ["mode"],
@@ -335,9 +334,8 @@ async def _execute_tool(name: str, args: dict, user_id: str) -> dict:
 
     elif name == "start_interview":
         mode = args.get("mode")
-        if mode in ("job_prep", "recording"):
-            path = "/job-prep" if mode == "job_prep" else "/recording"
-            return {"action": "navigate", "path": path}
+        if mode == "job_prep":
+            return {"action": "navigate", "path": "/job-prep"}
         return {"action": "start_interview", "mode": mode, "topic": args.get("topic")}
 
     elif name == "check_profile":

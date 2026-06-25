@@ -5,7 +5,6 @@ import { Check, Minus, Star, Lightbulb, Eye, Loader2, RefreshCw } from "lucide-r
 import { toast } from "sonner";
 import ChatBubble from "../components/ChatBubble";
 import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics, type DrillProgressPayload } from "../api/interview";
-import useVoiceInput from "../hooks/useVoiceInput";
 import { cn } from "@/lib/utils";
 import { formatQuestionLabel } from "@/lib/question";
 import { Button } from "@/components/ui/button";
@@ -59,13 +58,6 @@ export default function Interview() {
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
 
   const draftKey = sessionId ? `drill:draft:${sessionId}` : null;
-
-  const drillVoice = useVoiceInput({
-    onResult: useCallback((text: string) => setDrillInput((prev) => prev + text), []),
-  });
-  const chatVoice = useVoiceInput({
-    onResult: useCallback((text: string) => setInput((prev) => prev + text), []),
-  });
 
   useEffect(() => {
     if (!isBatchMode && initData.message) {
@@ -536,26 +528,6 @@ export default function Interview() {
       ? { text: "专项训练", variant: "success" }
       : { text: "简历面试", variant: "default" };
 
-  const MicButton = ({ voice }: { voice: any }) => (
-    <button
-      type="button"
-      className={cn(
-        "w-9 h-9 rounded-full flex items-center justify-center transition-all shrink-0",
-        voice.isListening ? "bg-red text-white animate-pulse-dot" : voice.isTranscribing ? "bg-primary text-white animate-pulse-dot" : "bg-secondary text-muted-fg hover:text-text"
-      )}
-      onClick={voice.toggle}
-      disabled={voice.isTranscribing}
-      title={voice.isListening ? "停止录音" : voice.isTranscribing ? "正在识别..." : "语音输入"}
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-        <line x1="12" y1="19" x2="12" y2="23"/>
-        <line x1="8" y1="23" x2="16" y2="23"/>
-      </svg>
-    </button>
-  );
-
   if (restoring) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -790,14 +762,9 @@ export default function Interview() {
                     value={drillInput}
                     onChange={(e) => setDrillInput(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder={drillVoice.isListening ? "正在录音..." : drillVoice.isTranscribing ? "正在识别语音..." : "输入你的回答... (Enter 提交)"}
+                    placeholder="输入你的回答... (Enter 提交)"
                     rows={3}
                   />
-                  {drillVoice.isSupported && (
-                    <div className="absolute bottom-3 left-3">
-                      <MicButton voice={drillVoice} />
-                    </div>
-                  )}
                 </div>
                 <div className="flex items-center justify-between sm:justify-end gap-3">
                   <Button variant="ghost" size="sm" onClick={handleSkip} className="text-[13px]">
@@ -864,15 +831,10 @@ export default function Interview() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={chatVoice.isListening ? "正在录音..." : finished ? "面试已结束" : "输入你的回答... (Enter 发送)"}
+              placeholder={finished ? "面试已结束" : "输入你的回答... (Enter 发送)"}
               disabled={finished || sending}
               rows={3}
             />
-            {chatVoice.isSupported && !finished && (
-              <div className="absolute bottom-3.5 left-3">
-                <MicButton voice={chatVoice} />
-              </div>
-            )}
           </div>
         </div>
     {/* End confirmation dialog */}

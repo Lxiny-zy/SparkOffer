@@ -33,15 +33,9 @@ _SETTINGS_KEY_MAP = {
     ("embedding", "api_model"): "embedding_api_model",
     ("embedding", "local_model"): "local_embedding_model",
     ("embedding", "local_path"): "local_embedding_path",
-    ("asr", "dashscope_api_key"): "dashscope_api_key",
-    ("asr", "model"): "asr_model",
     ("reranker", "api_base"): "reranker_api_base",
     ("reranker", "api_key"): "reranker_api_key",
     ("reranker", "api_model"): "reranker_api_model",
-    ("qiniu", "access_key"): "qiniu_access_key",
-    ("qiniu", "secret_key"): "qiniu_secret_key",
-    ("qiniu", "bucket"): "qiniu_bucket",
-    ("qiniu", "domain"): "qiniu_domain",
 }
 
 
@@ -62,7 +56,6 @@ def _migrate_flat_to_channels(data: dict) -> bool:
         ("llm", {"api_base": "api_base", "api_key": "keys", "model": "model", "temperature": "temperature"}),
         ("embedding", {"backend": "backend", "api_base": "api_base", "api_key": "keys",
                        "api_model": "api_model", "local_model": "local_model", "local_path": "local_path"}),
-        ("asr", {"dashscope_api_key": "keys", "model": "model"}),
     ):
         sec_data = data.get(section)
         if not isinstance(sec_data, dict):
@@ -83,7 +76,7 @@ def _migrate_flat_to_channels(data: dict) -> bool:
                 channel[new_key] = float(val) if val else 0.7
             else:
                 channel[new_key] = val
-        if channel.get("api_base") or channel.get("keys") or channel.get("model") or section == "asr":
+        if channel.get("api_base") or channel.get("keys") or channel.get("model"):
             data[section] = {"channels": [channel]}
             migrated = True
     return migrated
@@ -93,7 +86,7 @@ def _build_env_channels():
     """Create synthetic channels from .env values for sections without JSON channels."""
     from backend.channel_manager import load_channels, has_channels
 
-    for section, builder in (("llm", _env_llm_channel), ("embedding", _env_embedding_channel), ("asr", _env_asr_channel), ("reranker", _env_reranker_channel)):
+    for section, builder in (("llm", _env_llm_channel), ("embedding", _env_embedding_channel), ("reranker", _env_reranker_channel)):
         if not has_channels(section):
             ch = builder()
             if ch:
@@ -126,17 +119,6 @@ def _env_embedding_channel() -> dict | None:
     }
 
 
-def _env_asr_channel() -> dict | None:
-    key = getattr(settings, "dashscope_api_key", "")
-    if not key:
-        return None
-    return {
-        "id": "env-asr", "name": ".env",
-        "keys": [key], "model": getattr(settings, "asr_model", "qwen3-asr-flash-filetrans"),
-        "priority": 1, "enabled": True,
-    }
-
-
 def _env_reranker_channel() -> dict | None:
     base = getattr(settings, "reranker_api_base", "")
     key = getattr(settings, "reranker_api_key", "")
@@ -153,7 +135,7 @@ def _env_reranker_channel() -> dict | None:
 def _reload_channel_manager():
     """Feed current channels from cache into channel_manager."""
     from backend.channel_manager import load_channels
-    for section in ("llm", "embedding", "asr", "reranker"):
+    for section in ("llm", "embedding", "reranker"):
         sec = _cache.get(section)
         if isinstance(sec, dict) and "channels" in sec:
             load_channels(section, sec["channels"])
@@ -179,7 +161,7 @@ def save_ai_config(config: dict):
     global _cache, _config_version
     with _lock:
         # Deep merge: only set keys that are explicitly provided
-        for section in ("llm", "embedding", "asr", "reranker", "qiniu"):
+        for section in ("llm", "embedding", "reranker"):
             incoming = config.get(section)
             if incoming is None:
                 continue
@@ -199,10 +181,10 @@ def save_ai_config(config: dict):
 
 
 def save_channels(channels_config: dict):
-    """Save multi-channel config. channels_config = {llm: [...], embedding: [...], asr: [...]}."""
+    """Save multi-channel config. channels_config = {llm: [...], embedding: [...], reranker: [...]}."""
     global _cache, _config_version
     with _lock:
-        for section in ("llm", "embedding", "asr", "reranker"):
+        for section in ("llm", "embedding", "reranker"):
             channels = channels_config.get(section)
             if channels is None:
                 continue

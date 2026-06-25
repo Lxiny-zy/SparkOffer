@@ -1,4 +1,4 @@
-"""Review formatting helpers — shared by drill, job-prep, recording, and solo modes."""
+"""Review formatting helpers — shared by drill and job-prep modes."""
 
 
 def format_per_question_block(q: dict, answer: str, score_entry: dict, *, show_role_expectation: bool = False) -> list[str]:
@@ -97,24 +97,3 @@ def format_job_prep_review(questions, answers, scores, overall, meta) -> str:
     lines.extend(_format_points(overall))
     return "\n".join(lines)
 
-
-def format_solo_review(topics_covered: list, overall: dict) -> str:
-    lines = [f"## 整体评价\n\n{overall.get('summary', '')}\n\n**平均分: {overall.get('avg_score', '-')}/10**\n"]
-
-    if topics_covered:
-        lines.append("---\n\n## 涉及知识点\n")
-        for t in topics_covered:
-            score = t.get("score", "-")
-            lines.append(f"### {t.get('topic', '未知')} — {score}/10")
-            if t.get("assessment"):
-                lines.append(f"**评价**: {t['assessment']}")
-            if t.get("understanding"):
-                lines.append(f"**理解程度**: {t['understanding']}")
-            if t.get("errors"):
-                lines.append(f"**错误**: {', '.join(t['errors'])}")
-            if t.get("missing"):
-                lines.append(f"**遗漏**: {', '.join(t['missing'])}")
-            lines.append("")
-
-    lines.extend(_format_points(overall))
-    return "\n".join(lines)

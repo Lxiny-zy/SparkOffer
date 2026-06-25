@@ -11,19 +11,6 @@ import type {
   Favorite,
 } from "../types/api";
 
-// ── Speech-to-text ──
-
-export async function transcribeAudio(audioBlob: Blob): Promise<any> {
-  const form = new FormData();
-  form.append("file", audioBlob, "recording.webm");
-  const res = await authFetch(`${API_BASE}/transcribe`, {
-    method: "POST",
-    body: form,
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
 export async function getTopics(): Promise<any> {
   const res = await authFetch(`${API_BASE}/topics`);
   return res.json();
@@ -428,37 +415,6 @@ export async function getRebuildStatus(): Promise<{ tasks: RebuildTaskStatus[] }
   const res = await authFetch(`${API_BASE}/knowledge/rebuild-status`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
-}
-
-// ── Recording review ──
-
-export async function transcribeRecording(audioBlob: Blob, mode: string = "dual"): Promise<any> {
-  const form = new FormData();
-  form.append("file", audioBlob, (audioBlob as any).name || "recording.webm");
-  form.append("mode", mode);
-  const res = await authFetch(`${API_BASE}/recording/transcribe`, {
-    method: "POST",
-    body: form,
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function analyzeRecording(
-  transcript: string,
-  recordingMode: string,
-  company?: string,
-  position?: string,
-  callbacks?: SSECallbacks,
-): Promise<any> {
-  const body: any = { transcript, recording_mode: recordingMode };
-  if (company) body.company = company;
-  if (position) body.position = position;
-  return fetchSSE(`${API_BASE}/recording/analyze`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  }, callbacks);
 }
 
 export async function getHighFreq(topic: string): Promise<any> {

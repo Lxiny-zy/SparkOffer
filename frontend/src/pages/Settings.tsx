@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
-  Bot, Database, Mic, Cloud, Eye, EyeOff, Loader2,
-  CheckCircle2, XCircle, Save, RotateCcw, User, Lock, Activity, ListOrdered, SlidersHorizontal,
+  Bot, Database, Eye, EyeOff, Loader2,
+  Save, User, Lock, Activity, ListOrdered, SlidersHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -10,7 +10,6 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import {
-  getAIConfig, saveAIConfig, testQiniu,
   getMe, updateProfile, changePassword,
   getChannelsHealth,
 } from "@/api/settings";
@@ -22,7 +21,7 @@ import TuningSettings from "@/components/TuningSettings";
 // 网关健康仪表盘 ── L1 hero
 // ─────────────────────────────────────────────────────────────
 interface SectionHealth { healthy: number; total: number; }
-interface HealthSummary { llm: SectionHealth; embedding: SectionHealth; asr: SectionHealth; reranker: SectionHealth; }
+interface HealthSummary { llm: SectionHealth; embedding: SectionHealth; reranker: SectionHealth; }
 
 function HealthRing({ healthy, total, label, color, icon }: {
   healthy: number; total: number; label: string; color: string; icon: React.ReactNode;
@@ -68,9 +67,9 @@ function HealthRing({ healthy, total, label, color, icon }: {
 }
 
 function HealthDashboard({ summary }: { summary: HealthSummary | null }) {
-  const s = summary || { llm: {healthy:0,total:0}, embedding: {healthy:0,total:0}, asr: {healthy:0,total:0}, reranker: {healthy:0,total:0} };
-  const allHealthy = s.llm.healthy === s.llm.total && s.embedding.healthy === s.embedding.total && s.asr.healthy === s.asr.total && s.reranker.healthy === s.reranker.total;
-  const anyConfigured = s.llm.total + s.embedding.total + s.asr.total + s.reranker.total > 0;
+  const s = summary || { llm: {healthy:0,total:0}, embedding: {healthy:0,total:0}, reranker: {healthy:0,total:0} };
+  const allHealthy = s.llm.healthy === s.llm.total && s.embedding.healthy === s.embedding.total && s.reranker.healthy === s.reranker.total;
+  const anyConfigured = s.llm.total + s.embedding.total + s.reranker.total > 0;
   return (
     <Card hoverLift className="mb-6 relative overflow-hidden animate-fade-in-up">
       <CardContent className="p-5 md:p-6 relative">
@@ -83,30 +82,13 @@ function HealthDashboard({ summary }: { summary: HealthSummary | null }) {
             </span>
           )}
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 md:gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 md:gap-4">
           <HealthRing healthy={s.llm.healthy} total={s.llm.total} label="LLM"       color="var(--sig-chart-1)" icon={<Bot size={20} />} />
           <HealthRing healthy={s.embedding.healthy} total={s.embedding.total} label="Embedding" color="var(--sig-chart-2)"  icon={<Database size={20} />} />
-          <HealthRing healthy={s.asr.healthy} total={s.asr.total} label="ASR"       color="var(--sig-chart-3)"    icon={<Mic size={20} />} />
           <HealthRing healthy={s.reranker.healthy} total={s.reranker.total} label="Reranker" color="var(--sig-chart-6)" icon={<ListOrdered size={20} />} />
         </div>
       </CardContent>
     </Card>
-  );
-}
-
-const SOURCE_LABELS: Record<string, string> = { json: "JSON", env: "ENV", default: "Default" };
-const SOURCE_COLORS: Record<string, string> = {
-  json: "bg-primary/15 text-primary",
-  env: "bg-orange/15 text-orange",
-  default: "bg-dim/15 text-dim",
-};
-
-function SourceBadge({ source }: { source?: string }) {
-  if (!source) return null;
-  return (
-    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${SOURCE_COLORS[source] || SOURCE_COLORS.default}`}>
-      {SOURCE_LABELS[source] || source}
-    </span>
   );
 }
 
@@ -136,36 +118,6 @@ function SecretInput({ value, onChange, placeholder, id }: SecretInputProps) {
       >
         {visible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
       </button>
-    </div>
-  );
-}
-
-function TestButton({ onClick, status }: { onClick: () => void; status?: string }) {
-  return (
-    <Button
-      variant="outline"
-      size="sm"
-      onClick={onClick}
-      disabled={status === "testing"}
-      className="gap-1.5"
-    >
-      {status === "testing" && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-      {status === "success" && <CheckCircle2 className="w-3.5 h-3.5 text-green" />}
-      {status === "error" && <XCircle className="w-3.5 h-3.5 text-destructive" />}
-      {!status && <RotateCcw className="w-3.5 h-3.5" />}
-      {status === "testing" ? "Testing..." : "Test"}
-    </Button>
-  );
-}
-
-function ConfigField({ label, source, children }: { label: string; source?: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center gap-2">
-        <Label className="text-sm font-medium">{label}</Label>
-        <SourceBadge source={source} />
-      </div>
-      {children}
     </div>
   );
 }
@@ -296,14 +248,7 @@ function AccountSection() {
 }
 
 export default function Settings() {
-  const [config, setConfig] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
-
-  const [qiniu, setQiniu] = useState({ access_key: "", secret_key: "", bucket: "", domain: "" });
-  const [testStatus, setTestStatus] = useState<Record<string, string>>({});
-  const [testMsg, setTestMsg] = useState<Record<string, string>>({});
 
   const loadHealth = useCallback(async () => {
     try {
@@ -316,7 +261,6 @@ export default function Settings() {
       setHealthSummary({
         llm: summarize(data.llm),
         embedding: summarize(data.embedding),
-        asr: summarize(data.asr),
         reranker: summarize(data.reranker),
       });
     } catch { /* silent */ }
@@ -328,90 +272,6 @@ export default function Settings() {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [loadHealth]);
-
-  const loadConfig = useCallback(async () => {
-    try {
-      const data = await getAIConfig();
-      setConfig(data);
-      const extract = (section: string) => {
-        const result: Record<string, any> = {};
-        for (const [key, info] of Object.entries(data[section] || {})) {
-          result[key] = (info as any).value ?? "";
-        }
-        return result;
-      };
-      setQiniu((prev) => ({ ...prev, ...extract("qiniu") }));
-    } catch (e: any) {
-      toast.error("Failed to load config: " + e.message);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { loadConfig(); }, [loadConfig]);
-
-  const handleSecretChange = (section: string, key: string, value: string) => {
-    if (section === "qiniu") setQiniu((prev) => ({ ...prev, [key]: value }));
-  };
-
-  const handleChange = (section: string, key: string, value: any) => {
-    if (section === "qiniu") setQiniu((prev) => ({ ...prev, [key]: value }));
-  };
-
-  const handleSaveQiniu = async () => {
-    setSaving(true);
-    try {
-      const clean = (data: Record<string, any>) => {
-        const result: Record<string, any> = {};
-        for (const [key, value] of Object.entries(data)) {
-          result[key] = value === "" || value === undefined ? "" : value;
-        }
-        return Object.keys(result).length ? result : undefined;
-      };
-      await saveAIConfig({ qiniu: clean(qiniu) });
-      toast.success("Qiniu configuration saved");
-      await loadConfig();
-    } catch (e: any) {
-      toast.error("Save failed: " + e.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const runTest = async (section: string, fn: (params: any) => Promise<any>, params: any) => {
-    setTestStatus((prev) => ({ ...prev, [section]: "testing" }));
-    setTestMsg((prev) => ({ ...prev, [section]: "" }));
-    try {
-      const result = await fn(params);
-      if (result.ok) {
-        setTestStatus((prev) => ({ ...prev, [section]: "success" }));
-        setTestMsg((prev) => ({ ...prev, [section]: result.message || `OK` }));
-        toast.success(section.toUpperCase() + " connection OK");
-      } else {
-        setTestStatus((prev) => ({ ...prev, [section]: "error" }));
-        setTestMsg((prev) => ({ ...prev, [section]: result.error }));
-        toast.error(result.error);
-      }
-    } catch (e: any) {
-      setTestStatus((prev) => ({ ...prev, [section]: "error" }));
-      setTestMsg((prev) => ({ ...prev, [section]: e.message }));
-      toast.error(e.message);
-    }
-  };
-
-  const getTestValue = (_section: string, _key: string, formValue: string) => {
-    return formValue;
-  };
-
-  if (loading) {
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--sig-accent)" }} />
-      </div>
-    );
-  }
-
-  const getSource = (section: string, key: string) => config?.[section]?.[key]?.source;
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0 w-full"><div className="max-w-3xl mx-auto p-4 md:p-8 space-y-6">
@@ -463,24 +323,6 @@ export default function Settings() {
         </CardContent>
       </Card>
 
-      {/* ASR Channels */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-green/10 flex items-center justify-center">
-              <Mic className="w-5 h-5 text-green" />
-            </div>
-            <div>
-              <CardTitle className="text-base">ASR Channels</CardTitle>
-              <CardDescription>DashScope speech-to-text</CardDescription>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <ChannelManager section="asr" />
-        </CardContent>
-      </Card>
-
       {/* Reranker Channels */}
       <Card>
         <CardHeader>
@@ -516,79 +358,6 @@ export default function Settings() {
           <TuningSettings />
         </CardContent>
       </Card>
-
-      {/* Qiniu OSS Section */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-secondary/20 flex items-center justify-center">
-                <Cloud className="w-5 h-5 text-secondary" />
-              </div>
-              <div>
-                <CardTitle className="text-base">Qiniu OSS</CardTitle>
-                <CardDescription>Audio file storage for ASR</CardDescription>
-              </div>
-            </div>
-            <TestButton
-              status={testStatus.qiniu}
-              onClick={() => runTest("qiniu", testQiniu, {
-                access_key: getTestValue("qiniu", "access_key", qiniu.access_key),
-                secret_key: getTestValue("qiniu", "secret_key", qiniu.secret_key),
-                bucket: qiniu.bucket,
-                domain: qiniu.domain,
-              })}
-            />
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <ConfigField label="Access Key" source={getSource("qiniu", "access_key")}>
-              <SecretInput
-                value={qiniu.access_key}
-                onChange={(e) => handleSecretChange("qiniu", "access_key", e.target.value)}
-                placeholder="Access Key"
-              />
-            </ConfigField>
-            <ConfigField label="Secret Key" source={getSource("qiniu", "secret_key")}>
-              <SecretInput
-                value={qiniu.secret_key}
-                onChange={(e) => handleSecretChange("qiniu", "secret_key", e.target.value)}
-                placeholder="Secret Key"
-              />
-            </ConfigField>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <ConfigField label="Bucket" source={getSource("qiniu", "bucket")}>
-              <Input
-                value={qiniu.bucket}
-                onChange={(e) => handleChange("qiniu", "bucket", e.target.value)}
-                placeholder="my-bucket"
-              />
-            </ConfigField>
-            <ConfigField label="Domain" source={getSource("qiniu", "domain")}>
-              <Input
-                value={qiniu.domain}
-                onChange={(e) => handleChange("qiniu", "domain", e.target.value)}
-                placeholder="https://cdn.example.com"
-              />
-            </ConfigField>
-          </div>
-          {testMsg.qiniu && (
-            <div className="text-xs px-3 py-2 rounded-md" style={testStatus.qiniu === "success" ? { background: "color-mix(in srgb, var(--sig-success) 10%, transparent)", color: "var(--sig-success)" } : { background: "color-mix(in srgb, var(--sig-danger) 10%, transparent)", color: "var(--sig-danger)" }}>
-              {testMsg.qiniu}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Save Qiniu */}
-      <div className="flex justify-end pb-8">
-        <Button onClick={handleSaveQiniu} disabled={saving} className="gap-2 px-8">
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {saving ? "Saving..." : "Save Qiniu"}
-        </Button>
-      </div>
     </div>
     </div>
   );

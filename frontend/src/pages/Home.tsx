@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { FileText, ChevronRight, Sparkles, Target, Mic, TrendingUp, Zap, BriefcaseBusiness, AlertCircle, CheckCircle2 } from "lucide-react";
+import { FileText, ChevronRight, Sparkles, Target, TrendingUp, Zap, BriefcaseBusiness, AlertCircle, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import TopicCard from "../components/TopicCard";
 import { getTopics, startInterview, startInterviewStream, getResumeStatus, uploadResume, getProfile, getDueReviews } from "../api/interview";
@@ -43,13 +43,6 @@ const MODE_CARDS: ModeCard[] = [
     title: "岗位特训营",
     desc: "贴入岗位 JD，AI 拆解岗位重点，结合简历生成高概率问题和岗位匹配复盘。",
     tag: "定向突破",
-  },
-  {
-    mode: "recording",
-    icon: Mic,
-    title: "回放实验室",
-    desc: "上传面试录音或粘贴文字，AI 自动转写分析，帮你复盘每一场真实面试。",
-    tag: "复盘利器",
   },
 ];
 
@@ -135,7 +128,6 @@ export default function Home() {
   const handleStart = async () => {
     if (!mode) return;
     if (mode === "job_prep") { navigate("/job-prep"); return; }
-    if (mode === "recording") { navigate("/recording"); return; }
     if (mode === "topic_drill" && !selectedTopic) return;
 
     if (mode === "topic_drill") {
@@ -235,7 +227,7 @@ export default function Home() {
     }
   };
 
-  const canStart = (mode === "resume" && resumeFile) || (mode === "topic_drill" && selectedTopic) || mode === "recording" || mode === "job_prep";
+  const canStart = (mode === "resume" && resumeFile) || (mode === "topic_drill" && selectedTopic) || mode === "job_prep";
 
   function renderStats() {
     if (pageLoading) {

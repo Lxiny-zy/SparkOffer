@@ -18,14 +18,13 @@ import { REASONING_EFFORT_HINT } from "@/lib/badge-presets";
 type ChannelData = Record<string, any>;
 
 interface ChannelManagerProps {
-  section: "llm" | "embedding" | "asr" | "reranker";
+  section: "llm" | "embedding" | "reranker";
   onDirty?: (dirty: boolean) => void;
 }
 
 const SECTION_DEFAULTS: Record<string, () => ChannelData> = {
   llm: () => ({ id: "", name: "", api_base: "", keys: [""], model: "", temperature: 0.7, reasoning_effort: "", max_tokens: 32768, context_window: 0, timeout: 0, tier: "large", priority: 1, enabled: true, proxy: "" }),
   embedding: () => ({ id: "", name: "", backend: "api", api_base: "", keys: [""], api_model: "", local_model: "", local_path: "", priority: 1, enabled: true, proxy: "" }),
-  asr: () => ({ id: "", name: "", keys: [""], model: "qwen3-asr-flash-filetrans", priority: 1, enabled: true, proxy: "" }),
   reranker: () => ({ id: "", name: "", api_base: "", keys: [""], api_model: "", priority: 1, enabled: true, proxy: "" }),
 };
 
@@ -175,12 +174,10 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
       });
       const payload: any = {};
       // Preserve every section the backend returned (incl. reranker) and only
-      // overwrite the one being edited. The previous hardcoded
-      // ["llm","embedding","asr"] list silently dropped reranker channels on
-      // every save, because the backend PUT overwrites omitted sections.
+      // overwrite the one being edited.
       const sections = Object.keys(allData).length
         ? Object.keys(allData)
-        : ["llm", "embedding", "asr", "reranker"];
+        : ["llm", "embedding", "reranker"];
       for (const sec of sections) {
         payload[sec] = sec === section ? cleanChannels : (allData[sec]?.channels || []);
       }
@@ -270,12 +267,10 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                   </div>
                 </div>
 
-                {section !== "asr" && (
-                  <div>
-                    <Label className="text-xs">API Base URL</Label>
-                    <Input value={ch.api_base || ""} onChange={(e) => updateChannel(idx, { api_base: e.target.value })} placeholder="https://api.openai.com/v1" className="h-8 text-sm" />
-                  </div>
-                )}
+                <div>
+                  <Label className="text-xs">API Base URL</Label>
+                  <Input value={ch.api_base || ""} onChange={(e) => updateChannel(idx, { api_base: e.target.value })} placeholder="https://api.openai.com/v1" className="h-8 text-sm" />
+                </div>
 
                 <div>
                   <Label className="text-xs">Proxy URL <span className="text-dim font-normal">(optional)</span></Label>
@@ -344,7 +339,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                   ) : (
                     <div>
                       <Label className="text-xs">Model</Label>
-                      <Input value={ch.model || ""} onChange={(e) => updateChannel(idx, { model: e.target.value })} placeholder={section === "asr" ? "qwen3-asr-flash-filetrans" : "gpt-4o"} className="h-8 text-sm" />
+                      <Input value={ch.model || ""} onChange={(e) => updateChannel(idx, { model: e.target.value })} placeholder="gpt-4o" className="h-8 text-sm" />
                     </div>
                   )}
                   {section === "llm" && (

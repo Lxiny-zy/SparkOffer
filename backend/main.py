@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
 from backend.routers import (
-    auth, settings_router, resume, interview, recording,
+    auth, settings_router, resume, interview,
     profile, knowledge, job_prep, algorithm, favorites,
     assistant, graph_router, qa_arena, rag_eval, debug,
     knowledge_training,
@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
     logger.info("Cache backend: %s", cache.health()["backend"])
 
     from backend.channel_manager import has_channels, get_all_channels
-    for sec in ("llm", "embedding", "asr"):
+    for sec in ("llm", "embedding"):
         chs = get_all_channels(sec)
         if chs:
             enabled = sum(1 for c in chs if c.get("enabled", True))
@@ -108,7 +108,6 @@ app.include_router(auth.router)
 app.include_router(settings_router.router)
 app.include_router(resume.router)
 app.include_router(interview.router)
-app.include_router(recording.router)
 app.include_router(profile.router)
 app.include_router(knowledge.router)
 app.include_router(knowledge_training.router)
