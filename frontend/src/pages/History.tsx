@@ -29,7 +29,7 @@ export default function History() {
   const [modeFilter, setModeFilter] = useState("all");
   const [topicFilter, setTopicFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"completed" | "in_progress">("completed");
-  const [topics, setTopics] = useState<string[]>([]);
+  const [topics, setTopics] = useState<{ key: string; name: string }[]>([]);
 
   useEffect(() => { getInterviewTopics().then(setTopics).catch(() => {}); }, []);
 
@@ -141,7 +141,7 @@ export default function History() {
               onChange={(e) => setTopicFilter(e.target.value)}
             >
               <option value="all">全部领域</option>
-              {topics.map((t) => <option key={t} value={t}>{t}</option>)}
+              {topics.map((t) => <option key={t.key} value={t.key}>{t.name}</option>)}
             </select>
           </>
         )}
@@ -156,7 +156,7 @@ export default function History() {
           <div className="flex flex-col gap-2.5 stagger-children">
             {sessions.map((s) => {
               const badge = getModeBadge(s.mode);
-              const title = s.meta?.position || s.topic || "综合面试";
+              const title = s.meta?.position || s.topic_name || s.topic || "综合面试";
               const subtitle = s.meta?.company || "";
               const timeRaw = s.created_at?.slice(0, 16)?.replace("T", " ") || "";
               const qCount = s.question_count ?? s.questions?.length;

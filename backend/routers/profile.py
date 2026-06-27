@@ -315,10 +315,20 @@ def get_history(
     status: str = "completed",
     user_id: str = Depends(get_current_user),
 ):
-    return list_sessions(
+    result = list_sessions(
         user_id=user_id, limit=limit, offset=offset,
         mode=mode, topic=topic, status=status,
     )
+    # Sessions persist the topic *key* — a hash like `cb8f7fc8` for a manually
+    # created module. Attach the display name so 时光机 renders 「大厂题库」 instead
+    # of the hash. Mirrors get_user_profile()'s topic_names handling; `topic`
+    # stays the key for any key-based consumer.
+    names = {k: v.get("name", k) for k, v in load_topics(user_id).items()}
+    for item in result.get("items", []):
+        key = item.get("topic")
+        if key:
+            item["topic_name"] = names.get(key, key)
+    return result
 
 
 @router.get("/interview/session/{session_id}")
@@ -383,4 +393,8 @@ def delete_session_endpoint(session_id: str, user_id: str = Depends(get_current_
 
 @router.get("/interview/topics")
 def get_interview_topics(user_id: str = Depends(get_current_user)):
-    return list_distinct_topics(user_id=user_id)
+    # Return {key, name} so the 时光机 filter shows 「大厂题库」 while still filtering
+    # by the stored topic key (a hash for manually-created modules).
+    keys = list_distinct_topics(user_id=user_id)
+    names = {k: v.get("name", k) for k, v in load_topics(user_id).items()}
+    return [{"key": k, "name": names.get(k, k)} for k in keys]
