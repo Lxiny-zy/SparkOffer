@@ -29,6 +29,7 @@ import {
   generateKnowledgeTrainingCards,
   getDueKnowledgeCards,
   getKnowledgeTrainingAvailability,
+  getSavedKnowledgeCards,
   reviewKnowledgeCard,
   type Familiarity,
   type KnowledgeTrainingAvailabilityItem,
@@ -37,7 +38,7 @@ import {
   type KnowledgeTrainingMode,
 } from "../api/knowledgeTraining";
 
-type StudyMode = "new" | "review";
+type StudyMode = "new" | "review" | "saved";
 
 const COUNT_OPTIONS = [3, 5, 10];
 const MODE_OPTIONS: { value: KnowledgeTrainingMode; label: string }[] = [
@@ -119,6 +120,7 @@ export default function KnowledgeTraining() {
   const selectedInfo = selected ? availability[selected] : null;
   const currentCard = cards[currentIndex] || null;
   const dueCount = selectedInfo?.due_count ?? 0;
+  const savedCount = selectedInfo?.saved_count ?? 0;
 
   const loadAvailability = useCallback(async () => {
     setLoadingTopics(true);
@@ -252,7 +254,46 @@ export default function KnowledgeTraining() {
     }
   }, [generating, hydrateFamiliarity, selected]);
 
-  const startSession = studyMode === "review" ? startReview : startTraining;
+  // Load all server-persisted cards for this topic (incl. unmarked ones). This
+  // is the cross-device path: the per-session card view lives in localStorage,
+  // but the cards themselves live in SQLite — so on a new browser they're only
+  // reachable here, not via the localStorage-restored "new" mode.
+  const startSaved = useCallback(async () => {
+    if (!selected || generating) return;
+    setGenerating(true);
+    setProgress("正在加载已保存卡片...");
+    setError("");
+    setCards([]);
+    setCurrentIndex(0);
+    setRevealedAnswers({});
+    setFamiliarity({});
+    try {
+      const { items } = await getSavedKnowledgeCards(selected);
+      setCards(items);
+      setCurrentIndex(0);
+      hydrateFamiliarity(items);
+      setProgress("");
+      if (items.length === 0) toast.info("当前模块还没有已保存的卡片");
+      else toast.success(`加载了 ${items.length} 张已保存卡片`);
+    } catch (e: any) {
+      setError(e.message || "加载已保存卡片失败");
+      setProgress("");
+    } finally {
+      setGenerating(false);
+    }
+  }, [generating, hydrateFamiliarity, selected]);
+
+  // Auto-load on entering "saved" mode or switching topic, so the full card set
+  // appears without a manual click — the direct fix for "cards vanish on another
+  // browser". startSaved guards on selected/generating; deps intentionally omit
+  // it (it changes with `generating`) to avoid a reload loop.
+  useEffect(() => {
+    if (studyMode === "saved" && selected) startSaved();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studyMode, selected]);
+
+  const startSession =
+    studyMode === "review" ? startReview : studyMode === "saved" ? startSaved : startTraining;
 
   const setCardFamiliarity = async (value: Familiarity) => {
     if (!currentCard) return;
@@ -279,7 +320,9 @@ export default function KnowledgeTraining() {
     setRevealedAnswers((prev) => ({ ...prev, [currentCard.id]: !prev[currentCard.id] }));
   };
 
-  const canStart = !!selected && !generating && (studyMode === "review" || !!selectedInfo?.available);
+  const canStart =
+    !!selected && !generating &&
+    (studyMode === "review" || studyMode === "saved" || !!selectedInfo?.available);
 
   return (
     <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
@@ -315,6 +358,22 @@ export default function KnowledgeTraining() {
                     "rounded-full px-1.5 text-[10px] font-mono",
                     studyMode === "review" ? "bg-primary-foreground/20" : "bg-red/15 text-red",
                   )}>{dueCount}</span>
+                )}
+              </button>
+              <button
+                className={cn(
+                  "flex items-center gap-1 rounded px-3 py-1 transition-colors",
+                  studyMode === "saved" ? "bg-primary text-primary-foreground" : "text-dim hover:text-text",
+                )}
+                onClick={() => setStudyMode("saved")}
+                disabled={generating}
+              >
+                已保存
+                {savedCount > 0 && (
+                  <span className={cn(
+                    "rounded-full px-1.5 text-[10px] font-mono",
+                    studyMode === "saved" ? "bg-primary-foreground/20" : "bg-secondary text-dim",
+                  )}>{savedCount}</span>
                 )}
               </button>
             </div>
@@ -360,8 +419,16 @@ export default function KnowledgeTraining() {
               </>
             )}
             <Button onClick={startSession} disabled={!canStart} size="sm" className="shrink-0">
-              {generating ? <Loader2 className="animate-spin" /> : studyMode === "review" ? <RotateCcw /> : <Play />}
-              {studyMode === "review" ? "开始复习" : "开始训练"}
+              {generating ? (
+                <Loader2 className="animate-spin" />
+              ) : studyMode === "review" ? (
+                <RotateCcw />
+              ) : studyMode === "saved" ? (
+                <Layers />
+              ) : (
+                <Play />
+              )}
+              {studyMode === "review" ? "开始复习" : studyMode === "saved" ? "刷新已保存" : "开始训练"}
             </Button>
           </div>
         </div>
@@ -417,6 +484,21 @@ export default function KnowledgeTraining() {
                       开始复习
                     </Button>
                   </>
+                ) : studyMode === "saved" ? (
+                  <>
+                    <Layers className="mb-3 h-9 w-9 text-primary" />
+                    <h2 className="mb-2 text-base font-semibold">已保存卡片 · 跨设备同步</h2>
+                    <p className="max-w-md text-sm leading-6 text-dim">
+                      生成过的卡片都存在服务器，换浏览器或设备登录同一账户都能在这里找回并继续标记。
+                      {savedCount > 0
+                        ? `当前模块已保存 ${savedCount} 张。`
+                        : "当前模块还没有已保存的卡片，先去「新卡生成」生成一组。"}
+                    </p>
+                    <Button className="mt-5" onClick={startSaved} disabled={!canStart}>
+                      {generating ? <Loader2 className="animate-spin" /> : <Layers />}
+                      加载已保存
+                    </Button>
+                  </>
                 ) : selectedInfo?.available ? (
                   <>
                     <Brain className="mb-3 h-9 w-9 text-primary" />
@@ -465,7 +547,7 @@ export default function KnowledgeTraining() {
                   </div>
                   <Button variant="outline" size="sm" onClick={startSession} disabled={generating} className="shrink-0">
                     <RefreshCw />
-                    {studyMode === "review" ? "刷新到期" : "换一组"}
+                    {studyMode === "review" ? "刷新到期" : studyMode === "saved" ? "刷新" : "换一组"}
                   </Button>
                 </div>
 
@@ -541,9 +623,11 @@ export default function KnowledgeTraining() {
           <Card interactive={false}>
             <CardContent className="p-4">
               <div className="mb-3 flex items-center justify-between gap-2">
-                <div className="text-sm font-semibold">{studyMode === "review" ? "到期卡片" : "本轮卡片"}</div>
+                <div className="text-sm font-semibold">
+                  {studyMode === "review" ? "到期卡片" : studyMode === "saved" ? "已保存卡片" : "本轮卡片"}
+                </div>
                 <Badge variant="outline" className="font-mono text-[10px]">
-                  {studyMode === "review" ? cards.length : `${cards.length}/${count}`}
+                  {studyMode === "new" ? `${cards.length}/${count}` : cards.length}
                 </Badge>
               </div>
               <div className="mb-4 grid grid-cols-3 gap-2 text-center text-xs">
