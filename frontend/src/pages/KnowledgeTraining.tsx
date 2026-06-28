@@ -300,7 +300,11 @@ export default function KnowledgeTraining() {
     const cardId = currentCard.id;
     const prevValue = familiarity[cardId];
     // Optimistic mark; the server applies the SM-2 schedule update.
+    // Mirror the mark onto the card object too, so it survives the
+    // localStorage round-trip and hydrateFamiliarity() on page/mode switch
+    // (which rebuilds the lookup from each card's own `familiarity` field).
     setFamiliarity((prev) => ({ ...prev, [cardId]: value }));
+    setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, familiarity: value } : c)));
     try {
       await reviewKnowledgeCard(cardId, value);
       loadAvailability(); // due/saved counts shifted
@@ -311,6 +315,9 @@ export default function KnowledgeTraining() {
         else delete next[cardId];
         return next;
       });
+      setCards((prev) =>
+        prev.map((c) => (c.id === cardId ? { ...c, familiarity: prevValue ?? "" } : c)),
+      );
       toast.error(e?.message || "保存熟悉度失败");
     }
   };
