@@ -1,5 +1,6 @@
 """LlamaIndex indexing for resume and interview knowledge base."""
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -104,6 +105,66 @@ def _cache_set(key: tuple[str, str], index: "VectorStoreIndex"):
             if len(_index_cache) > _INDEX_CACHE_MAX_SIZE:
                 oldest = min(_index_cache, key=lambda k: _index_cache[k][0])
                 del _index_cache[oldest]
+
+
+# ── File hash manifest for incremental index rebuilds ──
+# Tracks MD5 hashes of source files so we can diff and only re-embed changed files.
+
+
+def _compute_file_hashes(
+    source_dir: Path, required_exts: list[str] | None = None,
+) -> dict[str, str]:
+    """Compute MD5 hashes for all knowledge files in a directory.
+
+    Returns ``{relative_posix_path: md5_hex}``.
+    Mirrors ``_load_nodes_streaming``'s recursive scan + extension filter.
+    """
+    hashes: dict[str, str] = {}
+    if not source_dir.exists():
+        return hashes
+    for f in sorted(source_dir.rglob("*")):
+        if not f.is_file():
+            continue
+        if required_exts and f.suffix not in required_exts:
+            continue
+        rel = f.relative_to(source_dir).as_posix()
+        hashes[rel] = hashlib.md5(f.read_bytes()).hexdigest()
+    return hashes
+
+
+def _manifest_path(cache_dir: Path) -> Path:
+    return cache_dir / "_file_hashes.json"
+
+
+def _load_manifest(cache_dir: Path) -> dict[str, str]:
+    p = _manifest_path(cache_dir)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_manifest(cache_dir: Path, hashes: dict[str, str]):
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    _manifest_path(cache_dir).write_text(
+        json.dumps(hashes, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _diff_file_hashes(
+    old: dict[str, str], new: dict[str, str],
+) -> tuple[list[str], list[str], list[str]]:
+    """Compare old and new file hashes.
+
+    Returns ``(added, modified, deleted)`` — each a list of relative paths.
+    """
+    added = [f for f in new if f not in old]
+    deleted = [f for f in old if f not in new]
+    modified = [f for f in new if f in old and old[f] != new[f]]
+    return added, modified, deleted
 
 
 def load_topics(user_id: str) -> dict:
@@ -311,6 +372,7 @@ def _build_or_load_qdrant_index(
     collection: str, source_dir: Path, force_rebuild: bool,
     required_exts: list[str] | None = None, allow_empty: bool = False,
     progress_cb=None, build_if_missing: bool = True,
+    manifest_dir: Path | None = None,
 ) -> VectorStoreIndex:
     """Qdrant 版构建/加载：已有 collection 直接 from_vector_store 恢复（不重嵌入），
     否则从磁盘文档构建并写入 Qdrant（不再用本地 persist_dir）。
@@ -342,6 +404,15 @@ def _build_or_load_qdrant_index(
             return VectorStoreIndex.from_vector_store(vector_store)
 
     if exists and force_rebuild:
+        # Check manifest: skip full rebuild if no source files actually changed
+        if manifest_dir:
+            old_hashes = _load_manifest(manifest_dir)
+            if old_hashes:
+                new_hashes = _compute_file_hashes(source_dir, required_exts)
+                added, modified, deleted = _diff_file_hashes(old_hashes, new_hashes)
+                if not added and not modified and not deleted:
+                    logger.info("Qdrant KB %s: no file changes, skip rebuild", collection)
+                    return VectorStoreIndex.from_vector_store(vector_store)
         client.delete_collection(collection)  # 重建前清空，避免重复 node
 
     if not build_if_missing:
@@ -364,9 +435,103 @@ def _build_or_load_qdrant_index(
     # retry + concurrency. Query keeps LlamaSettings.embed_model (fast-fail).
     embed_model = get_embedding_for_index()
     _embed_nodes_with_progress(nodes, embed_model, progress_cb)
-    return VectorStoreIndex(
+    index = VectorStoreIndex(
         nodes, storage_context=storage_context, embed_model=embed_model,
     )
+    if manifest_dir:
+        _save_manifest(manifest_dir, _compute_file_hashes(source_dir, required_exts))
+    return index
+
+
+def _try_incremental_local_update(
+    cache_dir: Path, source_dir: Path,
+    required_exts: list[str] | None = None,
+    progress_cb=None,
+) -> "VectorStoreIndex | None":
+    """Try incremental update of an existing local index.
+
+    Compares a file-hash manifest against the current source directory to
+    determine which files were added, modified, or deleted.  Only the changed
+    files are re-embedded; unchanged files' vectors are preserved.
+
+    Returns the updated index on success, or ``None`` to signal that a full
+    rebuild is needed (no manifest yet, corrupted index, or unexpected error).
+    """
+    old_hashes = _load_manifest(cache_dir)
+    if not old_hashes:
+        return None  # no manifest → first time; full rebuild to establish baseline
+
+    new_hashes = _compute_file_hashes(source_dir, required_exts)
+    added, modified, deleted = _diff_file_hashes(old_hashes, new_hashes)
+
+    if not added and not modified and not deleted:
+        try:
+            storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
+            index = load_index_from_storage(storage_context)
+            logger.info("Incremental update: %s — no file changes, skip rebuild", cache_dir.name)
+            return index
+        except Exception:
+            return None
+
+    unchanged = len(new_hashes) - len(added) - len(modified)
+    logger.info(
+        "Incremental index update: %s — +%d ~%d -%d (skipping %d unchanged)",
+        cache_dir.name, len(added), len(modified), len(deleted), unchanged,
+    )
+
+    try:
+        storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
+        index = load_index_from_storage(storage_context)
+    except Exception as e:
+        logger.warning("Cannot load existing index for incremental update: %s", e)
+        return None
+
+    # ── Delete nodes belonging to modified / deleted files ──
+    files_to_remove = {Path(f).name for f in modified + deleted}
+    if files_to_remove:
+        try:
+            node_ids_to_delete = [
+                nid for nid, node in list(index.docstore.docs.items())
+                if (node.metadata or {}).get("file_name", "") in files_to_remove
+            ]
+            if node_ids_to_delete:
+                vs_data = index._vector_store._data
+                for nid in node_ids_to_delete:
+                    vs_data.embedding_dict.pop(nid, None)
+                    vs_data.text_id_to_ref_doc_id.pop(nid, None)
+                    vs_data.metadata_dict.pop(nid, None)
+                    index.docstore.delete_document(nid, raise_error=False)
+                logger.info(
+                    "Incremental: removed %d nodes from %d files",
+                    len(node_ids_to_delete), len(files_to_remove),
+                )
+        except Exception as e:
+            logger.warning("Incremental node deletion failed, falling back to full rebuild: %s", e)
+            return None
+
+    # ── Embed and insert nodes for added / modified files ──
+    files_to_add = [f for f in added + modified if (source_dir / f).exists()]
+    if files_to_add:
+        try:
+            reader = SimpleDirectoryReader(input_files=[str(source_dir / f) for f in files_to_add])
+            new_nodes: list = []
+            for file_docs in reader.iter_data():
+                new_nodes.extend(_build_nodes(file_docs))
+            if new_nodes:
+                embed_model = get_embedding_for_index()
+                _embed_nodes_with_progress(new_nodes, embed_model, progress_cb)
+                index.insert_nodes(new_nodes)
+                logger.info(
+                    "Incremental: inserted %d nodes from %d files",
+                    len(new_nodes), len(files_to_add),
+                )
+        except Exception as e:
+            logger.warning("Incremental node insertion failed, falling back to full rebuild: %s", e)
+            return None
+
+    index.storage_context.persist(persist_dir=str(cache_dir))
+    _save_manifest(cache_dir, new_hashes)
+    return index
 
 
 def _build_or_load_local_index(
@@ -383,6 +548,15 @@ def _build_or_load_local_index(
     if cache_dir.exists() and not force_rebuild:
         storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
         return load_index_from_storage(storage_context)
+
+    # force_rebuild with an existing index on disk → try incremental update
+    if force_rebuild and cache_dir.exists():
+        result = _try_incremental_local_update(
+            cache_dir, source_dir, required_exts, progress_cb,
+        )
+        if result is not None:
+            return result
+        # incremental failed → fall through to full rebuild
 
     if not build_if_missing:
         raise IndexNotReady(f"local index missing: {cache_dir}")
@@ -403,6 +577,7 @@ def _build_or_load_local_index(
     index = VectorStoreIndex(nodes, embed_model=embed_model)
     cache_dir.mkdir(parents=True, exist_ok=True)
     index.storage_context.persist(persist_dir=str(cache_dir))
+    _save_manifest(cache_dir, _compute_file_hashes(source_dir, required_exts))
     return index
 
 
@@ -490,6 +665,7 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False,
                 index = _build_or_load_qdrant_index(
                     _kb_collection_name(user_id, topic), topic_dir, force_rebuild,
                     required_exts=exts, progress_cb=progress_cb, build_if_missing=build_if_missing,
+                    manifest_dir=cache_dir,
                 )
             except IndexNotReady:
                 raise
@@ -600,6 +776,18 @@ def invalidate_topic_index(topic: str, user_id: str):
     if cache_dir.exists():
         import shutil
         shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def evict_topic_cache(topic: str, user_id: str):
+    """Evict only the in-memory cache for a topic, preserving the persisted index.
+
+    Used by file-operation endpoints so the subsequent incremental rebuild can
+    load and diff against the existing on-disk index rather than starting from
+    scratch.  For a full wipe (explicit "rebuild all"), use
+    ``invalidate_topic_index`` instead.
+    """
+    with _index_cache_lock:
+        _index_cache.pop((user_id, topic), None)
 
 
 def incremental_insert_to_index(topic: str, user_id: str, new_text: str, source: str = "auto_evolution"):

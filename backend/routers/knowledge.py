@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 
 from backend.config import settings
-from backend.indexer import load_topics, invalidate_topic_index, build_topic_index, topic_chunk_count
+from backend.indexer import load_topics, invalidate_topic_index, evict_topic_cache, build_topic_index, topic_chunk_count
 from backend.embedding_tasks import schedule_index_rebuild, get_task_queue
 from backend.auth import get_current_user
 from backend.utils.files import atomic_write_text
@@ -128,7 +128,7 @@ async def update_core_knowledge(topic: str, filename: str, body: dict,
     content = body.get("content", "")
     _check_doc_size(content)
     await asyncio.to_thread(atomic_write_text, filepath, content)
-    await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+    evict_topic_cache(topic, user_id)
     schedule_index_rebuild(topic, user_id)
     return {"ok": True}
 
@@ -145,7 +145,7 @@ async def delete_core_knowledge(topic: str, filename: str,
     if not filepath.exists():
         raise HTTPException(404, f"File not found: {filename}")
     filepath.unlink()
-    await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+    evict_topic_cache(topic, user_id)
     schedule_index_rebuild(topic, user_id)
     return {"ok": True}
 
@@ -168,7 +168,7 @@ async def create_core_knowledge(topic: str, body: dict,
     content = body.get("content", "")
     _check_doc_size(content)
     await asyncio.to_thread(atomic_write_text, filepath, content)
-    await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+    evict_topic_cache(topic, user_id)
     schedule_index_rebuild(topic, user_id)
     return {"ok": True, "filename": filename}
 
@@ -213,7 +213,7 @@ async def upload_core_knowledge(topic: str, files: list[UploadFile] = File(...),
         saved.append(final_name)
 
     if saved:
-        await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+        evict_topic_cache(topic, user_id)
         schedule_index_rebuild(topic, user_id)
     return {"ok": True, "saved": saved, "skipped": skipped, "rejected": rejected}
 
@@ -252,7 +252,7 @@ async def generate_core_knowledge(topic: str, user_id: str = Depends(get_current
 
         topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
         await asyncio.to_thread(atomic_write_text, topic_dir / "README.md", content)
-        invalidate_topic_index(topic, user_id)
+        evict_topic_cache(topic, user_id)
         schedule_index_rebuild(topic, user_id)
 
         yield sse_event({"type": "complete", "data": {"ok": True, "content": content}})
