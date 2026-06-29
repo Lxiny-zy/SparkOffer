@@ -703,6 +703,15 @@ export default function Knowledge() {
                             <span>文件总数：</span>
                             <span className="font-mono text-text">{stats.file_count}</span>
                           </div>
+                          <div className="flex items-center gap-1.5" title="知识库所有文件的总字数">
+                            <FileText size={12} className="text-success/70" />
+                            <span>总字数：</span>
+                            <span className="font-mono text-text">
+                              {stats.total_chars >= 10000
+                                ? `${(stats.total_chars / 10000).toFixed(1)} 万字`
+                                : `${stats.total_chars ?? 0} 字`}
+                            </span>
+                          </div>
                           <div className="flex items-center gap-1.5" title="该模块向量化后的 chunk 数；括号内为全库总数">
                             <Layers size={12} className="text-primary/70" />
                             <span>向量块：</span>

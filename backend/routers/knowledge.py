@@ -379,6 +379,7 @@ async def get_knowledge_stats(topic: str, user_id: str = Depends(get_current_use
         last_evolved_file = ""
         last_any_update_at = 0
         file_count = 0
+        total_chars = 0
 
         if topic_dir.exists():
             marker_re = re.compile(r"<!--\s*自动沉淀\s+[\d\-:\s]+-->")
@@ -395,6 +396,7 @@ async def get_knowledge_stats(topic: str, user_id: str = Depends(get_current_use
                     content = f.read_text(encoding="utf-8")
                 except OSError:
                     continue
+                total_chars += len(content)
                 hits = marker_re.findall(content)
                 if hits:
                     evolution_count += len(hits)
@@ -414,6 +416,7 @@ async def get_knowledge_stats(topic: str, user_id: str = Depends(get_current_use
         return {
             "topic": topic,
             "file_count": file_count,
+            "total_chars": total_chars,
             "chunk_count": topic_chunk_count(topic, user_id),
             "last_any_update_at": last_any_update_at,
             "last_evolved_at": last_evolved_at,

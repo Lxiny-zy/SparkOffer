@@ -435,6 +435,7 @@ export async function updateHighFreq(topic: string, content: string): Promise<an
 export interface KnowledgeStats {
   topic: string;
   file_count: number;
+  total_chars: number;
   chunk_count: number;
   last_any_update_at: number;
   last_evolved_at: number;
