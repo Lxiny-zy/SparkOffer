@@ -97,10 +97,10 @@ data/
 - **Two distinct RAG-metric systems, never comparable.** `rag_metrics.py` = online, zero-LLM-cost retrieval health gauges on the question-gen path (`relevance` / `discrimination` / `diversity` — embedding-only, no ground truth). `rag_eval.py` = offline RAGAS benchmark with an LLM-synthesized golden set (`hit@k` / `hit_at_k_strict` / `mrr` / precision / recall / faithfulness / relevancy / correctness — ground-truth, LLM-judged). They live on different scales: out-题 relevance naturally ~0.45–0.65, RAGAS scores naturally higher. Color each metric against its own band via `frontend/src/lib/metrics.ts` `METRIC_SPEC`, never a global threshold. Don't reintroduce the old circular precision/recall on the question-gen path (chunks scored against the queries that retrieved them → pinned ~100%).
 - **The simplification pass (commit `9a07107`) deliberately removed defensive layers** — don't reintroduce broad try/except, mock fallbacks, or feature-flag scaffolding without a concrete reason.
 - **Sync code in async paths is wrapped, not avoided.** LlamaIndex retrieval uses `asyncio.to_thread` + timeout; mirror this pattern for new sync-only dependencies rather than blocking the event loop.
-- **Hard limits encode design tradeoffs** (see `PROJECT_INTERVIEW_GUIDE.md` §7): 500 vectors/user, 50 cached indices, 1h index TTL, 2h live-session TTL, 0.75 semantic-dedup threshold, 14-day decay half-life. Change them with care — they bound memory/cost.
+- **Hard limits encode design tradeoffs** (see `项目技术文档/04_记忆与个性化.md`): 500 vectors/user, 50 cached indices, 1h index TTL, 2h live-session TTL, 0.75 semantic-dedup threshold, 14-day decay half-life. Change them with care — they bound memory/cost.
 
 ## Reference docs already in the repo
 
 - `README.md` / `README.en.md` — product pitch, quickstart, tech stack table.
 - `DEPLOYMENT.md` — Docker, ports (9000/9001), volume backup, healthcheck details.
-- `PROJECT_INTERVIEW_GUIDE.md` + `interview-docs/01..06_*.md` — exhaustive architecture / data-flow / DB / prompt / frontend write-ups. When asked deep "how does X work" questions, prefer reading these over re-deriving from code.
+- `interview-docs/01..06_*.md` + `项目技术文档/01..11_*.md` — exhaustive architecture / data-flow / DB / prompt / frontend write-ups. When asked deep "how does X work" questions, prefer reading these over re-deriving from code.
