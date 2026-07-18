@@ -3,14 +3,15 @@ import type { CSSProperties, RefObject } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Sun, Moon, ArrowRight, ArrowDown, Target, FileText, BriefcaseBusiness,
-  MessageSquare, Code2, Mic, Radar, ChartLine, GitFork, User, Flame,
+  MessageSquare, Code2, Brain, Radar, ChartLine, GitFork, User, Flame,
   BarChart3, BookOpen, ShieldCheck,
 } from "lucide-react";
 import CatAvatar from "@/components/CatAvatar";
 
 /* ─────────────────────────────────────────────────────────────
    访客首页 · 设计假设（sig 系统内深化，不引入新设计语言）
-   - 内容源：README「核心亮点」+ 侧栏真实功能面 —— 六场景 / 闭环 / 三层上下文 / 观测套件
+   - 内容源：以代码为准 —— Home MODE_CARDS 四训练模式 + Sidebar 导航
+     （算法竞技场 / 问答演练场 / 数据观测页），场景命名与产品内一致
    - 两个签名可视化：闭环信号流（The Loop）、三层上下文堆叠（Context Stack）
    - 滚动 reveal 用 .sig-reveal + IntersectionObserver；动效尊重 prefers-reduced-motion
    ───────────────────────────────────────────────────────────── */
@@ -72,14 +73,14 @@ const LAYER_OUTPUT = {
   desc: "三层上下文注入 LangGraph 工作流 —— 生成 10 道只属于你的题：命中你的薄弱点，引用你的知识库，避开你刚练过的。",
 };
 
-/* ── 六种训练场景 ── */
+/* ── 六种训练场景（与产品内命名一致：Home 四模式 + 算法/问答两个竞技场）── */
 const SCENES = [
-  { icon: Target, tag: "自适应难度", title: "专项强化训练", desc: "选定领域，10 道动态生成的高针对性问题。前几题精准命中历史薄弱点，难度随掌握度爬坡。" },
-  { icon: FileText, tag: "LangGraph", title: "简历模拟面试", desc: "五阶段状态机驱动：自我介绍 → 技术问题 → 项目深挖 → 反问收尾，逐层追问如真实面试官。" },
-  { icon: BriefcaseBusiness, tag: "JD 解析", title: "定向备战", desc: "粘贴目标岗位 JD，AI 拆解考察重点，结合简历与知识库生成高概率追问。" },
-  { icon: MessageSquare, tag: "知识回流", title: "问答演练场", desc: "自由追问任意技术点；好答案一键沉淀为知识卡片，回流进你的知识库参与下次出题。" },
+  { icon: Target, tag: "精准打击", title: "弱点狙击站", desc: "选一个领域集中训练，AI 根据你的回答动态调整难度。前几题精准命中历史薄弱点，掌握度越高题越难。" },
+  { icon: FileText, tag: "沉浸体验", title: "实战模拟场", desc: "AI 读取你的简历，模拟真实面试官。自我介绍 → 技术问题 → 项目深挖 → 反问收尾，完整走一遍面试流程。" },
+  { icon: BriefcaseBusiness, tag: "定向突破", title: "岗位特训营", desc: "贴入目标岗位 JD，AI 拆解岗位重点，结合简历生成高概率问题和岗位匹配复盘。" },
+  { icon: Brain, tag: "记忆强化", title: "知识训练场", desc: "AI 把知识库拆成记忆卡片，正反翻面强化记忆，三档深度循序渐进，配合 SM-2 到期复习。" },
   { icon: Code2, tag: "错题闭环", title: "算法竞技场", desc: "刷题收藏、错题回顾、AI 解题陪练 —— 反复出错的题自动进入高频复习队列。" },
-  { icon: Mic, tag: "ASR 转写", title: "录音复盘", desc: "上传真实面试录音，自动转写并结构化成 Q&A，逐题分析你在真实压力下的表现。" },
+  { icon: MessageSquare, tag: "知识回流", title: "问答演练场", desc: "自由追问任意技术点；好答案一键沉淀为知识卡片，回流进你的知识库参与下次出题。" },
 ];
 
 /* ── 可观测成长 ── */
