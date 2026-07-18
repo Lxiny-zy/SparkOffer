@@ -167,6 +167,42 @@ def _diff_file_hashes(
     return added, modified, deleted
 
 
+# 沉淀文件 ↔ schedule_incremental_insert 的 source 标签映射。
+# 这两个文件的内容 = 历次增量插入文本的累积（写回流程先落盘再插入），所以增量
+# 重建把整个沉淀文件重新嵌入时，必须同步清掉对应 source 的浮动插入节点——
+# 否则同一段沉淀会以「文件 chunk」+「插入节点」两份形式重复参与检索。
+_DEPOSIT_FILE_SOURCES = {"自动沉淀.md": "auto_evolution", "用户沉淀_qa.md": "qa_ingest"}
+
+
+def _diff_with_collateral(
+    old_hashes: dict[str, str], new_hashes: dict[str, str],
+) -> tuple[list[str], list[str], list[str], set[str], list[str], set[str]]:
+    """Diff manifests and derive everything the incremental updaters need.
+
+    Returns ``(added, modified, deleted, files_to_remove, collateral, sources_to_purge)``:
+    - ``files_to_remove`` — basenames whose nodes must be deleted (modified + deleted).
+    - ``collateral`` — UNCHANGED files that share a basename with a removed one
+      (nested dirs): node deletion matches on the flat ``file_name`` metadata, so
+      their vectors get wiped too and they must be re-embedded or they silently
+      vanish from the index.
+    - ``sources_to_purge`` — source tags of deposit files being re-embedded/removed
+      (see ``_DEPOSIT_FILE_SOURCES``).
+    """
+    added, modified, deleted = _diff_file_hashes(old_hashes, new_hashes)
+    files_to_remove = {Path(f).name for f in modified + deleted}
+    collateral = [
+        f for f in new_hashes
+        if f in old_hashes and old_hashes[f] == new_hashes[f]
+        and Path(f).name in files_to_remove
+    ]
+    sources_to_purge = {
+        _DEPOSIT_FILE_SOURCES[Path(f).name]
+        for f in added + modified + deleted
+        if Path(f).name in _DEPOSIT_FILE_SOURCES
+    }
+    return added, modified, deleted, files_to_remove, collateral, sources_to_purge
+
+
 def load_topics(user_id: str) -> dict:
     """Load topics from user's topics.json. Returns {key: {name, icon, dir}}."""
     path = settings.user_topics_path(user_id)
@@ -243,8 +279,10 @@ def _build_nodes(docs: list) -> list:
 # 知识库按 (user_id, topic) 分 collection（LlamaIndex 每个 index 对应一个 store），
 # 与记忆库的「单 collection + payload 多租户」互补 —— 两种 multitenancy 策略并存。
 #
-# 健壮性约定（与记忆库后端对齐）：Qdrant 是软依赖。探针失败 / 运行期出错都会降级回
-# 本地 SimpleVectorStore（磁盘 persist），绝不让知识库检索因 Qdrant 不可用而崩。
+# 健壮性约定（与记忆库后端对齐）：qdrant-only。配置走 Qdrant 时绝不降级本地——
+# 探针失败 / 运行期出错收敛为 IndexNotReady，请求路径降级空上下文并委派后台重建。
+# Docker compose 部署默认 VECTOR_BACKEND=qdrant（见 docker-compose.yml）；
+# 裸 uvicorn 本地开发默认 numpy/本地 persist。
 
 _qdrant_client_singleton = None
 _kb_qdrant_healthy: bool | None = None   # None=未探测；探测后缓存健康与否
@@ -340,6 +378,23 @@ def _load_nodes_streaming(
     return nodes
 
 
+def _load_nodes_for_files(source_dir: Path, rel_paths: list[str]) -> list:
+    """Chunk only the given manifest-relative files (incremental re-embed set).
+
+    Paths that vanished between diff and read are skipped — their deletion is
+    already reflected in the new manifest, so nothing is lost.
+    """
+    paths = [source_dir / f for f in rel_paths]
+    existing = [str(p) for p in paths if p.exists()]
+    if not existing:
+        return []
+    reader = SimpleDirectoryReader(input_files=existing)
+    nodes = []
+    for file_docs in reader.iter_data():
+        nodes.extend(_build_nodes(file_docs))
+    return nodes
+
+
 def _embed_nodes_with_progress(nodes, embed_model, progress_cb=None) -> None:
     """Pre-embed nodes in observable windows, reporting (done, total) progress.
 
@@ -366,6 +421,105 @@ def _embed_nodes_with_progress(nodes, embed_model, progress_cb=None) -> None:
             n.embedding = emb
         done += len(batch)
         progress_cb(done, total)
+
+
+def _qdrant_delete_kb_points(client, collection: str,
+                             file_names: set[str], sources: set[str]) -> None:
+    """Delete points whose flat payload ``file_name`` / ``source`` matches.
+
+    LlamaIndex's QdrantVectorStore flattens node metadata into top-level payload
+    keys (verified against a live collection), so filtering on ``file_name`` hits
+    exactly the chunks of those files. Deposit-insert nodes carry ``source`` but
+    no ``file_name``, so the two filters never overlap.
+    """
+    from qdrant_client import models as qm
+
+    def _delete_by(key: str, values: set[str]) -> None:
+        if not values:
+            return
+        client.delete(
+            collection_name=collection,
+            points_selector=qm.FilterSelector(filter=qm.Filter(must=[
+                qm.FieldCondition(key=key, match=qm.MatchAny(any=sorted(values))),
+            ])),
+            wait=True,
+        )
+
+    _delete_by("file_name", file_names)
+    _delete_by("source", sources)
+
+
+def _try_incremental_qdrant_update(
+    client, collection: str, vector_store, source_dir: Path,
+    manifest_dir: Path, required_exts: list[str] | None = None,
+    progress_cb=None,
+) -> "VectorStoreIndex | None":
+    """Incrementally update an existing Qdrant collection from the file manifest.
+
+    Mirrors ``_try_incremental_local_update``: diff the hash manifest, delete the
+    changed/removed files' points via payload filter, re-embed only the changed
+    files, and refresh the manifest. Returns ``None`` to signal that a full
+    rebuild (delete_collection + re-embed everything) is required — no manifest
+    yet, embedding model changed, or an unexpected error mid-update.
+    """
+    old_hashes = _load_manifest(manifest_dir)
+    if not old_hashes:
+        return None  # no baseline (pre-manifest collection) → full rebuild once
+
+    new_hashes = _compute_file_hashes(source_dir, required_exts)
+    added, modified, deleted, files_to_remove, collateral, sources_to_purge = (
+        _diff_with_collateral(old_hashes, new_hashes)
+    )
+
+    # Stale-manifest guard: manifest claims an established baseline but the
+    # collection is empty (e.g. recreated Qdrant volume). Diff-skipping here
+    # would return a permanently empty index — force the full rebuild instead.
+    try:
+        if new_hashes and client.count(collection).count == 0:
+            logger.info("Qdrant KB %s: collection empty but manifest present, full rebuild", collection)
+            return None
+    except Exception:
+        return None
+
+    if not added and not modified and not deleted:
+        logger.info("Qdrant KB %s: no file changes, skip rebuild", collection)
+        return VectorStoreIndex.from_vector_store(vector_store)
+
+    # 换过 embedding 模型 → 维度对不上，增量插入必然被拒；直接走全量重建。
+    col_dim = _qdrant_collection_dim(client, collection)
+    if col_dim is not None and col_dim != _current_embed_dim():
+        logger.info(
+            "Qdrant KB %s: dim %s != current %s, full rebuild required",
+            collection, col_dim, _current_embed_dim(),
+        )
+        return None
+
+    files_to_embed = [f for f in added + modified + collateral if (source_dir / f).exists()]
+    logger.info(
+        "Qdrant KB %s incremental: +%d ~%d -%d (re-embedding %d files, keeping %d unchanged)",
+        collection, len(added), len(modified), len(deleted),
+        len(files_to_embed), len(new_hashes) - len(files_to_embed),
+    )
+
+    try:
+        _qdrant_delete_kb_points(client, collection, files_to_remove, sources_to_purge)
+        new_nodes = _load_nodes_for_files(source_dir, files_to_embed)
+        # 长超时/重试的 index 级 embed model：进度路径预嵌入，无回调时由
+        # insert_nodes 用同一模型内部嵌入 —— 两条路产出的向量一致。
+        embed_model = get_embedding_for_index()
+        index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
+        if new_nodes:
+            _embed_nodes_with_progress(new_nodes, embed_model, progress_cb)
+            index.insert_nodes(new_nodes)
+    except Exception as e:
+        # 增量中途失败会留下「已删未插」的洞 —— 不能保存 manifest 假装成功，
+        # 返回 None 让调用方 delete_collection 后全量重建，真相源在磁盘，无损。
+        logger.warning("Qdrant KB %s incremental update failed, falling back to full rebuild: %s",
+                       collection, e)
+        return None
+
+    _save_manifest(manifest_dir, new_hashes)
+    return index
 
 
 def _build_or_load_qdrant_index(
@@ -399,21 +553,27 @@ def _build_or_load_qdrant_index(
                 collection, col_dim, _current_embed_dim(),
             )
             client.delete_collection(collection)
+            # Re-instantiate: the old instance cached _collection_initialized=True at
+            # construction, so its add() would skip create_collection and upload into
+            # the void (LlamaIndex QdrantVectorStore probes existence only in __init__).
+            vector_store = _LlamaQdrant(client=client, collection_name=collection)
             exists = False
         else:
             return VectorStoreIndex.from_vector_store(vector_store)
 
     if exists and force_rebuild:
-        # Check manifest: skip full rebuild if no source files actually changed
+        # Incremental first: diff the file-hash manifest and only re-embed the
+        # changed files (the all-or-nothing skip lived here before — any single
+        # changed file used to trigger delete_collection + full re-embed).
         if manifest_dir:
-            old_hashes = _load_manifest(manifest_dir)
-            if old_hashes:
-                new_hashes = _compute_file_hashes(source_dir, required_exts)
-                added, modified, deleted = _diff_file_hashes(old_hashes, new_hashes)
-                if not added and not modified and not deleted:
-                    logger.info("Qdrant KB %s: no file changes, skip rebuild", collection)
-                    return VectorStoreIndex.from_vector_store(vector_store)
-        client.delete_collection(collection)  # 重建前清空，避免重复 node
+            index = _try_incremental_qdrant_update(
+                client, collection, vector_store, source_dir,
+                manifest_dir, required_exts, progress_cb,
+            )
+            if index is not None:
+                return index
+        client.delete_collection(collection)  # 全量重建前清空，避免重复 node
+        vector_store = _LlamaQdrant(client=client, collection_name=collection)  # 同上：刷新实例状态
 
     if not build_if_missing:
         raise IndexNotReady(f"qdrant collection missing: {collection}")
@@ -462,7 +622,9 @@ def _try_incremental_local_update(
         return None  # no manifest → first time; full rebuild to establish baseline
 
     new_hashes = _compute_file_hashes(source_dir, required_exts)
-    added, modified, deleted = _diff_file_hashes(old_hashes, new_hashes)
+    added, modified, deleted, files_to_remove, collateral, sources_to_purge = (
+        _diff_with_collateral(old_hashes, new_hashes)
+    )
 
     if not added and not modified and not deleted:
         try:
@@ -473,7 +635,7 @@ def _try_incremental_local_update(
         except Exception:
             return None
 
-    unchanged = len(new_hashes) - len(added) - len(modified)
+    unchanged = len(new_hashes) - len(added) - len(modified) - len(collateral)
     logger.info(
         "Incremental index update: %s — +%d ~%d -%d (skipping %d unchanged)",
         cache_dir.name, len(added), len(modified), len(deleted), unchanged,
@@ -487,12 +649,14 @@ def _try_incremental_local_update(
         return None
 
     # ── Delete nodes belonging to modified / deleted files ──
-    files_to_remove = {Path(f).name for f in modified + deleted}
-    if files_to_remove:
+    # Also purge the floating deposit-insert nodes (source-tagged, no file_name)
+    # for any deposit file being re-embedded, or they'd duplicate its content.
+    if files_to_remove or sources_to_purge:
         try:
             node_ids_to_delete = [
                 nid for nid, node in list(index.docstore.docs.items())
                 if (node.metadata or {}).get("file_name", "") in files_to_remove
+                or (node.metadata or {}).get("source", "") in sources_to_purge
             ]
             if node_ids_to_delete:
                 vs_data = index._vector_store._data
@@ -510,13 +674,12 @@ def _try_incremental_local_update(
             return None
 
     # ── Embed and insert nodes for added / modified files ──
-    files_to_add = [f for f in added + modified if (source_dir / f).exists()]
+    # Collateral basename twins lost their nodes in the deletion pass above, so
+    # they re-embed alongside the genuinely changed files.
+    files_to_add = [f for f in added + modified + collateral if (source_dir / f).exists()]
     if files_to_add:
         try:
-            reader = SimpleDirectoryReader(input_files=[str(source_dir / f) for f in files_to_add])
-            new_nodes: list = []
-            for file_docs in reader.iter_data():
-                new_nodes.extend(_build_nodes(file_docs))
+            new_nodes = _load_nodes_for_files(source_dir, files_to_add)
             if new_nodes:
                 embed_model = get_embedding_for_index()
                 _embed_nodes_with_progress(new_nodes, embed_model, progress_cb)

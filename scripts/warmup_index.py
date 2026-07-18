@@ -48,7 +48,7 @@ def get_first_user_id() -> str | None:
 
 
 def warmup(user_id: str, target_topic: str | None = None, force: bool = False):
-    from backend.indexer import build_topic_index, load_topics
+    from backend.indexer import build_topic_index, load_topics, topic_index_exists, _use_qdrant_kb
     from backend.config import settings
 
     topics = load_topics(user_id)
@@ -65,13 +65,13 @@ def warmup(user_id: str, target_topic: str | None = None, force: bool = False):
     else:
         topic_keys = list(topics.keys())
 
-    cache_base = settings.user_index_cache_path(user_id)
     knowledge_base = settings.user_knowledge_path(user_id)
+    backend_name = "qdrant" if _use_qdrant_kb() else "local"
 
     print(f"\n{'='*60}")
     print(f"用户 ID : {user_id}")
+    print(f"向量后端  : {backend_name}")
     print(f"知识库目录: {knowledge_base}")
-    print(f"缓存目录  : {cache_base}")
     print(f"待预热主题: {topic_keys}")
     print(f"强制重建  : {force}")
     print(f"{'='*60}\n")
@@ -85,7 +85,6 @@ def warmup(user_id: str, target_topic: str | None = None, force: bool = False):
         topic_info = topics[key]
         topic_name = topic_info.get("name", key)
         topic_dir = knowledge_base / topic_info.get("dir", key)
-        cache_dir = cache_base / key
 
         print(f"[{i}/{total}] {topic_name} ({key})")
 
@@ -104,15 +103,17 @@ def warmup(user_id: str, target_topic: str | None = None, force: bool = False):
 
         print(f"  → 共 {len(md_files)} 个文档文件")
 
-        # 检查是否已有缓存
-        if cache_dir.exists() and not force:
-            cache_files = list(cache_dir.iterdir())
-            if cache_files:
-                print(f"  ✓ 已有索引缓存（{len(cache_files)} 个文件），跳过（用 --force 强制重建）")
-                success += 1
-                continue
+        # 已建索引检查走 topic_index_exists（后端无关：qdrant 查 collection，
+        # 本地查 persist 目录）——不再直接看 .index_cache 目录，那个判断在
+        # Docker/Qdrant 部署下会误判（目录里只剩 manifest 也被当成有索引）。
+        already = topic_index_exists(key, user_id)
+        if already and not force:
+            print(f"  ✓ 索引已存在（{backend_name}），跳过（用 --force 强制重建）")
+            success += 1
+            continue
 
-        # 构建索引
+        # 构建索引。force_rebuild=True 时构建器自己做 manifest 增量：
+        # 只重嵌变更文件；文件没变则秒级返回。
         start = time.time()
         try:
             print(f"  → 开始构建索引，调用 embedding API 中...", flush=True)

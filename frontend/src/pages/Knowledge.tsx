@@ -373,7 +373,7 @@ export default function Knowledge() {
   const handleRebuildCurrent = async () => {
     if (!selected || submitting || hasActiveTask) return;
     setShowRebuildMenu(false);
-    if (!confirm(`确定重新向量化「${topics[selected]?.name || selected}」？\n\n该操作会在后台异步执行，你可以关闭页面或切到其他界面，回来时仍能看到进度。`)) return;
+    if (!confirm(`确定重新向量化「${topics[selected]?.name || selected}」？\n\n增量模式：只重新嵌入上次构建后有变化的文件，未变文件的向量直接复用。\n后台异步执行，可关闭页面，回来时仍能看到进度。`)) return;
     setSubmitting(true);
     try {
       const result = await rebuildTopicIndex(selected);
@@ -560,8 +560,8 @@ export default function Knowledge() {
                   >
                     <RefreshCw size={14} className="text-primary" />
                     <div className="flex-1">
-                      <div>重建当前模块</div>
-                      <div className="text-[11px] text-dim">{selected ? topics[selected]?.name : "未选择"}</div>
+                      <div>重建当前模块（增量）</div>
+                      <div className="text-[11px] text-dim">{selected ? `${topics[selected]?.name}，只嵌入变更文件` : "未选择"}</div>
                     </div>
                   </button>
                   <div className="h-px bg-border" />
@@ -573,7 +573,7 @@ export default function Knowledge() {
                     <Sparkles size={14} className="text-primary" />
                     <div className="flex-1">
                       <div>全量重建（所有模块）</div>
-                      <div className="text-[11px] text-dim">{topicKeys.length} 个领域，提交后后台并行</div>
+                      <div className="text-[11px] text-dim">{topicKeys.length} 个领域，清空后全部重嵌入</div>
                     </div>
                   </button>
                   <div className="h-px bg-border" />

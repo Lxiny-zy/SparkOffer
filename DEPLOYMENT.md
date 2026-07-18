@@ -26,7 +26,7 @@ TechSpar-main/
 |----------|-----------|---------|--------------------------|
 | frontend | **9000**  | 80      | Nginx + React 前端页面    |
 | backend  | **9001**  | 8000    | FastAPI 后端接口          |
-| qdrant   | 6333/6334 | 6333/6334 | 向量库（可选，仅 `VECTOR_BACKEND=qdrant` 时使用） |
+| qdrant   | 6333/6334 | 6333/6334 | 向量库（**compose 部署默认启用**，`.env` 设 `VECTOR_BACKEND=numpy` 可退回本地） |
 
 - 前端访问地址：`http://服务器IP:9000`
 - 后端 API 文档：`http://服务器IP:9001/docs`
@@ -61,8 +61,8 @@ vim .env
 | `DEFAULT_EMAIL`       | 初始管理员账号                             |
 | `DEFAULT_PASSWORD`    | 初始管理员密码                             |
 | `ALLOW_REGISTRATION`  | 是否开放注册（建议服务器环境设为 `false`）   |
-| `VECTOR_BACKEND`      | 记忆库向量后端：留空=`numpy`（默认）/ `qdrant` |
-| `QDRANT_URL`          | Qdrant 地址（compose 内网 `http://qdrant:6333`）；留空则禁用 |
+| `VECTOR_BACKEND`      | 向量后端。**compose 部署默认 `qdrant`**（见 docker-compose.yml 的 `${VECTOR_BACKEND:-qdrant}`）；显式设 `numpy` 退回本地。裸 uvicorn 本地开发默认 `numpy` |
+| `QDRANT_URL`          | Qdrant 地址。**compose 部署默认 `http://qdrant:6333`**；仅裸 uvicorn 时需手动设置 |
 | `QDRANT_API_KEY`      | Qdrant 鉴权密钥（自建无鉴权可留空）          |
 
 ### 2. 确认防火墙已放行端口
@@ -211,7 +211,7 @@ ss -tulnp | grep -E '9000|9001'
 
 - **backend**：每 30s 检查一次 `http://localhost:8000/docs` 是否可访问，最多重试 3 次，启动宽限期 30s
 - **frontend**：backend 健康后才启动，每 30s 检查一次 `http://localhost:80/`
-- **qdrant**（可选）：基于 distroless 镜像无 shell，未配 exec 健康检查；backend 对其为软依赖，连不上时自动降级回 numpy 后端，不影响服务可用性
+- **qdrant**：基于 distroless 镜像无 shell，未配 exec 健康检查。backend 为 qdrant-only（不降级 numpy）：Qdrant 不可用时知识库检索降级为空上下文并委派后台重建，服务本身不崩
 
 这确保了服务依赖顺序正确，前端不会在后端未就绪时启动。
 

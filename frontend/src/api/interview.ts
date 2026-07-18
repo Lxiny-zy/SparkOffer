@@ -394,9 +394,10 @@ export interface RebuildTaskStatus {
   progress_total: number;
 }
 
-/** Submit a single-topic rebuild. Returns immediately with task_id; poll status separately. */
-export async function rebuildTopicIndex(topic: string): Promise<RebuildTaskSubmission> {
-  const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/rebuild`, {
+/** Submit a single-topic rebuild (incremental by default; force=true wipes and re-embeds everything). */
+export async function rebuildTopicIndex(topic: string, force = false): Promise<RebuildTaskSubmission> {
+  const query = force ? "?force=true" : "";
+  const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/rebuild${query}`, {
     method: "POST",
   });
   if (!res.ok) throw new Error(await res.text());

@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 
 from backend.config import settings
-from backend.indexer import load_topics, invalidate_topic_index, evict_topic_cache, build_topic_index, topic_chunk_count
+from backend.indexer import load_topics, invalidate_topic_index, evict_topic_cache, topic_chunk_count
 from backend.embedding_tasks import schedule_index_rebuild, get_task_queue
 from backend.auth import get_current_user
 from backend.utils.files import atomic_write_text
@@ -289,20 +289,34 @@ async def update_high_freq(topic: str, body: dict, user_id: str = Depends(get_cu
     return {"ok": True}
 
 
-async def _submit_rebuild(topic: str, topic_info: dict, user_id: str) -> dict:
-    """Invalidate cache (sync, off-loop) and submit rebuild task. Returns the manifest."""
+async def _submit_rebuild(topic: str, topic_info: dict, user_id: str,
+                          force: bool = False) -> dict:
+    """Submit a rebuild task. Returns the manifest.
+
+    ``force=False``（默认）：只清内存缓存，保留 Qdrant collection / 本地 persist 和
+    文件哈希 manifest —— 构建器据此做增量（只重嵌上次构建后变更的文件），重建期间
+    检索继续用旧向量，无空窗。
+    ``force=True``：先 invalidate（删 collection + manifest）再全量重嵌 —— 处理
+    「manifest 认为没变但向量已坏」的场景（如熔断期间嵌成零向量）。
+    """
     file_count = _count_files(user_id, topic_info["dir"])
     label = f"重建 {topic_info.get('name', topic)} 向量索引"
-    await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+    if force:
+        await asyncio.to_thread(invalidate_topic_index, topic, user_id)
+    else:
+        evict_topic_cache(topic, user_id)
     task_id = schedule_index_rebuild(topic, user_id, file_count=file_count, label=label)
     return {"task_id": task_id, "topic": topic, "file_count": file_count}
 
 
 @router.post("/knowledge/{topic}/rebuild")
-async def rebuild_topic_index(topic: str, user_id: str = Depends(get_current_user)):
+async def rebuild_topic_index(topic: str, force: bool = False,
+                              user_id: str = Depends(get_current_user)):
     """Submit a single-topic rebuild to the background queue. Returns immediately.
 
-    The actual embedding work runs in EmbeddingTaskQueue workers. Poll
+    Incremental by default (manifest diff, only changed files re-embed);
+    ``?force=true`` wipes the collection + manifest for a full re-embed. The
+    actual embedding work runs in EmbeddingTaskQueue workers. Poll
     /knowledge/rebuild-status to track progress. Submitting an in-flight
     rebuild for the same (user, topic) is a no-op (deduplicated by task_id).
     """
@@ -310,23 +324,25 @@ async def rebuild_topic_index(topic: str, user_id: str = Depends(get_current_use
     if topic not in topics:
         raise HTTPException(400, f"Unknown topic: {topic}")
 
-    manifest = await _submit_rebuild(topic, topics[topic], user_id)
+    manifest = await _submit_rebuild(topic, topics[topic], user_id, force=force)
+    mode = "全量" if force else "增量"
     return {
         "ok": True,
         **manifest,
-        "message": f"已提交 {topic} 索引重建任务（{manifest['file_count']} 文件），可在状态接口查询进度",
+        "message": f"已提交 {topic} 索引{mode}重建任务（{manifest['file_count']} 文件），可在状态接口查询进度",
     }
 
 
 @router.post("/knowledge/rebuild-all")
 async def rebuild_all_topics(user_id: str = Depends(get_current_user)):
-    """Submit all topics' rebuild tasks. Returns the list of submitted task_ids."""
+    """Submit all topics' rebuild tasks (always full: wipe + re-embed everything,
+    matching the 「全量重建」 button). Returns the list of submitted task_ids."""
     topics = load_topics(user_id)
     if not topics:
         raise HTTPException(400, "No topics configured")
 
     submitted = [
-        await _submit_rebuild(key, info, user_id)
+        await _submit_rebuild(key, info, user_id, force=True)
         for key, info in topics.items()
     ]
     return {

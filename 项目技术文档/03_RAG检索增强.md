@@ -52,8 +52,8 @@ cos(A, B) = (A · B) / (‖A‖ · ‖B‖)   ∈ [-1, 1]，越接近 1 越相�
 ### 2.3 向量检索的两种后端（知识库索引）
 
 本项目**可插拔**（`indexer.py` + `VECTOR_BACKEND` 配置）：
-- **numpy（默认）**：小规模直接全量算余弦，零外部依赖。
-- **Qdrant（可选）**：专业向量数据库，规模上来后用。
+- **Qdrant（服务器/Docker 部署默认）**：compose 注入 `VECTOR_BACKEND=qdrant`，知识库按 `kb_{user}_{topic}` 分 collection。qdrant-only：连不上不降级，检索降级空上下文并委派后台重建。
+- **numpy（裸 uvicorn 本地开发默认）**：小规模直接全量算余弦，零外部依赖，索引 persist 到 `.index_cache/`。
 
 > **设计哲学**：长期记忆那层（04 章）甚至直接用 SQLite BLOB 存向量——**百级数据规模刻意不上 Milvus/Pinecone**。这是"按规模选型"，不是技术不够。面试时这是加分项，别说成短板。
 

@@ -40,6 +40,13 @@ docker compose up --build         # local: front 80, back 8000
 ```
 The backend container has a `data:/app/data` volume — SQLite DB, knowledge docs, user profiles, and `ai_config.json` persist here. Never bake user data into the image.
 
+**⚠️ 部署视角差异（读代码前先确认目标环境）**：compose 里 backend 注入了
+`VECTOR_BACKEND=${VECTOR_BACKEND:-qdrant}` + `QDRANT_URL=http://qdrant:6333`，
+所以 **Docker/服务器部署默认走 Qdrant**（知识库按 `kb_{user}_{topic}` 分 collection，
+记忆库单 collection 多租户，qdrant-only 不降级）；只有裸 `uvicorn` 本地开发才默认
+numpy/本地 persist。分析索引、检索、重建相关行为时，必须先确定讨论的是哪种环境——
+两条后端路径的构建/增量/失败语义并不相同。
+
 ### Data reset
 `clear_data.sh` wipes user data (SQLite, vectors, profiles) while keeping the seed knowledge base — use during local debugging only.
 
@@ -57,8 +64,8 @@ The backend is **mostly flat, not layered**. Each file is responsible for a doma
 - `graphs/` — LangGraph workflows. **Four entry points**: `resume_interview.py` (5-phase state machine), `job_prep.py` (JD-targeted), `topic_drill.py` (10-question专项), `review.py` (SM-2 due items). Each builds a `StateGraph` with `MemorySaver` checkpointing.
 - `assistant.py` — Floating side-panel agent. **Single agent + tool-use** (~14 tools, see `TOOLS` constant). Not multi-agent — do not describe it as such.
 - `memory.py` — Long-term user profile. Mem0-style two-stage update: (1) LLM extracts new findings, (2) LLM merges with existing profile choosing ADD / UPDATE / NOOP / IMPROVE per entry.
-- `vector_memory.py` — Self-built vector store: SQLite BLOB + numpy cosine. Designed for ≤500 vectors per user (`MAX_VECTORS_PER_USER`). Includes time-decay (14-day half-life, capped at 30% weight) and semantic dedup at similarity 0.75. **Do not swap to Milvus/Pinecone** — the SQLite-blob approach is intentional for project scale.
-- `indexer.py` — LlamaIndex knowledge-base indices. **Cached in-process** (TTL 1h, max 50 user indices). Retrieval is wrapped with `asyncio.to_thread` + 60s timeout — LlamaIndex itself is sync.
+- `vector_memory.py` — Long-term memory vectors. Backend chosen by `vector_store/` factory: **numpy**（SQLite BLOB + 余弦，裸 uvicorn 默认）or **Qdrant**（Docker 部署默认，单 collection payload 多租户）. Designed for ≤500 vectors per user (`MAX_VECTORS_PER_USER`). Includes time-decay (14-day half-life, capped at 30% weight) and semantic dedup at similarity 0.75. **Do not swap to Milvus/Pinecone** — the two-backend design is intentional for project scale.
+- `indexer.py` — LlamaIndex knowledge-base indices. Backend follows `VECTOR_BACKEND`: local persist (`.index_cache/`) or Qdrant (`kb_{user}_{topic}` collections, Docker 默认). **Cached in-process** (TTL 1h, max 50 user indices). Rebuilds are incremental by default on BOTH backends: a file-hash manifest (`_file_hashes.json`) diffs added/modified/deleted files and only re-embeds changes; full re-embed happens on first build, embedding-model switch (dim mismatch), empty-collection self-heal, or explicit `?force=true`. Retrieval is wrapped with `asyncio.to_thread` + 60s timeout — LlamaIndex itself is sync.
 - `embedding_tasks.py` — Background priority queue + exponential-retry worker + 3-state circuit breaker (CLOSED/OPEN/HALF_OPEN, 5-failure trip, 60s probe). All embedding writes go through this — don't `await embed(...)` inline in request handlers for non-blocking paths.
 - `spaced_repetition.py` — SM-2 (`ease_factor ≥ 1.3`). Weak points auto-graduate after 3 consecutive ≥7 scores.
 - `prompts/` — **All LLM prompts are centralized here.** Adding a new interview style means editing prompts, not the graph code. Keep this invariant.

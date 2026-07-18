@@ -525,8 +525,11 @@ def get_task_queue() -> EmbeddingTaskQueue:
 
 def schedule_index_rebuild(topic: str, user_id: str, file_count: int = 0,
                            label: str | None = None) -> str:
-    """Schedule a full topic index rebuild in background.
+    """Schedule a topic index rebuild in background.
 
+    Incremental-first: the builder diffs the file-hash manifest and only
+    re-embeds changed files; it falls back to a full re-embed when no manifest /
+    index exists (or the caller invalidated it beforehand for a forced rebuild).
     Returns the task_id so callers can poll status. Submitting an in-flight
     rebuild for the same (user, topic) is a no-op (deduplicated).
     """

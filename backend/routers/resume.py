@@ -1,10 +1,11 @@
 """Resume upload routes."""
+import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 
 from backend.config import settings
-from backend.indexer import _index_cache
+from backend.indexer import invalidate_topic_index
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api")
@@ -55,11 +56,12 @@ async def upload_resume(file: UploadFile = File(...), user_id: str = Depends(get
         dest.unlink(missing_ok=True)
         raise HTTPException(413, f"PDF 过大（>{MAX_RESUME_BYTES // (1024*1024)}MB）")
 
-    _index_cache.pop((user_id, "resume"), None)
-    cache_dir = settings.user_index_cache_path(user_id) / "resume"
-    if cache_dir.exists():
-        import shutil
-        shutil.rmtree(cache_dir)
+    # Full invalidation on purpose: a new résumé replaces the old one wholesale,
+    # so incremental diffing has nothing to save. Covers BOTH backends (drops the
+    # kb_{user}_resume Qdrant collection on server deploys AND the local persist
+    # dir) — the old code only cleared the local dir, leaving Docker/Qdrant
+    # deployments serving the previous résumé's vectors.
+    await asyncio.to_thread(invalidate_topic_index, "resume", user_id)
 
     return {"ok": True, "filename": dest.name, "size": total}
 

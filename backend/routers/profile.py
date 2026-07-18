@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
 
 from backend.config import settings
-from backend.indexer import load_topics, save_topics, _index_cache
+from backend.indexer import load_topics, save_topics, invalidate_topic_index
 from backend.memory import get_profile, _load_profile, profile_transaction
 from backend.storage.sessions import (
     get_session, list_sessions, list_sessions_by_topic,
@@ -62,7 +62,10 @@ def delete_topic(key: str, user_id: str = Depends(get_current_user)):
         raise HTTPException(404, f"Topic '{key}' not found")
     del topics[key]
     save_topics(topics, user_id)
-    _index_cache.pop((user_id, key), None)
+    # Full invalidation: the topic is gone, so drop its Qdrant collection (server
+    # deploys) / local persist dir / manifest — not just the in-memory cache entry,
+    # which previously left orphaned kb_{user}_{topic} collections behind.
+    invalidate_topic_index(key, user_id)
     return {"ok": True}
 
 

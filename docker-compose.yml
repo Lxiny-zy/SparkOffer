@@ -20,8 +20,8 @@ services:
       - ./data/qdrant:/qdrant/storage
     restart: unless-stopped
     # qdrant/qdrant 基于 distroless，无 shell/curl —— 无法配 exec healthcheck。
-    # backend 对 qdrant 是软依赖（连不上自动降级 numpy），故不设健康检查、
-    # 也不要求 backend 等它 healthy。
+    # backend 是 qdrant-only（VECTOR_BACKEND=qdrant 时不降级 numpy）：连不上时
+    # 检索降级为空上下文并委派后台重建，服务本身不崩，故不强制等它 healthy。
 
   backend:
     build:
