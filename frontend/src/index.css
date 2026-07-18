@@ -1804,3 +1804,70 @@
 
 /* 统计数字（等宽，与 sig-num 同族） */
 .sig-stat { font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; font-weight: 700; line-height: 1; letter-spacing: -0.01em; }
+
+/* ═══════════════════════════════════════════════════════════
+   sig 访客页扩展 — scroll reveal / 闭环信号流 / 三层上下文堆叠
+   仅 Landing/Login 使用；全部继承 sig token，不引入新色彩。
+   ═══════════════════════════════════════════════════════════ */
+
+/* Scroll reveal — IntersectionObserver 加 .sig-in 触发；transition 而非
+   animation，便于用 transitionDelay 做逐项 stagger */
+.sig-reveal {
+  opacity: 0; transform: translateY(18px);
+  transition: opacity 0.65s cubic-bezier(0.2,0,0,1), transform 0.65s cubic-bezier(0.2,0,0,1);
+}
+.sig-reveal.sig-in { opacity: 1; transform: none; }
+
+/* ── 闭环 The Loop ── 节点 + 行进信号连接线 */
+.sig-loop-node {
+  position: relative; border: 1px solid var(--sig-line); background: var(--sig-bg);
+  transition: border-color 0.3s ease, background 0.3s ease;
+}
+.sig-loop-node.sig-on { border-color: var(--sig-accent); background: color-mix(in srgb, var(--sig-accent) 4%, var(--sig-bg)); }
+.sig-loop-node .sig-loop-idx { transition: color 0.3s ease; }
+.sig-loop-node.sig-on .sig-loop-idx { color: var(--sig-accent); }
+
+/* 水平连接线：<i> 是 accent 填充。sig-flow = 信号正在通过（动画一步时长），
+   sig-done = 本圈已通过（保持填充），换圈时全部清零 */
+.sig-loop-conn { position: relative; height: 1px; background: var(--sig-line); overflow: hidden; }
+.sig-loop-conn > i { position: absolute; inset: 0; background: var(--sig-accent); transform: scaleX(0); transform-origin: left; }
+.sig-loop-conn.sig-done > i { transform: scaleX(1); }
+.sig-loop-conn.sig-flow > i { animation: sig-flowx var(--sig-flow-ms, 2400ms) linear forwards; }
+@keyframes sig-flowx { to { transform: scaleX(1); } }
+
+/* 垂直连接线（移动端纵排） */
+.sig-loop-conn-v { position: relative; width: 1px; height: 26px; background: var(--sig-line); overflow: hidden; }
+.sig-loop-conn-v > i { position: absolute; inset: 0; background: var(--sig-accent); transform: scaleY(0); transform-origin: top; }
+.sig-loop-conn-v.sig-done > i { transform: scaleY(1); }
+.sig-loop-conn-v.sig-flow > i { animation: sig-flowy var(--sig-flow-ms, 2400ms) linear forwards; }
+@keyframes sig-flowy { to { transform: scaleY(1); } }
+
+/* 回环虚线：信号从末节点扫回起点（右→左） */
+.sig-loop-return { position: relative; height: 0; border-top: 1px dashed var(--sig-line-2); }
+.sig-loop-return > i {
+  position: absolute; left: 0; right: 0; top: -1px; height: 1px;
+  background: var(--sig-accent); transform: scaleX(0); transform-origin: right;
+}
+.sig-loop-return.sig-flow > i { animation: sig-flowx-r var(--sig-flow-ms, 2400ms) linear forwards; }
+@keyframes sig-flowx-r { to { transform: scaleX(1); } }
+
+/* ── 三层上下文堆叠 ── 左 2px accent 竖线 + 微底色，与 sig-navitem-active 同语法 */
+.sig-stack-layer {
+  position: relative; border: 1px solid var(--sig-line); background: var(--sig-bg);
+  cursor: default; text-align: left; width: 100%;
+  transition: border-color 0.25s ease, background 0.25s ease;
+}
+.sig-stack-layer::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: var(--sig-accent); transform: scaleY(0); transform-origin: top;
+  transition: transform 0.3s cubic-bezier(0.2,0,0,1);
+}
+.sig-stack-layer.sig-on { border-color: var(--sig-line-2); background: color-mix(in srgb, var(--sig-accent) 5%, var(--sig-bg)); }
+.sig-stack-layer.sig-on::before { transform: scaleY(1); }
+
+/* 减动效：reveal 直接可见，信号线全部静态填充，闭环/堆叠停止轮播由 JS 侧处理 */
+@media (prefers-reduced-motion: reduce) {
+  .sig-reveal { opacity: 1 !important; transform: none !important; transition: none !important; }
+  .sig-loop-conn > i, .sig-loop-return > i { animation: none !important; transform: scaleX(1) !important; }
+  .sig-loop-conn-v > i { animation: none !important; transform: scaleY(1) !important; }
+}
