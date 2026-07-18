@@ -26,7 +26,6 @@ SparkOffer/
 │   ├── assistant.py        # FloatingAssistant Agent (14 工具)
 │   ├── qa_arena.py         # 问答演练场（长期记忆 + 上下文压缩）
 │   ├── graph.py            # 题目关联图谱（语义相似度）
-│   ├── transcribe.py       # 七牛 OSS + DashScope ASR
 │   ├── formatters.py       # Review Markdown 生成
 │   ├── migrate.py          # 单用户 → 多用户的一次性迁移脚本
 │   ├── graphs/             # LangGraph 工作流（4 个）
@@ -39,13 +38,11 @@ SparkOffer/
 │   │   ├── interviewer.py   # 简历面试 + Drill 出题 + 画像更新
 │   │   ├── job_prep.py      # JD 预览 / 出题 / 评估
 │   │   ├── reviewer.py      # 复盘评估
-│   │   ├── recording.py     # 录音结构化 + 评估
 │   │   └── algorithm.py     # 算法解题陪练
-│   ├── routers/            # FastAPI 路由（13 个）
+│   ├── routers/            # FastAPI 路由（15 个）
 │   │   ├── auth.py
 │   │   ├── interview.py     # ★ 面试主入口（start / chat / end）
 │   │   ├── job_prep.py
-│   │   ├── recording.py
 │   │   ├── profile.py
 │   │   ├── knowledge.py     # 知识库 CRUD + 后台重建
 │   │   ├── algorithm.py
@@ -69,11 +66,11 @@ SparkOffer/
 ├── frontend/               # 前端（React 19 + Vite）— 10.2k 行
 │   ├── src/
 │   │   ├── App.tsx          # 路由 + AuthContext + 全局 ErrorBoundary
-│   │   ├── pages/           # 18 个页面
+│   │   ├── pages/           # 19 个页面
 │   │   ├── components/      # UI + Charts + FloatingAssistant
 │   │   ├── api/             # API 客户端（authFetch + SSE）
 │   │   ├── contexts/        # AuthContext
-│   │   ├── hooks/           # useVoiceInput 等
+│   │   ├── hooks/           # useDraftPersist / useTilt
 │   │   ├── types/           # TypeScript 类型
 │   │   └── utils/
 │   ├── nginx.conf           # 生产环境 Nginx 配置
@@ -118,7 +115,7 @@ SparkOffer/
 │  L2  Infrastructure                                      │
 │  ─── llm_provider, channel_manager,                     │
 │      indexer (RAG), vector_memory,                      │
-│      embedding_tasks (queue), transcribe                │
+│      embedding_tasks (queue)                            │
 ├─────────────────────────────────────────────────────────┤
 │  L1  Storage (DAO)                                       │
 │  ─── storage/*.py (CRUD), live_store (TTL+persist)      │
@@ -163,7 +160,7 @@ SparkOffer/
 
 **注意**：drill / job_prep 用的是"批量调用 + 流式响应"模式而不是 LangGraph，因为它们没有状态机需求（10 题一次生成、一次评估，前端按需展示）。LangGraph 只在 resume_interview 这种有真正阶段切换需求的场景才用。
 
-### 3.3 Routers（13 个）按职责
+### 3.3 Routers（15 个）按职责
 
 | Router | 主要 endpoints | 备注 |
 |---|---|---|
@@ -172,7 +169,6 @@ SparkOffer/
 | `interview` (续) | `/api/interview/session/{id}/progress` | 中途进度保存（debounced） |
 | `interview` (续) | `/api/interview/reference-answer` | 参考答案 / 提示流式生成 |
 | `job_prep` | `/api/job-prep/preview`, `/start` | JD 解析 + 备面 |
-| `recording` | `/api/recording/transcribe`, `/analyze` | 录音转写 + 复盘 |
 | `profile` | `/api/profile`, `/topics`, `/topic/{t}/retrospective` | 画像 + 主题 + 回顾 |
 | `knowledge` | `/api/knowledge/{topic}/{core,high_freq,rebuild}` | 知识库 CRUD + 后台重建 |
 | `algorithm` | `/api/algorithm/{solve,chat,save,cards}` | 算法陪练 |
@@ -277,7 +273,6 @@ React 19 + Vite 8 + TypeScript 6 + Tailwind v4
   │   │       /knowledge      (lazy)       │
   │   │       /graph          (lazy)       │
   │   │       /job-prep       (lazy)       │
-  │   │       /recording      (lazy)       │
   │   │       /qa-arena       (lazy)       │
   │   │       /algorithm      (lazy)       │
   │   │       /favorites      (lazy)       │
@@ -375,12 +370,12 @@ backend 总计:    11,650 行
 ├── assistant.py：             953 行（FloatingAssistant 占了 1/10）
 ├── graphs/*：                 1.2k 行（LangGraph 工作流）
 ├── prompts/*：                1.2k 行（提示词）
-├── routers/*：                ~2k 行（13 个 router）
+├── routers/*：                ~2k 行（15 个 router）
 ├── storage/*：                ~1k 行（DAO）
 └── 其他（auth / config / indexer 等）：~3.6k 行
 
 frontend 总计:   10,251 行
-├── pages/*：                  ~7k 行（18 个页面）
+├── pages/*：                  ~7k 行（19 个页面）
 ├── components/*：             ~2k 行
 ├── api/*：                    ~1k 行
 └── hooks / utils / types：    ~250 行

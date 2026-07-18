@@ -87,7 +87,7 @@ DRILL_BATCH_EVAL_PROMPT = """你是「{topic_name}」领域的资深工程师，
 
 - 调整评分标准：改 1 行，所有 Prompt 同步
 - 新 Prompt 自动继承"JSON 输出纪律"，避免遗漏
-- 评分一致性：4 个模式（drill / resume / job_prep / recording）评分行为对齐
+- 评分一致性：3 个模式（drill / resume / job_prep）评分行为对齐
 
 ---
 
@@ -106,9 +106,6 @@ DRILL_BATCH_EVAL_PROMPT = """你是「{topic_name}」领域的资深工程师，
 | `JOB_PREP_PREVIEW_PROMPT` | `job_prep.py` | JD 分析 |
 | `JOB_PREP_QUESTION_GEN_PROMPT` | `job_prep.py` | JD 出题 |
 | `JOB_PREP_EVAL_PROMPT` | `job_prep.py` | JD 评估 |
-| `RECORDING_STRUCTURE_PROMPT` | `recording.py` | 录音结构化 |
-| `RECORDING_DUAL_EVAL_PROMPT` | `recording.py` | 录音双人评估 |
-| `RECORDING_SOLO_EVAL_PROMPT` | `recording.py` | 录音单人评估 |
 | `REVIEW_SYSTEM` | `reviewer.py` | 复盘报告 |
 | `ALGORITHM_SOLVE_SYSTEM/PROMPT` | `algorithm.py` | 算法解题 |
 | `ALGORITHM_CHAT_SYSTEM` | `algorithm.py` | 算法追问 |
@@ -548,7 +545,7 @@ def _parse_json_response(content):
 
 "项目里有 17 个 Prompt 模板，我做了几件比较系统的事情：
 
-**第一：Prompt 中心化管理**。早期 Prompt 散落在 5+ 个文件里，评分标准复制粘贴，调一次改 5 处，导致 4 个模式（drill / resume / job_prep / recording）评分行为不一致。我抽出了 `_common.py`，提取『评分标准、锚点示例、术语库、JSON 输出纪律』四个公共片段，所有业务 Prompt 通过字符串拼接复用，**调整一处全局生效**。
+**第一：Prompt 中心化管理**。早期 Prompt 散落在 5+ 个文件里，评分标准复制粘贴，调一次改 5 处，导致 3 个模式（drill / resume / job_prep）评分行为不一致。我抽出了 `_common.py`，提取『评分标准、锚点示例、术语库、JSON 输出纪律』四个公共片段，所有业务 Prompt 通过字符串拼接复用，**调整一处全局生效**。
 
 **第二：场景化好题 vs 坏题对照**。我发现 LLM 默认出题倾向于背诵题（"什么是 GIL"）。我在 Prompt 里加了三板块（Python/Java/Agent）的反例和正例对照表，强制 LLM 出场景化的好题（"你的多线程爬虫为什么没跑满 CPU"）。
 

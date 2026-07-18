@@ -64,11 +64,12 @@ Mastery scoring uses a **deterministic algorithm** (no LLM subjectivity). Profil
 
 | Mode | Description |
 | --- | --- |
-| **Focused Drill** | Pick a domain, get 10 dynamically generated, highly targeted questions |
-| **Resume Mock Interview** | LangGraph state machine: intro → tech Qs → project deep-dive → Q&A |
-| **JD-Targeted Prep** | Extract JD requirements, fuse with resume + knowledge to generate role-fit questions |
-| **Recording Review** | Upload interview audio → ASR → structured Q&A → per-question analysis |
-| **Algorithm Drill** | Problem favorites, mistake replay, solution-coaching companion |
+| **Weakness Sniper** | Pick a domain, get 10 dynamically generated targeted questions with adaptive difficulty |
+| **Mock Interview Arena** | LangGraph state machine: intro → tech Qs → project deep-dive → Q&A |
+| **JD Boot Camp** | Extract JD requirements, fuse with resume + knowledge to generate role-fit questions |
+| **Knowledge Gym** | Knowledge base split into flip cards with three depth tiers, scheduled by SM-2 |
+| **Algorithm Arena** | Problem favorites, mistake replay, solution-coaching companion |
+| **Q&A Arena** | Free-form deep-dives on any topic; good answers deposit back into your knowledge base |
 
 ### 4. Two-Layer Knowledge Augmentation (RAG)
 
@@ -117,16 +118,6 @@ DEFAULT_PASSWORD=admin123
 ALLOW_REGISTRATION=false
 ```
 
-**Optional · audio transcription** (DashScope ASR + Qiniu OSS):
-
-```env
-DASHSCOPE_API_KEY=
-QINIU_ACCESS_KEY=
-QINIU_SECRET_KEY=
-QINIU_BUCKET=
-QINIU_DOMAIN=
-```
-
 ### 2. Docker (recommended)
 
 ```bash
@@ -160,9 +151,9 @@ npm run dev    # http://localhost:5173
 | Backend | FastAPI · LangChain · LangGraph · LlamaIndex |
 | Frontend | React 19 · React Router v7 · Vite · Tailwind CSS v4 |
 | Storage | SQLite · per-user isolation · vector long-term memory |
+| Vector store | Qdrant (Docker default) / numpy (local dev default) |
 | Auth | JWT · bcrypt |
 | LLM | Any OpenAI-compatible API |
-| ASR | DashScope + Qiniu OSS (optional) |
 
 ---
 
@@ -175,7 +166,7 @@ SparkOffer/
 │   ├── auth.py                # JWT + bcrypt
 │   ├── memory.py              # Long-term profile (Mem0-style)
 │   ├── vector_memory.py       # Vector-indexed historical insights
-│   ├── indexer.py             # LlamaIndex knowledge indexing
+│   ├── indexer.py             # LlamaIndex knowledge indexing (manifest-based incremental rebuild)
 │   ├── spaced_repetition.py   # SM-2 review scheduler
 │   ├── graphs/                # LangGraph workflows
 │   │   ├── resume_interview.py
@@ -189,11 +180,10 @@ SparkOffer/
 │   ├── pages/                 # Home / Interview / Profile / Knowledge / ...
 │   ├── components/            # UI + charts
 │   └── api/                   # API client
-├── data/
+├── data/                      # Runtime data (user dirs gitignored)
 │   ├── topics.example.json
-│   ├── knowledge/             # Domain knowledge docs
-│   ├── resume/                # User resumes (gitignored)
-│   └── user_profile/          # User profiles (gitignored)
+│   ├── knowledge/             # Shared domain knowledge docs
+│   └── users/{user_id}/       # Per-user isolation: resume / profile / knowledge / index
 ├── docker-compose.yml
 ├── requirements.txt
 └── .env.example

@@ -57,7 +57,7 @@ The backend is **mostly flat, not layered**. Each file is responsible for a doma
 
 - `main.py` — FastAPI app + lifespan. Lifespan initializes embeddings, LlamaIndex settings, DB tables, default user, multi-channel config, and starts the background embedding task queue. Modifying startup order matters: DB → embeddings → indexer → task queue.
 - `config.py` — Pydantic `Settings`. **Per-user paths are derived here** (`user_data_dir`, `user_profile_dir`, `user_resume_path`) — all user data lives under `data/users/{user_id}/`. Never write user-scoped data outside this prefix (path-traversal protection assumes this layout).
-- `ai_config.py` + `channel_manager.py` — Runtime-mutable LLM/Embedding/ASR channel pool. Keys rotate, failed channels cool down (60s, 3-strike). Code paths must call `llm_provider.get_chat_model()` / `get_embedding()` rather than reading `settings.api_key` directly, otherwise the failover layer is bypassed.
+- `ai_config.py` + `channel_manager.py` — Runtime-mutable LLM/Embedding/Reranker channel pool. Keys rotate, failed channels cool down (60s, 3-strike). Code paths must call `llm_provider.get_chat_model()` / `get_embedding()` rather than reading `settings.api_key` directly, otherwise the failover layer is bypassed.
 - `auth.py` — JWT (HS256, 7-day) + bcrypt. Default user is auto-created on startup; registration gated by `ALLOW_REGISTRATION`.
 - `storage/` — SQLite (WAL mode, 5s busy_timeout). All tables live in **one** `data/interviews.db`. `database.py` owns connection + schema init; other files are table-specific repositories.
 - `models.py` — Pydantic schemas + the `InterviewPhase` enum that drives the LangGraph state machine.
@@ -84,7 +84,7 @@ The backend is **mostly flat, not layered**. Each file is responsible for a doma
 ```
 data/
 ├── interviews.db                # all SQLite tables
-├── ai_config.json               # runtime LLM/Embedding/ASR channels
+├── ai_config.json               # runtime LLM/Embedding/Reranker channels
 ├── topics.json                  # domain catalog
 ├── knowledge/                   # shared knowledge base (LlamaIndex source)
 ├── high_freq/                   # auto-curated frequent-mistake bank

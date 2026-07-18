@@ -69,7 +69,7 @@ CREATE TABLE users (
 ```sql
 CREATE TABLE sessions (
     session_id        TEXT PRIMARY KEY,       -- 8 位 hex
-    mode              TEXT NOT NULL,           -- 'resume' | 'topic_drill' | 'jd_prep' | 'recording'
+    mode              TEXT NOT NULL,           -- 'resume' | 'topic_drill' | 'jd_prep'（历史行可能残留 'recording'，功能已移除）
     topic             TEXT,                    -- 训练主题 key（drill 必填，其他可空）
     meta              TEXT DEFAULT '{}',       -- JSON：company/position/preview/progress
     questions         TEXT DEFAULT '[]',       -- JSON：[{id, question, difficulty, ...}]

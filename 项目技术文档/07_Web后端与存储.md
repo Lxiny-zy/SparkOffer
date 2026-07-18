@@ -119,7 +119,7 @@ PRAGMA busy_timeout=5000   # 锁等待 5 秒
 | 表 | 存什么 | 关键列/索引 |
 |---|---|---|
 | `users` | 账号 | id(PK)、email(UNIQUE)、password(bcrypt) |
-| `sessions` | 面试/训练/录音会话 | session_id(PK)、mode、topic、questions(JSON)、scores(JSON)、overall(JSON)、review；按 user+created / user+topic 建索引 |
+| `sessions` | 面试/训练会话 | session_id(PK)、mode、topic、questions(JSON)、scores(JSON)、overall(JSON)、review；按 user+created / user+topic 建索引 |
 | `favorites` | 收藏的 Q&A | user_id、question、reference_answer、tags(JSON) |
 | `algorithm_cards` | 算法题卡 | title、problem_text、solution、conversation_history(JSON) |
 | `live_sessions` | 进行中会话的临时态 | session_id(PK)、data(JSON)（重启可重放） |

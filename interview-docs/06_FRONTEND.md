@@ -1,7 +1,7 @@
 # 06 · 前端架构
 
 > React 19 + Vite 8 + TypeScript 6 + Tailwind CSS v4 + Radix UI（shadcn 风格）。
-> 10.2k 行 TypeScript，18 个页面。这章重点讲**前后端协作机制**而不是 React 语法。
+> 10.2k 行 TypeScript，19 个页面。这章重点讲**前后端协作机制**而不是 React 语法。
 
 ---
 
@@ -53,7 +53,6 @@
                 <Route path="/knowledge" element={<Knowledge />} />
                 <Route path="/graph" element={<Graph />} />
                 <Route path="/job-prep" element={<JobPrep />} />
-                <Route path="/recording" element={<RecordingAnalysis />} />
                 <Route path="/qa-arena" element={<QAArena />} />
                 <Route path="/algorithm" element={<AlgorithmSolver />} />
                 <Route path="/algorithm/collection" element={<AlgorithmCollection />} />
@@ -371,39 +370,7 @@ useEffect(() => {
 
 ---
 
-## 8. 语音输入双 backend（useVoiceInput）
-
-```typescript
-// hooks/useVoiceInput.ts
-const hasWebSpeech = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
-const hasMediaRecorder = !!navigator.mediaDevices?.getUserMedia;
-
-// 优先 Web Speech API（免费），fallback 到服务端 ASR（DashScope）
-useEffect(() => {
-  if (preferServer && hasMediaRecorder) {
-    setBackend("server");
-  } else if (hasWebSpeech) {
-    setBackend("webspeech");
-  } else if (hasMediaRecorder) {
-    setBackend("server");
-  } else {
-    setBackend("none");
-  }
-}, [preferServer, hasWebSpeech, hasMediaRecorder]);
-```
-
-**两个 backend 的取舍**：
-
-| Backend | 优点 | 缺点 |
-|---|---|---|
-| Web Speech API | 免费、零配置、低延迟 | Chrome 才稳定；Firefox / Safari 不支持 |
-| DashScope ASR | 中文识别精准、跨浏览器 | 要 API Key 和七牛 OSS、有费用、延迟高 |
-
-**默认策略**：优先免费的 Web Speech，没有再 fallback 到付费的服务端。
-
----
-
-## 9. Markdown 渲染组件复用
+## 8. Markdown 渲染组件复用
 
 `components/ChatBubble.tsx` 导出可复用的 `markdownComponents`：
 
@@ -440,7 +407,7 @@ export const remarkPlugins = [remarkGfm];  // GFM 启用表格 / 任务列表
 
 ---
 
-## 10. 图表组件（Recharts）
+## 9. 图表组件（Recharts）
 
 `components/charts/` 下 6 个图表：
 
@@ -457,7 +424,7 @@ export const remarkPlugins = [remarkGfm];  // GFM 启用表格 / 任务列表
 
 ---
 
-## 11. ErrorBoundary（全局兜底）
+## 10. ErrorBoundary（全局兜底）
 
 ```tsx
 // components/ErrorBoundary.tsx
@@ -496,7 +463,7 @@ export default class ErrorBoundary extends Component<...> {
 
 ---
 
-## 12. Vite 配置
+## 11. Vite 配置
 
 ```javascript
 // vite.config.js
@@ -521,7 +488,7 @@ export default defineConfig({
 
 ---
 
-## 13. 构建产物分析
+## 12. 构建产物分析
 
 ```
 frontend/dist/
@@ -553,7 +520,7 @@ location / {
 
 ---
 
-## 14. 类型系统
+## 13. 类型系统
 
 ```typescript
 // types/api.ts
@@ -598,7 +565,7 @@ export interface Profile {
 
 ---
 
-## 15. 关键页面清单
+## 14. 关键页面清单
 
 | 页面 | 行数 | 复杂点 |
 |---|---|---|
@@ -609,15 +576,14 @@ export interface Profile {
 | `Knowledge.tsx` | ~600 | 多文件 markdown 编辑、自动沉淀展示、索引重建进度 |
 | `Graph.tsx` | ~300 | react-force-graph-2d 题目关联可视化 |
 | `JobPrep.tsx` | ~600 | JD 输入 / preview / 答题三步流 |
-| `RecordingAnalysis.tsx` | ~500 | 音频上传 / 录制、双模式（dual / solo） |
 | `QAArena.tsx` | ~700 | 会话列表 + 实时聊天 + 总结导出 |
 | `AlgorithmSolver.tsx` | ~600 | 题目解析 + 多轮聊天 + 保存为卡片 |
-| `Settings.tsx` | ~600 | LLM / Embedding / ASR 多渠道配置 |
+| `Settings.tsx` | ~600 | LLM / Embedding / Reranker 多渠道配置 |
 | `FloatingAssistant.tsx` | ~600 | 拖拽小窗 + 工具调用 action 接收 + 跨页面 |
 
 ---
 
-## 16. 面试可能问的前端问题
+## 15. 面试可能问的前端问题
 
 ### Q：为什么选 Vite 不是 Webpack / Turbopack？
 

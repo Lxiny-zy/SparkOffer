@@ -28,7 +28,7 @@
 | [07_Web后端与存储.md](07_Web后端与存储.md) | FastAPI · 异步编程（asyncio/to_thread/gather/semaphore）· SQLite WAL · 9 张表 schema · JWT + bcrypt · 路径穿越防护 · 用户隔离目录 · ASGI/uvicorn |
 | [08_评测体系.md](08_评测体系.md) | 离线评测矩阵（persona × strategy × judge）· **LLM-as-Judge 多模型投票** · 确定性 judge（coverage / KL 散度 / diversity）· 基线对比方法论 · 在线 RAG 指标 |
 | [09_前端工程.md](09_前端工程.md) | React 19 · Hooks · Suspense/lazy 代码分割 · React Router v7 · Vite · Tailwind v4 + Radix（shadcn）· Recharts/力导向图 · SSE 客户端 · TypeScript |
-| [10_部署与可选能力.md](10_部署与可选能力.md) | Docker Compose · nginx 反代（流式调优）· ASR 转写（DashScope + 七牛云 OSS）· 可选依赖策略（Redis/Qdrant/本地 embedding） |
+| [10_部署与可选能力.md](10_部署与可选能力.md) | Docker Compose · nginx 反代（流式调优）· 可选依赖策略（Redis/Qdrant/本地 embedding/reranker） |
 
 ### Part 3 · 功能实施方案
 

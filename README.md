@@ -61,11 +61,12 @@ SparkOffer 是一个面向技术岗求职者的 **AI 面试训练系统**。
 
 | 场景 | 用法 |
 | --- | --- |
-| **专项强化** | 选定领域，10 道动态生成的高针对性问题 |
-| **简历模拟面试** | LangGraph 状态机驱动：自我介绍 → 技术问题 → 项目深挖 → 反问 |
-| **JD 定向备面** | 抽取 JD 重点，结合简历与知识库生成贴合岗位的题目 |
-| **录音复盘** | 上传面试录音，自动转写、结构化 Q&A、逐题分析 |
-| **算法刷题** | 题目收藏、错题回顾、解题陪练 |
+| **弱点狙击站** | 选定领域，10 道动态生成的高针对性问题，难度随掌握度自适应 |
+| **实战模拟场** | LangGraph 状态机驱动：自我介绍 → 技术问题 → 项目深挖 → 反问 |
+| **岗位特训营** | 抽取 JD 重点，结合简历与知识库生成贴合岗位的题目 |
+| **知识训练场** | 知识库拆成记忆卡片，三档深度翻面强化，配合 SM-2 到期复习 |
+| **算法竞技场** | 题目收藏、错题回顾、AI 解题陪练 |
+| **问答演练场** | 自由追问任意技术点，好答案一键沉淀回知识库 |
 
 ### 4. 双层知识增强（RAG）
 
@@ -114,16 +115,6 @@ DEFAULT_PASSWORD=admin123
 ALLOW_REGISTRATION=false
 ```
 
-**可选 · 录音转写**（DashScope ASR + 七牛云 OSS）：
-
-```env
-DASHSCOPE_API_KEY=
-QINIU_ACCESS_KEY=
-QINIU_SECRET_KEY=
-QINIU_BUCKET=
-QINIU_DOMAIN=
-```
-
 ### 2. Docker 启动（推荐）
 
 ```bash
@@ -157,9 +148,9 @@ npm run dev    # http://localhost:5173
 | 后端 | FastAPI · LangChain · LangGraph · LlamaIndex |
 | 前端 | React 19 · React Router v7 · Vite · Tailwind CSS v4 |
 | 存储 | SQLite · 用户隔离目录 · 向量化长期记忆 |
+| 向量库 | Qdrant（Docker 部署默认）/ numpy（本地开发默认） |
 | 认证 | JWT · bcrypt |
 | LLM | 任意 OpenAI 兼容 API |
-| 转写 | DashScope ASR + 七牛云 OSS（可选） |
 
 ---
 
@@ -172,7 +163,7 @@ SparkOffer/
 │   ├── auth.py                # JWT + bcrypt 鉴权
 │   ├── memory.py              # 长期画像（Mem0 风格）
 │   ├── vector_memory.py       # 向量化历史洞察
-│   ├── indexer.py             # LlamaIndex 知识库索引
+│   ├── indexer.py             # LlamaIndex 知识库索引（manifest 增量重建）
 │   ├── spaced_repetition.py   # SM-2 复习调度
 │   ├── graphs/                # LangGraph 工作流
 │   │   ├── resume_interview.py
@@ -186,11 +177,10 @@ SparkOffer/
 │   ├── pages/                 # Home/Interview/Profile/Knowledge/...
 │   ├── components/            # UI 与图表
 │   └── api/                   # API 客户端
-├── data/
+├── data/                      # 运行时数据（用户目录 gitignored）
 │   ├── topics.example.json
-│   ├── knowledge/             # 领域知识文档
-│   ├── resume/                # 用户简历（gitignored）
-│   └── user_profile/          # 用户画像（gitignored）
+│   ├── knowledge/             # 共享领域知识文档
+│   └── users/{user_id}/       # 每用户隔离：简历/画像/知识库/索引
 ├── docker-compose.yml
 ├── requirements.txt
 └── .env.example

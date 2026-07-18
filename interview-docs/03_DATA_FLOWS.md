@@ -1,6 +1,6 @@
 # 03 · 典型数据流
 
-> 6 个典型场景，每个都从「用户点击按钮」追踪到「数据库行被写入」。
+> 5 个典型场景，每个都从「用户点击按钮」追踪到「数据库行被写入」。
 > 用途：面试官问"你这个 XX 功能怎么实现"时，能讲出完整链路而不是只点几个文件名。
 
 ---
@@ -370,101 +370,7 @@
 
 ---
 
-## 数据流 4 · 录音复盘（双人模式）：上传到分析完成
-
-### 用户视角
-
-1. 上传一段面试录音（webm/mp3）
-2. 看到进度："正在转写..." → "正在分析录音结构..." → "正在评估回答质量..."
-3. 看到完整复盘：Q&A 结构化、每题评分、整体观察
-
-### 完整 trace
-
-```
-[1] 前端 RecordingAnalysis.tsx
-    Step 1: transcribeRecording(blob)
-    Step 2: analyzeRecording(transcript, "dual")
-    ↓
-[2] Step 1 — 转写
-    POST /api/recording/transcribe (form: file)
-    ↓
-    routers/recording.py:recording_transcribe
-    ├── _upload_to_qiniu(local_path)
-    │   ├── QiniuAuth(ak, sk).upload_token(bucket, key, 3600)
-    │   ├── put_file(token, key, local_path)
-    │   └── return f"{QINIU_DOMAIN}/{key}" (公网 URL)
-    ├── POST https://dashscope.aliyuncs.com/.../audio/asr/transcription
-    │   header: X-DashScope-Async: enable
-    │   body: {model: "qwen3-asr-flash-filetrans", input: {file_url}}
-    │   → task_id
-    └── 轮询 GET /tasks/{task_id} 直到 SUCCEEDED
-        → result.transcription_url
-        → 下载 JSON → 提取 transcripts[*].text
-    ↓
-    返回 {transcript: "完整转写文本"}
-
-[3] Step 2 — 分析（流式）
-    POST /api/recording/analyze (body: {transcript, recording_mode: "dual"})
-    ↓
-    routers/recording.py: _stream_analyze_dual
-    ↓
-    Phase 1: 结构化提取
-    prompt = RECORDING_STRUCTURE_PROMPT.format(transcript=transcript[:8000])
-    
-    async for kind, value in stream_llm_sse(messages, "正在分析录音结构"):
-        if kind == "sse": yield value
-        else: structure_text = value
-    
-    structured = _parse_json_response(structure_text)
-    qa_pairs = structured["qa_pairs"]
-    # = [{"id":1, "question":"...", "answer":"...", "focus_area":"...", "topic":"python", "pillar":"python"}]
-    ↓
-[4] Phase 2: 创建 session
-    create_session(session_id, mode="recording", questions, user_id)
-        → INSERT INTO sessions
-    ↓
-[5] Phase 3: 评估
-    qa_lines = [...]  # 拼成 Markdown
-    prompt = RECORDING_DUAL_EVAL_PROMPT.format(qa_pairs="...")
-    
-    async for kind, value in stream_llm_sse(messages, "正在评估回答质量"):
-        if kind == "sse": yield value
-        else: eval_text = value
-    
-    eval_result = _parse_json_response(eval_text)
-    # = {scores: [...], overall: {avg_score, summary, new_weak_points, ...}}
-    ↓
-[6] 格式化复盘 + 保存
-    review = format_drill_review(questions, answers, scores, overall)
-    save_drill_answers(session_id, answers, user_id)
-        → UPDATE sessions SET transcript = ...
-    save_review(session_id, review, scores, weak_points, overall, user_id)
-        → UPDATE sessions SET review = ..., scores = ..., overall = ...
-    ↓
-[7] 更新画像
-    await _update_recording_profile(overall, scores, len(questions), user_id)
-        ├── llm_update_profile(mode="recording", topic=None, ...)
-        └── session_weight=0.3 (录音模式权重低，因为不是主动训练)
-    ↓
-[8] SSE: {type: "complete", data: {review, scores, overall, questions, answers}}
-```
-
-### 数据库副作用
-
-| 表 | 写入 |
-|---|---|
-| `sessions` | 1 行：mode='recording', transcript, review, scores, overall |
-| `memory_vectors` | 异步写入 weak_points + summary |
-
-### 容易踩的坑
-
-- **DashScope 异步 API 必须轮询**：不是同步返回，要 polling 直到 SUCCEEDED。我们最多 300 次 × 3s = 15 分钟
-- **七牛 URL 必须公网可访问**：DashScope 服务器要能拉这个 URL
-- **角色识别可能搞错**：Prompt 强调"多信号加权判断"，并返回 `role_confidence` 让前端决定是否提示用户校对
-
----
-
-## 数据流 5 · 知识库重建：用户点"重建索引"按钮
+## 数据流 4 · 知识库重建：用户点"重建索引"按钮
 
 ### 用户视角
 
@@ -571,7 +477,7 @@ TaskStatus.state="pending", message="失败重试 1/3，4s 后重试"
 
 ---
 
-## 数据流 6 · 问答演练场（QA Arena）的上下文压缩
+## 数据流 5 · 问答演练场（QA Arena）的上下文压缩
 
 ### 场景
 
@@ -648,7 +554,7 @@ TaskStatus.state="pending", message="失败重试 1/3，4s 后重试"
 
 ## 总结：数据流的共性模式
 
-读完这 6 个数据流，你应该能看出几个**架构模式**：
+读完这 5 个数据流，你应该能看出几个**架构模式**：
 
 ### 模式 1 · 写时同步、慢操作异步
 
