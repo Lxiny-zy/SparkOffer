@@ -94,6 +94,12 @@ def _parse_inline_eval(content: str) -> tuple[str, dict | None]:
     else:
         eval_data["score"] = max(0, min(10, int(round(score))))
 
+    # brief ← observation fallback: the review builder reads `brief`, but the
+    # model only needs to emit `observation` — don't lose the eval when it
+    # (reasonably) skips the duplicated legacy field.
+    if not eval_data.get("brief") and eval_data.get("observation"):
+        eval_data["brief"] = eval_data["observation"]
+
     return clean, eval_data
 
 

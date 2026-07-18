@@ -11,7 +11,7 @@ KNOWLEDGE_TRAINING_SYSTEM = """你是一个技术知识训练卡片生成器。
 - 每张卡片都必须包含 title、knowledge、example、question、answer、tags、source_index、source_refs。
 - knowledge 必须是 3-5 条 Markdown 列表项，每条都是完整句子，按“概念/机制 -> 用法/场景 -> 边界/易错点”的顺序组织。
 - question 用于主动回忆，不是面试评分题，不要包含评分标准。
-- answer 要能独立回答 question，包含关键判断和适用边界，但保持精炼。
+- answer 是卡片的核心：要写成候选人在面试中能完整说出口的参考回答，按“结论 -> 机制/推导 -> 边界或易错点”展开，能独立回答 question，不依赖 knowledge 也成立。禁止只给一两句结论。
 - source_index 必须引用输入片段中的 index；source_refs 必须引用同一片段的 filename 和 header_path。
 - 如果片段只是学习计划、目录、题量安排、打卡清单、泛泛建议，而不是技术知识点，直接跳过，不要生成卡片。
 """
@@ -34,7 +34,7 @@ def build_knowledge_training_prompt(topic_name: str, depth: str, sections_json: 
   "knowledge": "- 第一条完整知识要点\n- 第二条完整知识要点\n- 第三条完整知识要点",
   "example": "一个能帮助理解该知识点的具体例子、命令、配置、代码或工程场景",
   "question": "用于遮住答案时主动回忆的问题",
-  "answer": "精炼参考答案，可以用 Markdown 列表或代码块",
+  "answer": "结构化参考答案（见下方 answer 展开要求），用 Markdown 列表或代码块",
   "tags": ["标签1", "标签2"],
   "source_index": 1,
   "source_refs": [
@@ -48,20 +48,27 @@ def build_knowledge_training_prompt(topic_name: str, depth: str, sections_json: 
 3. knowledge 必须按阅读顺序组织：先给定义或结论，再说明使用场景，再补充限制、边界或易错点。
 4. example 必须具体；命令、代码、配置、SQL、正则表达式要使用 Markdown 代码格式。
 5. question 要问“为什么/如何/什么时候/有什么区别/会踩什么坑”，避免只问“请解释 XX”。
-6. answer 要能直接回应 question，不要只重复 knowledge。
-7. source_index 必须是输入片段里的 index；source_refs 必须与 source_index 对应。
-8. 不生成考试分数、评分维度、难度等级。
-9. 不要自动扩展到来源外知识；信息不足就跳过该片段。
+6. answer 按三层展开，来源片段有料就写满（通常 80-200 字）：
+   - **结论**：先用 1-2 句直接回答 question 的问法（问"为什么"就答原因，问"区别"就点出关键差异）
+   - **机制/推导**：说清结论为什么成立——原理、执行过程、对比维度；来源片段里的关键代码/命令/参数在这里引用
+   - **边界/易错点**：什么场景下不适用、常见的错误理解是什么
+   来源片段撑不起某一层就省略该层，**不编造**；但不允许只给一层——只有一句结论的答案对着 question 复习时没有回忆量。
+7. answer 不要照抄 knowledge 的列表——knowledge 是"看"的要点清单，answer 是"说"的完整回答，两者组织方式必须不同。
+8. source_index 必须是输入片段里的 index；source_refs 必须与 source_index 对应。
+9. 不生成考试分数、评分维度、难度等级。
+10. 不要自动扩展到来源外知识；信息不足就跳过该片段。
 
 坏例子（不要这样写）：
 - "示例路径是 /app/cache"
 - "mount 写法为 target=/app/cache"
 - "Day 1-3：数组 + 字符串，25 题"
+- answer 只有一句："tmpfs 是内存文件系统。"（无机制、无边界，没有回忆量）
 
 好例子（应该这样写）：
 - "Docker tmpfs 是挂载在内存中的临时文件系统，适合缓存或敏感临时数据，容器删除后不会持久化。"
 - "`--tmpfs /app/cache` 是简写方式，适合快速挂载；`--mount type=tmpfs,target=/app/cache,tmpfs-size=100m` 更显式，适合声明大小等参数。"
 - "grep 用于按模式过滤行，sed 更适合流式替换和编辑，awk 更适合按列分析、统计和格式化输出。"
+- answer 三层展开："**结论**：tmpfs 挂载的数据存在内存里，容器停止即消失，所以适合缓存而非持久化数据。**机制**：它绕过了容器的写层（overlayfs），读写直接落在内存页上，速度快且不会写坏镜像层；`--mount type=tmpfs,tmpfs-size=100m` 可以限制内存占用。**易错点**：误把需要持久化的数据放进 tmpfs，重启后丢失；不设 size 上限时大文件会耗尽宿主内存。"
 
 知识库片段：
 {sections_json}

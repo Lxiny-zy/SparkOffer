@@ -169,11 +169,11 @@ async def evaluate_decoupled(
     scores.sort(key=lambda s: s.get("question_id", 0))
 
     # ── overall summary on the large tier, fed only stats ──
-    overall = await _summarize_overall(topic_name, scores, user_id)
+    overall = await _summarize_overall(topic, topic_name, scores, user_id)
     return {"scores": scores, "overall": overall}
 
 
-async def _summarize_overall(topic_name: str, scores: list[dict], user_id: str) -> dict:
+async def _summarize_overall(topic: str, topic_name: str, scores: list[dict], user_id: str) -> dict:
     valid_scores = [s for s in scores if isinstance(s.get("score"), (int, float))]
     if not valid_scores:
         return {
@@ -203,6 +203,7 @@ async def _summarize_overall(topic_name: str, scores: list[dict], user_id: str) 
     big_llm = get_langchain_llm(tier="large")
     prompt = DRILL_OVERALL_SUMMARY_PROMPT.format(
         topic_name=topic_name,
+        topic_key=topic,
         score_stats="\n".join(stats_lines),
         user_profile=get_profile_summary_for_drill(user_id),
     )
@@ -216,14 +217,58 @@ async def _summarize_overall(topic_name: str, scores: list[dict], user_id: str) 
         if not isinstance(parsed, dict):
             raise ValueError(f"overall parse not a dict: {type(parsed).__name__}")
         parsed.setdefault("avg_score", round(avg, 1))
-        parsed.setdefault("new_weak_points", [])
-        parsed.setdefault("new_strong_points", [])
-        return parsed
+        return _normalize_overall(parsed, topic)
     except Exception as exc:
         logger.warning("overall summary failed: %s", exc)
         return {
             "avg_score": round(avg, 1),
             "summary": f"整体总结失败 ({exc})，仅展示分数。",
-            "new_weak_points": [wp for wp, cnt in weak_hits.items() if cnt >= 2],
+            "new_weak_points": [
+                {"point": wp, "topic": topic} for wp, cnt in weak_hits.items() if cnt >= 2
+            ],
             "new_strong_points": [],
         }
+
+
+def _normalize_overall(parsed: dict, topic: str) -> dict:
+    """Coerce the overall dict to the batch-eval schema (single source of truth).
+
+    The decoupled path historically asked the LLM for flat strings where the
+    batch path used nested objects; downstream (llm_update_profile /
+    _update_communication / _update_thinking_patterns and the frontend Overall
+    type) all consume the nested shape. Normalize here so a model that still
+    emits the legacy flat shape can't corrupt the profile.
+    """
+    def _pointify(items) -> list[dict]:
+        out = []
+        for it in items or []:
+            if isinstance(it, dict) and it.get("point"):
+                out.append({"point": str(it["point"]), "topic": it.get("topic") or topic})
+            elif isinstance(it, str) and it.strip():
+                out.append({"point": it.strip(), "topic": topic})
+        return out
+
+    parsed["new_weak_points"] = _pointify(parsed.get("new_weak_points"))
+    parsed["new_strong_points"] = _pointify(parsed.get("new_strong_points"))
+
+    comm = parsed.get("communication_observations")
+    if isinstance(comm, str):
+        comm = {"style_update": comm.strip(), "new_habits": [], "new_suggestions": []}
+    elif not isinstance(comm, dict):
+        comm = {}
+    parsed["communication_observations"] = comm
+
+    tp = parsed.get("thinking_patterns")
+    if isinstance(tp, str):
+        # A flat string carries no strength/gap split — file it as neither
+        # rather than guessing; the summary text already covers it.
+        tp = {"new_strengths": [], "new_gaps": []}
+    elif not isinstance(tp, dict):
+        tp = {}
+    parsed["thinking_patterns"] = tp
+
+    # Mastery score is deterministic (difficulty/5 × score/10, computed in
+    # _update_drill_profile) — drop any LLM-estimated score, keep only notes.
+    tm = parsed.get("topic_mastery")
+    parsed["topic_mastery"] = {"notes": tm.get("notes", "")} if isinstance(tm, dict) else {}
+    return parsed

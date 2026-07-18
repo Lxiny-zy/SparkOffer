@@ -82,7 +82,7 @@ RESUME_INTERVIEWER_SYSTEM = """你是一位在 LLM 应用 / Agent 工程领域�
 
 在 technical 和 project_deep_dive 阶段，回复**最末行**必须附加一个隐藏评估标记，格式如下（**前端会自动剥离，候选人看不到**）：
 
-<!--EVAL:{{"score":7,"should_advance":false,"observation":"对 ThreadLocal 的内存泄漏有正确直觉但未提到线程池场景下的清理责任","next_focus":"想追问 try-finally remove 在异步框架里的实践","pillar":"java","brief":"对 ThreadLocal 的内存泄漏有正确直觉但未提到线程池场景下的清理责任"}}-->
+<!--EVAL:{{"score":7,"should_advance":false,"observation":"对 ThreadLocal 的内存泄漏有正确直觉但未提到线程池场景下的清理责任","next_focus":"想追问 try-finally remove 在异步框架里的实践","pillar":"java"}}-->
 
 字段说明：
 - `score`：0-10 整数，对候选人**上一个回答**的评分
@@ -90,7 +90,8 @@ RESUME_INTERVIEWER_SYSTEM = """你是一位在 LLM 应用 / Agent 工程领域�
 - `observation`：本次回答的核心观察，1-2 句，**必须带技术细节**（"未提到线程池场景下的清理责任" √；"理解不深" ✗）
 - `next_focus`：基于本次表现，下一步你想验证什么
 - `pillar`：本问题所属板块，取值之一："java" / "python" / "agent" / "general"
-- `brief`：与 `observation` 内容相同（兼容旧解析器，**必须填**）
+
+标记格式要求：整个 EVAL 注释必须写在**一行内**（JSON 不换行），且是回复的最后一行；JSON 字符串值里不要出现双引号（用中文引号或改写），保证注释体是合法 JSON。
 
 """ + SCORING_RUBRIC + """
 
@@ -198,8 +199,8 @@ DRILL_QUESTION_GEN_PROMPT = """## 知识库使用约束（必读）
 
 ## 其它规则
 
-- 题目难度从 {diff_min} 到 {diff_max} **递进**排列
-- 前 3 题尽量包含候选人薄弱点（如有），剩余拓展到其他知识点
+- 难度分布以上方「出题策略」为最高优先：若策略给出了逐题槽位计划（Slot 1..10）或比例分布，**严格按它执行**；仅当策略未指定具体分布时，才让难度从 {diff_min} 到 {diff_max} 大致递进
+- 薄弱点覆盖同理服从「出题策略」；策略未指定时，前 3 题尽量包含候选人薄弱点（如有），剩余拓展到其他知识点
 - 不要与最近练过的题在**本质上**重复（仅措辞变化不算新题）
 - 一题考一个独立知识点，禁止合并考查
 """
@@ -355,21 +356,30 @@ DRILL_OVERALL_SUMMARY_PROMPT = """你是「{topic_name}」资深面试官，正�
 
 ## 输出要求
 
-只返回 JSON 对象（不要数组）：
+只返回 JSON 对象（不要数组）。字段结构与批量评估共用**同一套 schema**（嵌套对象，不是字符串）：
 {{
   "avg_score": 平均分（float, 保留 1 位小数）,
   "summary": "100-150 字整体观察：候选人本轮表现是稳健 / 偏科 / 退步，对照画像看是否符合预期",
-  "new_weak_points": ["未掌握的薄弱点短语1", "短语2"],
-  "new_strong_points": ["展示出的强项短语1"],
-  "communication_observations": "30-60 字：表达风格观察（清晰 / 跳跃 / 罗列 / ...）",
-  "thinking_patterns": "30-60 字：思维模式观察（自顶向下 / 直觉跳跃 / 工程视角 / 概念漂移 / ...）",
+  "new_weak_points": [{{"point": "未掌握的薄弱点描述，带技术细节", "topic": "{topic_key}"}}],
+  "new_strong_points": [{{"point": "展示出的强项描述", "topic": "{topic_key}"}}],
+  "communication_observations": {{
+    "style_update": "30-60 字表达风格观察；统计信号不足以支撑观察时给空字符串",
+    "new_habits": [],
+    "new_suggestions": []
+  }},
+  "thinking_patterns": {{
+    "new_strengths": ["从分数分布能推断出的思维优势；推断不出就留空数组"],
+    "new_gaps": ["从分数分布能推断出的思维短板"]
+  }},
   "topic_mastery": {{
-    "score": 0-100 整数（本轮该 topic 的估算掌握度，相对画像里的 mastery_info）,
-    "notes": "30 字内备注"
+    "notes": "对该领域掌握程度的 30 字内备注"
   }}
 }}
 
-判别 new_weak_points：从 per_question 的 weak_point 里出现 >= 2 次的，或单次出现但 score <= 4 的。"""
+规则：
+- 判别 new_weak_points：从 per_question 的 weak_point 里出现 >= 2 次的，或单次出现但 score <= 4 的
+- topic_mastery 只填 notes——掌握度分数由系统按 difficulty/5 × score/10 确定性计算，不要你估算
+- 你只看得到分数统计、看不到候选人原文：communication_observations / thinking_patterns 仅在统计信号足够时填写，宁可留空，**禁止编造**"""
 
 
 DRILL_REPAIR_PROMPT = """你是「{topic_name}」领域的资深面试官。前一轮 AI 出题在结构校验中失败了，现在需要**只重出指定题号**，其它题保留不动。

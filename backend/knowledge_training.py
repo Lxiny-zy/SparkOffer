@@ -476,7 +476,10 @@ def _looks_like_low_quality_card(title: str, knowledge: str, example: str, quest
         return True
     if len(SCHEDULE_CONTENT_RE.findall(text)) >= 2:
         return True
-    if len(answer) < 18 or len(question) < 10:
+    # Answer floor raised 18→40: the prompt now demands 结论→机制→边界 layered
+    # answers (~80-200 chars when the source supports it); a sub-40-char answer
+    # is a bare conclusion with no recall value when reviewed against question.
+    if len(answer) < 40 or len(question) < 10:
         return True
 
     # 完整过滤代码块
