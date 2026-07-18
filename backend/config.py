@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     default_password: str = "legend"
     default_name: str = "Legend"
     allow_registration: bool = False
+    # Non-empty → registration additionally requires this invite code.
+    invite_code: str = ""
     # Comma-separated allowed CORS origins. Default "*" keeps current behavior;
     # set to your frontend origin(s) in production (e.g. "https://app.example.com").
     cors_allow_origins: str = "*"

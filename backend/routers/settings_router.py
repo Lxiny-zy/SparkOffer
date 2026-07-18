@@ -1,13 +1,15 @@
 """AI settings routes — runtime config, connection tests, multi-channel management."""
 import httpx as _httpx
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.models import (
     AIConfigUpdate, TestLLMRequest, TestEmbeddingRequest,
     ChannelsConfig, TestChannelRequest, TuningConfig,
 )
 from backend.auth import require_owner
+from backend.routers.auth import client_ip
+from backend.storage.audit import log_event
 
 router = APIRouter(prefix="/api")
 
@@ -19,7 +21,7 @@ def get_ai_settings(user_id: str = Depends(require_owner)):
 
 
 @router.put("/settings/ai")
-def update_ai_settings(req: AIConfigUpdate, user_id: str = Depends(require_owner)):
+def update_ai_settings(req: AIConfigUpdate, request: Request, user_id: str = Depends(require_owner)):
     from backend.ai_config import save_ai_config
     from backend.llm_provider import invalidate_singletons
 
@@ -27,6 +29,8 @@ def update_ai_settings(req: AIConfigUpdate, user_id: str = Depends(require_owner
     config = {k: v for k, v in config.items() if v}
     save_ai_config(config)
     invalidate_singletons()
+    log_event("ai_config_updated", user_id=user_id, ip=client_ip(request),
+              detail={"sections": list(config.keys())})
     return {"ok": True}
 
 
@@ -92,7 +96,7 @@ def get_channels_config(user_id: str = Depends(require_owner)):
 
 
 @router.put("/settings/ai/channels")
-def update_channels_config(req: ChannelsConfig, user_id: str = Depends(require_owner)):
+def update_channels_config(req: ChannelsConfig, request: Request, user_id: str = Depends(require_owner)):
     from backend.ai_config import save_channels
     from backend.llm_provider import invalidate_singletons
 
@@ -110,6 +114,8 @@ def update_channels_config(req: ChannelsConfig, user_id: str = Depends(require_o
     }
     save_channels(config)
     invalidate_singletons()
+    log_event("channels_updated", user_id=user_id, ip=client_ip(request),
+              detail={s: [c.get("name", "?") for c in config[s]] for s in config})
     return {"ok": True}
 
 
@@ -221,7 +227,7 @@ def get_tuning_settings(user_id: str = Depends(require_owner)):
 
 
 @router.put("/settings/tuning")
-def update_tuning_settings(req: TuningConfig, user_id: str = Depends(require_owner)):
+def update_tuning_settings(req: TuningConfig, request: Request, user_id: str = Depends(require_owner)):
     """Persist tuning overlay. Read at call time everywhere, so this hot-applies;
     invalidate_singletons() additionally refreshes the cached LlamaIndex LLM whose
     max_tokens is built at construction time."""
@@ -230,6 +236,29 @@ def update_tuning_settings(req: TuningConfig, user_id: str = Depends(require_own
 
     save_tuning(req.model_dump())
     invalidate_singletons()
+    log_event("tuning_updated", user_id=user_id, ip=client_ip(request))
     return {"ok": True}
+
+
+# ── Admin: audit log + user list (owner only) ──
+
+@router.get("/admin/audit")
+def admin_audit_logs(event: str = None, limit: int = 100, offset: int = 0,
+                     user_id: str = Depends(require_owner)):
+    from backend.storage.audit import list_audit_logs, list_event_names
+    result = list_audit_logs(event=event, limit=limit, offset=offset)
+    result["events"] = list_event_names()
+    return result
+
+
+@router.get("/admin/users")
+def admin_list_users(user_id: str = Depends(require_owner)):
+    from backend.storage.database import get_db
+    from backend.auth import is_owner
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, email, name, created_at FROM users ORDER BY created_at ASC"
+    ).fetchall()
+    return {"users": [dict(r) | {"is_owner": is_owner(r["id"])} for r in rows]}
 
 

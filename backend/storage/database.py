@@ -353,5 +353,24 @@ def init_all_tables():
     # Due-review queue lookup: cards whose next_review has elapsed, per (user, topic).
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_cards_due ON knowledge_cards(user_id, topic, next_review)")
 
+    # ── audit_logs ──
+    # Security audit trail: auth events (login/register/password) and global
+    # config mutations (AI channels / tuning). Append-only; queried by the
+    # owner-only admin endpoints. `detail` is JSON and must never contain
+    # secrets (API keys, passwords) — writers log names/counts, not values.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            event      TEXT NOT NULL,
+            user_id    TEXT,
+            email      TEXT,
+            ip         TEXT,
+            detail     TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_event ON audit_logs(event, created_at DESC)")
+
     conn.commit()
     logger.info("All database tables and indexes initialized.")

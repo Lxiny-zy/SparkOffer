@@ -7,9 +7,11 @@ import CatAvatar from "@/components/CatAvatar";
 export default function Login() {
   const [isRegister, setIsRegister] = useState(false);
   const [allowReg, setAllowReg] = useState<boolean | null>(null);
+  const [inviteRequired, setInviteRequired] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
@@ -18,7 +20,10 @@ export default function Login() {
   useEffect(() => {
     fetch("/api/auth/config")
       .then((r) => r.json())
-      .then((d: any) => setAllowReg(d.allow_registration))
+      .then((d: any) => {
+        setAllowReg(d.allow_registration);
+        setInviteRequired(!!d.invite_required);
+      })
       .catch(() => setAllowReg(false));
   }, []);
 
@@ -30,11 +35,17 @@ export default function Login() {
       setError("密码至少 6 个字符");
       return;
     }
+    if (isRegister && inviteRequired && !inviteCode.trim()) {
+      setError("请输入邀请码");
+      return;
+    }
 
     setLoading(true);
     try {
       const endpoint = isRegister ? "/api/auth/register" : "/api/auth/login";
-      const body = isRegister ? { email, password, name } : { email, password };
+      const body = isRegister
+        ? { email, password, name, invite_code: inviteCode.trim() }
+        : { email, password };
 
       const res = await fetch(endpoint, {
         method: "POST",
@@ -116,6 +127,16 @@ export default function Login() {
                   value={password} onChange={(e) => setPassword(e.target.value)} required
                 />
               </div>
+
+              {isRegister && inviteRequired && (
+                <div className="space-y-2">
+                  <label className="sig-kicker block">邀请码 / Invite Code</label>
+                  <input
+                    type="text" className="sig-field" placeholder="向管理员索取"
+                    value={inviteCode} onChange={(e) => setInviteCode(e.target.value)} required
+                  />
+                </div>
+              )}
 
               {error && (
                 <div

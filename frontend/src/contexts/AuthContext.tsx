@@ -23,15 +23,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
 
-      fetch("/api/profile", {
+      fetch("/api/auth/me", {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
       })
-        .then((res) => {
+        .then(async (res) => {
           clearTimeout(timer);
           if (res.ok) {
-            const stored = localStorage.getItem("user");
-            if (stored) setUser(JSON.parse(stored));
+            // 以服务端为准刷新用户信息（含 is_owner），避免 localStorage 里的旧数据
+            const fresh = await res.json();
+            localStorage.setItem("user", JSON.stringify(fresh));
+            setUser(fresh);
             return;
           }
 

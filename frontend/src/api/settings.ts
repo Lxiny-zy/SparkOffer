@@ -110,3 +110,21 @@ export async function saveTuning(config: any): Promise<any> {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
+
+// ── Admin (owner only) ──
+
+export async function getAuditLogs(params: { event?: string; limit?: number; offset?: number } = {}): Promise<any> {
+  const qs = new URLSearchParams();
+  if (params.event) qs.set("event", params.event);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const res = await authFetch(`${API_BASE}/admin/audit?${qs}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getAdminUsers(): Promise<any> {
+  const res = await authFetch(`${API_BASE}/admin/users`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}

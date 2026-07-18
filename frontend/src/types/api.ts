@@ -183,4 +183,5 @@ export interface User {
   username: string;
   name?: string;
   email?: string;
+  is_owner?: boolean;
 }

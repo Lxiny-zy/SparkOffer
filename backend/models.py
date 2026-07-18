@@ -86,6 +86,7 @@ class RegisterRequest(BaseModel):
     email: str
     password: str
     name: str = ""
+    invite_code: str = ""
 
 
 class LoginRequest(BaseModel):

@@ -16,6 +16,7 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import ChannelManager from "@/components/ChannelManager";
 import TuningSettings from "@/components/TuningSettings";
+import AdminAuditPanel from "@/components/AdminAuditPanel";
 
 // ─────────────────────────────────────────────────────────────
 // 网关健康仪表盘 ── L1 hero
@@ -248,6 +249,8 @@ function AccountSection() {
 }
 
 export default function Settings() {
+  const { user } = useAuth();
+  const isOwner = !!user?.is_owner;
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
 
   const loadHealth = useCallback(async () => {
@@ -267,11 +270,12 @@ export default function Settings() {
   }, []);
 
   useEffect(() => {
+    if (!isOwner) return;
     loadHealth();
     const onFocus = () => loadHealth();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [loadHealth]);
+  }, [loadHealth, isOwner]);
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0 w-full"><div className="max-w-3xl mx-auto p-4 md:p-8 space-y-6">
@@ -279,14 +283,15 @@ export default function Settings() {
         <div className="sig-kicker mb-1">// 设置 / SETTINGS</div>
         <h1 className="sig-display text-2xl md:text-[28px]">设置<span className="sig-accent-c">.</span></h1>
         <p className="text-dim text-sm">
-          Manage your account and AI provider configuration.
+          {isOwner ? "Manage your account and AI provider configuration." : "Manage your account."}
         </p>
       </div>
 
-      <HealthDashboard summary={healthSummary} />
+      {isOwner && <HealthDashboard summary={healthSummary} />}
 
       <AccountSection />
 
+      {isOwner && (<>
       {/* LLM Channels */}
       <Card>
         <CardHeader>
@@ -358,6 +363,9 @@ export default function Settings() {
           <TuningSettings />
         </CardContent>
       </Card>
+
+      <AdminAuditPanel />
+      </>)}
     </div>
     </div>
   );
