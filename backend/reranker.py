@@ -77,24 +77,77 @@ def _report(channel_id: str | None, ok: bool) -> None:
         pass
 
 
-def _cache_key(query: str, chunks: list[str], top_n: int) -> str:
-    """Length-prefixed hash of (top_n, query, chunks).
+_RERANK_CACHE_SCHEMA = "rerank-v2"
+
+
+def _cache_key(
+    query: str,
+    chunks: list[str],
+    top_n: int,
+    *,
+    model: str = "",
+    endpoint: str = "",
+) -> str:
+    """Length-prefixed hash of provider identity, query, and chunks.
 
     Prefixing each segment with its byte length prevents boundary aliasing:
     without it, (query="ab", chunks=["c","d"]) and (query="a", chunks=["bc","d"])
     hash identically, so a cache hit would silently reorder the wrong set.
     top_n is part of the key because the cached index-list length depends on it.
+    Provider identity prevents a hot model/channel switch from silently reusing
+    rankings produced by the previous reranker.
     """
     h = hashlib.sha256()
     h.update(struct.pack("<I", top_n))
-    for part in (query, *chunks):
+    for part in (
+        _RERANK_CACHE_SCHEMA,
+        model,
+        endpoint.rstrip("/"),
+        str(MAX_RERANK_DOCS),
+        str(MAX_DOC_CHARS),
+        str(MAX_QUERY_CHARS),
+        query,
+        *chunks,
+    ):
         pb = part.encode("utf-8")
         h.update(struct.pack("<I", len(pb)))
         h.update(pb)
     return f"rerank:{h.hexdigest()[:24]}"
 
 
-async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[str], str]:
+def _validated_indices(
+    value: object,
+    *,
+    chunk_count: int,
+    max_results: int,
+) -> list[int] | None:
+    """Return a safe reranker index list, or None for malformed data."""
+    if not isinstance(value, list) or not value:
+        return None
+    if len(value) > max_results:
+        return None
+
+    indices: list[int] = []
+    seen: set[int] = set()
+    for index in value:
+        if not isinstance(index, int) or isinstance(index, bool):
+            return None
+        if index < 0 or index >= chunk_count:
+            return None
+        if index in seen:
+            return None
+        seen.add(index)
+        indices.append(index)
+    return indices
+
+
+async def rerank(
+    query: str,
+    chunks: list[str],
+    top_n: int = 10,
+    *,
+    read_timeout: float | None = None,
+) -> tuple[list[str], str]:
     """Re-rank chunks by relevance to query via Cross-Encoder API.
 
     Returns (chunks, status) where status is one of:
@@ -116,19 +169,25 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
     query = query[:MAX_QUERY_CHARS]
 
     effective_top_n = min(top_n, len(chunks))
-    cache = get_cache()
-    ck = _cache_key(query, chunks, effective_top_n)
-    cached = await asyncio.to_thread(cache.get_json, ck)
-    if cached is not None:
-        try:
-            reordered = [chunks[i] for i in cached if i < len(chunks)]
-            if reordered:
-                logger.debug("Reranker cache hit: %s", ck)
-                return reordered, "applied"
-        except (TypeError, IndexError):
-            pass
-
     api_base = config["api_base"].rstrip("/")
+    cache = get_cache()
+    ck = _cache_key(
+        query,
+        chunks,
+        effective_top_n,
+        model=config.get("api_model", ""),
+        endpoint=api_base,
+    )
+    cached = await asyncio.to_thread(cache.get_json, ck)
+    cached_indices = _validated_indices(
+        cached,
+        chunk_count=len(chunks),
+        max_results=effective_top_n,
+    )
+    if cached_indices is not None:
+        logger.debug("Reranker cache hit: %s", ck)
+        return [chunks[index] for index in cached_indices], "applied"
+
     url = api_base if api_base.endswith("/rerank") else f"{api_base}/rerank"
     channel_id = config.get("channel_id")
 
@@ -142,7 +201,10 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
     }
 
     from backend.ai_config import get_retrieval_setting
-    read_to = get_retrieval_setting("reranker_read_timeout")
+    read_to = (
+        read_timeout if read_timeout is not None
+        else get_retrieval_setting("reranker_read_timeout")
+    )
 
     try:
         client_kw: dict = {
@@ -177,8 +239,25 @@ async def rerank(query: str, chunks: list[str], top_n: int = 10) -> tuple[list[s
             logger.warning("Reranker returned empty results")
             return chunks, "degraded"
 
-        indices = [r["index"] for r in sorted(results, key=lambda r: r.get("relevance_score", 0), reverse=True)]
-        reordered = [chunks[i] for i in indices if i < len(chunks)]
+        ranked_results = sorted(
+            results,
+            key=lambda r: r.get("relevance_score", 0) if isinstance(r, dict) else 0,
+            reverse=True,
+        )
+        raw_indices = [
+            r.get("index") if isinstance(r, dict) else None
+            for r in ranked_results
+        ]
+        indices = _validated_indices(
+            raw_indices,
+            chunk_count=len(chunks),
+            max_results=effective_top_n,
+        )
+        if indices is None:
+            logger.warning("Reranker returned invalid indices")
+            return chunks, "degraded"
+
+        reordered = [chunks[index] for index in indices]
 
         await asyncio.to_thread(cache.set_json, ck, indices, 3600)
         logger.info(

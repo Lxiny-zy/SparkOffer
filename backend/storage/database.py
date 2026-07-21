@@ -296,15 +296,28 @@ def init_all_tables():
             n_questions         INTEGER NOT NULL,
             k                   INTEGER NOT NULL,
             judge_mode          TEXT DEFAULT 'standard',
+            eval_kind           TEXT DEFAULT 'synthetic_e2e',
+            retrieval_mode      TEXT DEFAULT 'atomic_dense',
+            dataset_id          TEXT DEFAULT '',
+            dataset_version     TEXT DEFAULT '',
+            dataset_hash        TEXT DEFAULT '',
+            corpus_hash         TEXT DEFAULT '',
+            seed                INTEGER,
             hit_at_k            REAL,
+            hit_at_k_strict     REAL,
             mrr                 REAL,
+            ndcg_at_k           REAL,
             context_precision   REAL,
             context_recall      REAL,
             faithfulness        REAL,
             answer_relevancy    REAL,
             answer_correctness  REAL,
+            success_rate        REAL,
+            latency_p50_ms      REAL,
+            latency_p95_ms      REAL,
             status              TEXT NOT NULL,
             error               TEXT DEFAULT '',
+            manifest_json       TEXT DEFAULT '{}',
             detail_json         TEXT DEFAULT '{}',
             created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         )
@@ -312,12 +325,33 @@ def init_all_tables():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_eval_runs_user ON rag_eval_runs(user_id, created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_eval_runs_topic ON rag_eval_runs(user_id, topic, created_at DESC)")
 
-    # hit_at_k_strict excludes trivial self-hits (gold synthesized from the same
-    # chunk it retrieves) — a less optimistic retrieval signal than hit_at_k.
-    try:
-        conn.execute("SELECT hit_at_k_strict FROM rag_eval_runs LIMIT 1")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE rag_eval_runs ADD COLUMN hit_at_k_strict REAL")
+    # Compatibility migration for databases created before the frozen benchmark
+    # and run-manifest fields existed. Keep this in startup DDL because Docker
+    # does not run backend/migrate.py automatically.
+    rag_eval_columns = {
+        "hit_at_k_strict": "REAL",
+        "eval_kind": "TEXT DEFAULT 'synthetic_e2e'",
+        "retrieval_mode": "TEXT DEFAULT 'atomic_dense'",
+        "dataset_id": "TEXT DEFAULT ''",
+        "dataset_version": "TEXT DEFAULT ''",
+        "dataset_hash": "TEXT DEFAULT ''",
+        "corpus_hash": "TEXT DEFAULT ''",
+        "seed": "INTEGER",
+        "ndcg_at_k": "REAL",
+        "success_rate": "REAL",
+        "latency_p50_ms": "REAL",
+        "latency_p95_ms": "REAL",
+        "manifest_json": "TEXT DEFAULT '{}'",
+    }
+    for col, ddl in rag_eval_columns.items():
+        try:
+            conn.execute(f"SELECT {col} FROM rag_eval_runs LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute(f"ALTER TABLE rag_eval_runs ADD COLUMN {col} {ddl}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rag_eval_comparable "
+        "ON rag_eval_runs(user_id, topic, eval_kind, retrieval_mode, created_at DESC)"
+    )
 
     # ── knowledge_cards ──
     # Persisted knowledge-training flashcards + SM-2 spaced-repetition state. The

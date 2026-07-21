@@ -1040,6 +1040,7 @@ class ChunkWithMeta:
     score: float
     source_file: str
     header_path: str
+    node_id: str = ""
 
 
 def retrieve_topic_context(topic: str, question: str, user_id: str, top_k: int = 5,
@@ -1067,13 +1068,40 @@ def retrieve_topic_context_with_scores(
         # Normalize that slash path into a " > " breadcrumb.
         raw_header = (meta.get("header_path") or "").strip("/")
         header_path = raw_header.replace("/", " > ") if raw_header else ""
+        content = node.get_content()
+        from backend.rag_ids import stable_chunk_id
         results.append(ChunkWithMeta(
-            content=node.get_content(),
+            content=content,
             score=node.score if hasattr(node, "score") and node.score is not None else 0.0,
             source_file=meta.get("file_name", ""),
             header_path=header_path,
+            node_id=stable_chunk_id(content, meta.get("file_name", ""), header_path),
         ))
     return results
+
+
+async def async_retrieve_topic_context_with_scores(
+    topic: str, question: str, user_id: str,
+    top_k: int = 5, timeout: float = _RETRIEVAL_TIMEOUT,
+    build_if_missing: bool = True,
+) -> list[ChunkWithMeta]:
+    """Strict async wrapper used by evaluators that need truthful failures.
+
+    Unlike ``safe_retrieve_topic_context_with_scores`` this function does not
+    turn infrastructure errors into an empty result. Production request paths
+    continue using the fail-soft wrapper below.
+    """
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            retrieve_topic_context_with_scores,
+            topic,
+            question,
+            user_id,
+            top_k,
+            build_if_missing,
+        ),
+        timeout=timeout,
+    )
 
 
 def _schedule_topic_rebuild(topic: str, user_id: str) -> None:
@@ -1100,11 +1128,13 @@ async def safe_retrieve_topic_context_with_scores(
 ) -> list[ChunkWithMeta]:
     """Async-safe wrapper around retrieve_topic_context_with_scores."""
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(
-                retrieve_topic_context_with_scores, topic, question, user_id, top_k, build_if_missing,
-            ),
+        return await async_retrieve_topic_context_with_scores(
+            topic,
+            question,
+            user_id,
+            top_k=top_k,
             timeout=timeout,
+            build_if_missing=build_if_missing,
         )
     except IndexNotReady:
         logger.info("Index not built for topic=%s; degrading to empty + scheduling background rebuild", topic)

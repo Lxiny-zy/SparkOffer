@@ -63,6 +63,13 @@ export const METRIC_SPEC: Record<string, MetricSpec> = {
     normal: [0.5, 0.8],
     excellent: 0.8,
   },
+  ndcg_at_k: {
+    label: "nDCG@K",
+    compares: "相关片段的命中与排序位置",
+    how: "按排名折损相关性收益，再除以理想排序收益；越接近 1 越好",
+    normal: [0.5, 0.8],
+    excellent: 0.8,
+  },
   context_precision: {
     label: "Precision",
     compares: "检索片段 ↔ 参考答案",
@@ -97,6 +104,13 @@ export const METRIC_SPEC: Record<string, MetricSpec> = {
     how: "答案拆原子断言后逐条对照参考答案的加权一致率（full/partial/none）",
     normal: [0.6, 0.85],
     excellent: 0.85,
+  },
+  success_rate: {
+    label: "有效测量率",
+    compares: "成功完成检索测量的样本数 ↔ 总样本数",
+    how: "排除超时、索引未就绪等基础设施失败后的有效样本比例；低于 95% 不宜作为回归结论",
+    normal: [0.95, 1],
+    excellent: 0.99,
   },
   // 生成侧（Review 页 0-100 展示，复用 faithfulness/relevancy 语义）
   answer_relevance: {
