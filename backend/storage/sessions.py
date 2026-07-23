@@ -1,8 +1,14 @@
 """面试记录持久化 (SQLite)."""
 import json
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 
 from backend.storage.database import get_db
+
+
+def new_session_id() -> str:
+    """Return a collision-resistant opaque id for globally keyed sessions."""
+    return uuid.uuid4().hex
 
 
 def create_session(session_id: str, mode: str, topic: str | None = None,
@@ -22,57 +28,127 @@ def create_session(session_id: str, mode: str, topic: str | None = None,
     conn.commit()
 
 
-def append_message(session_id: str, role: str, content: str, *, user_id: str):
-    """Append a message to transcript using SQLite JSON function (no full reload)."""
+def append_messages(session_id: str, messages: list[dict], *, user_id: str) -> bool:
+    """Atomically append one turn (or any message batch) to a transcript."""
+    if not messages:
+        return True
+
     conn = get_db()
     now = datetime.now().isoformat()
-    msg_json = json.dumps({"role": role, "content": content, "time": now}, ensure_ascii=False)
-    conn.execute(
-        "UPDATE sessions SET transcript = json_insert(COALESCE(transcript, '[]'), '$[#]', json(?)), "
+    encoded = [
+        json.dumps(
+            {
+                "role": message.get("role", ""),
+                "content": message.get("content", ""),
+                "time": message.get("time") or now,
+            },
+            ensure_ascii=False,
+        )
+        for message in messages
+    ]
+    inserts = ", ".join("'$[#]', json(?)" for _ in encoded)
+    cursor = conn.execute(
+        "UPDATE sessions SET transcript = json_insert("
+        f"COALESCE(NULLIF(transcript, ''), '[]'), {inserts}), "
         "updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ?",
-        (msg_json, session_id, user_id),
+        [*encoded, session_id, user_id],
     )
     conn.commit()
+    return cursor.rowcount > 0
 
 
-def save_drill_answers(session_id: str, answers: list[dict], *, user_id: str):
-    """Save drill answers into transcript as Q&A pairs."""
+def append_message(session_id: str, role: str, content: str, *, user_id: str):
+    """Append a message to transcript using SQLite JSON function (no full reload)."""
+    return append_messages(
+        session_id, [{"role": role, "content": content}], user_id=user_id,
+    )
+
+
+def save_drill_answers(
+    session_id: str,
+    answers: list[dict],
+    *,
+    user_id: str,
+    evaluation_token: str | None = None,
+) -> bool:
+    """Save canonical Q&A pairs, fenced to the active evaluation generation."""
     conn = get_db()
     row = conn.execute(
         "SELECT questions FROM sessions WHERE session_id = ? AND user_id = ?",
         (session_id, user_id),
     ).fetchone()
     if not row:
-        return
+        return False
     questions = json.loads(row["questions"])
-    answer_map = {a["question_id"]: a["answer"] for a in answers}
+    answer_map = {}
+    for answer_row in answers or []:
+        if not isinstance(answer_row, dict):
+            continue
+        question_id = answer_row.get("question_id", answer_row.get("id"))
+        if question_id is None:
+            continue
+        try:
+            question_key = str(question_id)
+        except Exception:
+            continue
+        answer_map[question_key] = (
+            "" if answer_row.get("answer") is None
+            else str(answer_row.get("answer", ""))
+        )
 
     transcript = []
     for q in questions:
-        transcript.append({"role": "assistant", "content": q["question"], "time": datetime.now().isoformat()})
-        answer = answer_map.get(q["id"], "")
+        transcript.append({
+            "role": "assistant",
+            "content": q["question"],
+            "question_id": q["id"],
+            "time": datetime.now().isoformat(),
+        })
+        answer = answer_map.get(str(q["id"]), "")
         if answer:
-            transcript.append({"role": "user", "content": answer, "time": datetime.now().isoformat()})
+            transcript.append({
+                "role": "user",
+                "content": answer,
+                "question_id": q["id"],
+                "time": datetime.now().isoformat(),
+            })
 
-    conn.execute(
-        "UPDATE sessions SET transcript = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ?",
-        (json.dumps(transcript, ensure_ascii=False), session_id, user_id),
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    where = "session_id = ? AND user_id = ?"
+    params = [json.dumps(transcript, ensure_ascii=False), session_id, user_id]
+    if evaluation_token is not None:
+        where += f" AND json_extract({doc}, '$.evaluation_claim_token') = ?"
+        params.append(evaluation_token)
+    cursor = conn.execute(
+        "UPDATE sessions SET transcript = ?, updated_at = CURRENT_TIMESTAMP "
+        f"WHERE {where}",
+        params,
     )
     conn.commit()
+    return cursor.rowcount > 0
 
 
 def save_review(session_id: str, review: str, scores: list = None,
-                weak_points: list = None, overall: dict = None, *, user_id: str):
+                weak_points: list = None, overall: dict = None, *, user_id: str,
+                evaluation_token: str | None = None) -> bool:
     conn = get_db()
-    conn.execute(
+    where = "session_id = ? AND user_id = ?"
+    params = [
+        review, json.dumps(scores or [], ensure_ascii=False),
+        json.dumps(weak_points or [], ensure_ascii=False),
+        json.dumps(overall or {}, ensure_ascii=False),
+        session_id, user_id,
+    ]
+    if evaluation_token is not None:
+        where += " AND json_extract(COALESCE(NULLIF(meta, ''), '{}'), '$.evaluation_claim_token') = ?"
+        params.append(evaluation_token)
+    cursor = conn.execute(
         "UPDATE sessions SET review = ?, scores = ?, weak_points = ?, overall = ?, updated_at = CURRENT_TIMESTAMP "
-        "WHERE session_id = ? AND user_id = ?",
-        (review, json.dumps(scores or [], ensure_ascii=False),
-         json.dumps(weak_points or [], ensure_ascii=False),
-         json.dumps(overall or {}, ensure_ascii=False),
-         session_id, user_id),
+        f"WHERE {where}",
+        params,
     )
     conn.commit()
+    return cursor.rowcount > 0
 
 
 def save_drill_progress(session_id: str, current_index: int,
@@ -85,31 +161,279 @@ def save_drill_progress(session_id: str, current_index: int,
     flush racing the evaluation) must not overwrite their stored progress.
     """
     conn = get_db()
-    row = conn.execute(
-        "SELECT meta, review FROM sessions WHERE session_id = ? AND user_id = ?",
-        (session_id, user_id),
-    ).fetchone()
-    if not row:
-        return False
-    if row["review"]:
-        return True  # already completed — accept silently, write nothing
-    meta = json.loads(row["meta"] or "{}")
-    meta["progress"] = {
+    progress = {
         "current_index": current_index,
         "partial_answers": {str(k): v for k, v in (partial_answers or {}).items()},
         "hints": {str(k): v for k, v in (hints or {}).items()},
         "updated_at": datetime.now().isoformat(),
     }
-    conn.execute(
-        "UPDATE sessions SET meta = ?, updated_at = CURRENT_TIMESTAMP "
-        "WHERE session_id = ? AND user_id = ?",
-        (json.dumps(meta, ensure_ascii=False), session_id, user_id),
+    cursor = conn.execute(
+        "UPDATE sessions SET meta = json_set(COALESCE(NULLIF(meta, ''), '{}'), "
+        "'$.progress', json(?)), updated_at = CURRENT_TIMESTAMP "
+        "WHERE session_id = ? AND user_id = ? AND (review IS NULL OR review = '')",
+        (json.dumps(progress, ensure_ascii=False), session_id, user_id),
     )
     conn.commit()
-    return True
+    if cursor.rowcount > 0:
+        return True
+    return conn.execute(
+        "SELECT 1 FROM sessions WHERE session_id = ? AND user_id = ?",
+        (session_id, user_id),
+    ).fetchone() is not None
 
 
-def mark_session_synced(session_id: str, *, user_id: str) -> None:
+SYNC_CLAIM_TTL_SECONDS = 30 * 60
+EVALUATION_CLAIM_TTL_SECONDS = 60 * 60
+RESUME_TURN_CLAIM_TTL_SECONDS = 30 * 60
+
+
+def try_claim_session_sync(
+    session_id: str,
+    *,
+    user_id: str,
+    evaluation_token: str | None = None,
+    target_group: str | None = None,
+    target_topics: list[str] | None = None,
+) -> str | None:
+    """Atomically claim one-time profile / SR / knowledge side-effects.
+
+    ``meta.synced_at`` is the terminal idempotency marker. ``sync_claimed_at``
+    prevents concurrent /interview/end and /interview/sync calls from both
+    applying side-effects before either has a chance to stamp ``synced_at``.
+    A stale claim can be taken over after the TTL so an interrupted worker does
+    not block manual repair forever.
+    """
+    conn = get_db()
+    now = datetime.now()
+    claimed_at = now.isoformat()
+    claim_token = uuid.uuid4().hex
+    stale_before = (now - timedelta(seconds=SYNC_CLAIM_TTL_SECONDS)).isoformat()
+    evaluation_stale_before = (
+        now - timedelta(seconds=EVALUATION_CLAIM_TTL_SECONDS)
+    ).isoformat()
+    resume_turn_stale_before = (
+        now - timedelta(seconds=RESUME_TURN_CLAIM_TTL_SECONDS)
+    ).isoformat()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    if evaluation_token is not None:
+        evaluation_gate = (
+            f"AND json_extract({doc}, '$.evaluation_claim_token') = ?"
+        )
+        claim_doc = doc
+    else:
+        evaluation_gate = (
+            f"AND (json_extract({doc}, '$.evaluation_claim_token') IS NULL "
+            f"OR json_extract({doc}, '$.evaluation_claimed_at') IS NULL "
+            f"OR json_extract({doc}, '$.evaluation_claimed_at') < ?)"
+        )
+        # Manual recovery may take over an evaluation claim left by a crashed
+        # worker. Remove the old token in the same UPDATE so its later writes
+        # fail the token fence.
+        claim_doc = (
+            f"json_remove({doc}, '$.evaluation_claimed_at', "
+            "'$.evaluation_claim_token')"
+        )
+    claim_doc = (
+        f"json_remove({claim_doc}, '$.resume_turn_claimed_at', "
+        "'$.resume_turn_claim_token')"
+    )
+    freeze_params = []
+    if isinstance(target_group, str) and target_group.strip():
+        target_group = target_group.strip()
+        normalized_targets = _normalize_sync_targets(target_topics or [])
+        targets_doc = (
+            f"COALESCE(json_extract({doc}, '$.sync_targets'), '{{}}')"
+        )
+        steps_doc = f"COALESCE(json_extract({doc}, '$.sync_steps'), '{{}}')"
+        # Fold topics already touched by pre-freeze deployments into the first
+        # frozen set. The supplied order wins; completed legacy topics follow.
+        merged_targets = (
+            "COALESCE((SELECT json_group_array(topic) FROM ("
+            "SELECT topic, MIN(ord) AS first_ord FROM ("
+            "SELECT value AS topic, CAST(key AS INTEGER) AS ord "
+            "FROM json_each(json(?)) UNION ALL "
+            "SELECT substr(key, instr(key, ':') + 1) AS topic, "
+            f"1000000 + id AS ord FROM json_each({steps_doc}) "
+            "WHERE key LIKE 'knowledge_extract:%' "
+            "OR key LIKE 'high_freq:%') "
+            "WHERE typeof(topic) = 'text' AND trim(topic) != '' "
+            "GROUP BY topic ORDER BY first_ord)), '[]')"
+        )
+        claim_doc = (
+            f"(CASE WHEN EXISTS (SELECT 1 FROM json_each({targets_doc}) "
+            f"WHERE key = ?) THEN {claim_doc} ELSE json_set({claim_doc}, "
+            f"'$.sync_targets', json_patch({targets_doc}, "
+            f"json_object(?, json({merged_targets})))) END)"
+        )
+        freeze_params = [
+            target_group,
+            target_group,
+            json.dumps(normalized_targets, ensure_ascii=False),
+        ]
+    # Keep this marker after a failed claim release. It freezes the persisted
+    # evaluation as the recovery payload and prevents a newer drill/JD eval
+    # from mixing its scores with partially applied side effects.
+    pending_doc = (
+        f"json_set({claim_doc}, '$.sync_pending_at', "
+        f"COALESCE(json_extract({doc}, '$.sync_pending_at'), ?))"
+    )
+    claim_doc = (
+        f"json_set(json_set({pending_doc}, '$.sync_claimed_at', ?), "
+        "'$.sync_claim_token', ?)"
+    )
+    params = [
+        *freeze_params,
+        claimed_at,
+        claimed_at,
+        claim_token,
+        session_id,
+        user_id,
+    ]
+    if evaluation_token is not None:
+        params.append(evaluation_token)
+    else:
+        params.append(evaluation_stale_before)
+    params.append(resume_turn_stale_before)
+    params.append(stale_before)
+    cursor = conn.execute(
+        f"""
+        UPDATE sessions
+        SET meta = {claim_doc},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE session_id = ? AND user_id = ?
+          AND json_extract({doc}, '$.synced_at') IS NULL
+          {evaluation_gate}
+          AND (
+            mode != 'resume'
+            OR json_extract({doc}, '$.resume_turn_claim_token') IS NULL
+            OR json_extract({doc}, '$.resume_turn_claimed_at') IS NULL
+            OR json_extract({doc}, '$.resume_turn_claimed_at') < ?
+          )
+          AND (
+            json_extract({doc}, '$.sync_claimed_at') IS NULL
+            OR json_extract({doc}, '$.sync_claimed_at') < ?
+          )
+        """,
+        params,
+    )
+    conn.commit()
+    return claim_token if cursor.rowcount > 0 else None
+
+
+def _normalize_sync_targets(targets: object) -> list[str]:
+    if not isinstance(targets, list):
+        return []
+    normalized = []
+    seen = set()
+    for target in targets:
+        if not isinstance(target, str):
+            continue
+        target = target.strip()
+        if not target or target in seen:
+            continue
+        normalized.append(target)
+        seen.add(target)
+    return normalized
+
+
+def session_sync_targets(
+    session_id: str,
+    group: str,
+    *,
+    user_id: str,
+    claim_token: str,
+) -> list[str]:
+    """Return a frozen side-effect target set to the current sync owner."""
+    if not claim_token or not isinstance(group, str) or not group.strip():
+        return []
+    group = group.strip()
+    conn = get_db()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    row = conn.execute(
+        f"""
+        SELECT meta FROM sessions
+        WHERE session_id = ? AND user_id = ?
+          AND json_extract({doc}, '$.sync_claim_token') = ?
+        """,
+        (session_id, user_id, claim_token),
+    ).fetchone()
+    if not row:
+        return []
+    try:
+        stored = json.loads(row["meta"] or "{}").get("sync_targets", {}).get(group)
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        return []
+    return _normalize_sync_targets(stored)
+
+
+def mark_session_sync_step(session_id: str, step: str, *, user_id: str,
+                           claim_token: str, result: dict | None = None) -> bool:
+    """Persist one completed side-effect step while the caller owns the claim.
+
+    ``result`` lets a retry reuse output produced by a completed side-effect.
+    Older timestamp-only step values remain valid and readable.
+    """
+    if not claim_token or not step:
+        return False
+    conn = get_db()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    completed_at = datetime.now().isoformat()
+    if result is None:
+        value_sql = "?"
+        value_params = [completed_at]
+    else:
+        value_sql = "json(?)"
+        value_params = [json.dumps({
+            "completed_at": completed_at,
+            "result": result,
+        }, ensure_ascii=False)]
+    cursor = conn.execute(
+        f"UPDATE sessions SET meta = json_set({doc}, '$.sync_steps', "
+        f"json_patch(COALESCE(json_extract({doc}, '$.sync_steps'), '{{}}'), "
+        f"json_object(?, {value_sql}))), updated_at = CURRENT_TIMESTAMP "
+        "WHERE session_id = ? AND user_id = ? "
+        f"AND json_extract({doc}, '$.sync_claim_token') = ?",
+        (step, *value_params, session_id, user_id, claim_token),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def session_sync_steps(session_id: str, *, user_id: str) -> set[str]:
+    """Return durable completed step names for an interrupted synchronization."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT meta FROM sessions WHERE session_id = ? AND user_id = ?",
+        (session_id, user_id),
+    ).fetchone()
+    if not row:
+        return set()
+    try:
+        steps = json.loads(row["meta"] or "{}").get("sync_steps", {})
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    return set(steps) if isinstance(steps, dict) else set()
+
+
+def session_sync_step_result(session_id: str, step: str, *, user_id: str) -> dict | None:
+    """Return a persisted step result, tolerating legacy timestamp-only values."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT meta FROM sessions WHERE session_id = ? AND user_id = ?",
+        (session_id, user_id),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        value = json.loads(row["meta"] or "{}").get("sync_steps", {}).get(step)
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    result = value.get("result")
+    return result if isinstance(result, dict) else None
+
+def mark_session_synced(session_id: str, *, user_id: str, claim_token: str) -> bool:
     """Stamp ``meta.synced_at`` to record that the profile / SR / knowledge
     side-effects have been applied for this session.
 
@@ -117,20 +441,282 @@ def mark_session_synced(session_id: str, *, user_id: str) -> None:
     (and is also set on the normal eval path): once present, a re-sync is a
     no-op so EWMA / SR / high-freq counters are never double-counted.
     """
+    if not claim_token:
+        return False
     conn = get_db()
-    row = conn.execute(
-        "SELECT meta FROM sessions WHERE session_id = ? AND user_id = ?",
-        (session_id, user_id),
-    ).fetchone()
-    if not row:
-        return
-    meta = json.loads(row["meta"] or "{}")
-    meta["synced_at"] = datetime.now().isoformat()
-    conn.execute(
-        "UPDATE sessions SET meta = ? WHERE session_id = ? AND user_id = ?",
-        (json.dumps(meta, ensure_ascii=False), session_id, user_id),
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    cursor = conn.execute(
+        f"UPDATE sessions SET meta = json_remove(json_set({doc}, "
+        "'$.synced_at', ?), '$.sync_claimed_at', '$.sync_claim_token', "
+        "'$.sync_pending_at'), "
+        "updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ? "
+        f"AND json_extract({doc}, '$.sync_claim_token') = ?",
+        (datetime.now().isoformat(), session_id, user_id, claim_token),
     )
     conn.commit()
+    return cursor.rowcount > 0
+
+
+def release_session_sync_claim(session_id: str, *, user_id: str, claim_token: str) -> bool:
+    """Release a failed claim only while this worker still owns it."""
+    if not claim_token:
+        return False
+    conn = get_db()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    cursor = conn.execute(
+        f"UPDATE sessions SET meta = json_remove({doc}, "
+        "'$.sync_claimed_at', '$.sync_claim_token'), updated_at = CURRENT_TIMESTAMP "
+        "WHERE session_id = ? AND user_id = ? "
+        f"AND json_extract({doc}, '$.sync_claim_token') = ?",
+        (session_id, user_id, claim_token),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def abort_session_sync_claim(
+    session_id: str, *, user_id: str, claim_token: str,
+) -> bool:
+    """Abandon a fresh sync claim before any side-effect step was applied.
+
+    Unlike ``release_session_sync_claim``, this clears ``sync_pending_at`` so a
+    payload rejected before its first side effect does not leave the session in
+    recovery mode. Once a step exists, callers must use the normal release path.
+    """
+    if not claim_token:
+        return False
+    conn = get_db()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    cursor = conn.execute(
+        f"UPDATE sessions SET meta = json_remove({doc}, "
+        "'$.sync_claimed_at', '$.sync_claim_token', '$.sync_pending_at'), "
+        "updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ? "
+        f"AND json_extract({doc}, '$.sync_claim_token') = ? "
+        "AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE("
+        f"json_extract({doc}, '$.sync_steps'), '{{}}')))",
+        (session_id, user_id, claim_token),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def try_claim_resume_turn(session_id: str, *, user_id: str) -> str | None:
+    """Atomically claim one in-flight resume chat turn.
+
+    A turn claim is mutually exclusive with evaluation and side-effect sync
+    claims. Expired claims may be taken over; the old token is removed in the
+    same UPDATE so a paused worker cannot commit its transcript afterwards.
+    """
+    conn = get_db()
+    now = datetime.now()
+    claimed_at = now.isoformat()
+    claim_token = uuid.uuid4().hex
+    evaluation_stale_before = (
+        now - timedelta(seconds=EVALUATION_CLAIM_TTL_SECONDS)
+    ).isoformat()
+    sync_stale_before = (
+        now - timedelta(seconds=SYNC_CLAIM_TTL_SECONDS)
+    ).isoformat()
+    turn_stale_before = (
+        now - timedelta(seconds=RESUME_TURN_CLAIM_TTL_SECONDS)
+    ).isoformat()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    # Remove stale competing claims as part of the takeover. Active claims are
+    # rejected by the predicates below, while a stale worker's later writes are
+    # fenced by its now-absent token.
+    claimed_doc = (
+        f"json_remove({doc}, '$.evaluation_claimed_at', "
+        "'$.evaluation_claim_token', '$.sync_claimed_at', "
+        "'$.sync_claim_token')"
+    )
+    claimed_doc = (
+        f"json_set(json_set({claimed_doc}, '$.resume_turn_claimed_at', ?), "
+        "'$.resume_turn_claim_token', ?)"
+    )
+    cursor = conn.execute(
+        f"""
+        UPDATE sessions
+        SET meta = {claimed_doc}, updated_at = CURRENT_TIMESTAMP
+        WHERE session_id = ? AND user_id = ? AND mode = 'resume'
+          AND (review IS NULL OR review = '')
+          AND json_extract({doc}, '$.sync_pending_at') IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(
+              COALESCE(json_extract({doc}, '$.sync_steps'), '{{}}')
+            )
+          )
+          AND (
+            json_extract({doc}, '$.evaluation_claim_token') IS NULL
+            OR json_extract({doc}, '$.evaluation_claimed_at') IS NULL
+            OR json_extract({doc}, '$.evaluation_claimed_at') < ?
+          )
+          AND (
+            json_extract({doc}, '$.sync_claim_token') IS NULL
+            OR json_extract({doc}, '$.sync_claimed_at') IS NULL
+            OR json_extract({doc}, '$.sync_claimed_at') < ?
+          )
+          AND (
+            json_extract({doc}, '$.resume_turn_claim_token') IS NULL
+            OR json_extract({doc}, '$.resume_turn_claimed_at') IS NULL
+            OR json_extract({doc}, '$.resume_turn_claimed_at') < ?
+          )
+        """,
+        (
+            claimed_at, claim_token, session_id, user_id,
+            evaluation_stale_before, sync_stale_before, turn_stale_before,
+        ),
+    )
+    conn.commit()
+    return claim_token if cursor.rowcount > 0 else None
+
+
+def renew_resume_turn_claim(
+    session_id: str, *, user_id: str, claim_token: str,
+) -> bool:
+    """Refresh an owned resume-turn lease without changing its fencing token."""
+    if not claim_token:
+        return False
+    conn = get_db()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    cursor = conn.execute(
+        f"UPDATE sessions SET meta = json_set({doc}, "
+        "'$.resume_turn_claimed_at', ?), updated_at = CURRENT_TIMESTAMP "
+        "WHERE session_id = ? AND user_id = ? AND mode = 'resume' "
+        "AND (review IS NULL OR review = '') "
+        f"AND json_extract({doc}, '$.resume_turn_claim_token') = ?",
+        (datetime.now().isoformat(), session_id, user_id, claim_token),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def commit_resume_turn(
+    session_id: str,
+    messages: list[dict],
+    *,
+    user_id: str,
+    claim_token: str,
+) -> bool:
+    """Append one resume turn only while its durable claim is still owned.
+
+    The transcript append and claim release are one SQLite transaction. A
+    stale/reclaimed token, a completed session, or an empty batch is a no-op.
+    """
+    if not claim_token or not messages:
+        return False
+    conn = get_db()
+    now = datetime.now().isoformat()
+    encoded = [
+        json.dumps(
+            {
+                "role": message.get("role", ""),
+                "content": message.get("content", ""),
+                "time": message.get("time") or now,
+            },
+            ensure_ascii=False,
+        )
+        for message in messages
+        if isinstance(message, dict)
+    ]
+    if not encoded:
+        return False
+    inserts = ", ".join("'$[#]', json(?)" for _ in encoded)
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    cursor = conn.execute(
+        "UPDATE sessions SET transcript = json_insert("
+        f"COALESCE(NULLIF(transcript, ''), '[]'), {inserts}), "
+        f"meta = json_remove({doc}, '$.resume_turn_claimed_at', "
+        "'$.resume_turn_claim_token'), updated_at = CURRENT_TIMESTAMP "
+        "WHERE session_id = ? AND user_id = ? AND mode = 'resume' "
+        "AND (review IS NULL OR review = '') "
+        f"AND json_extract({doc}, '$.resume_turn_claim_token') = ?",
+        [*encoded, session_id, user_id, claim_token],
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def release_resume_turn_claim(
+    session_id: str, *, user_id: str, claim_token: str,
+) -> bool:
+    """Release a resume turn claim only while this worker owns its token."""
+    if not claim_token:
+        return False
+    conn = get_db()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    cursor = conn.execute(
+        f"UPDATE sessions SET meta = json_remove({doc}, "
+        "'$.resume_turn_claimed_at', '$.resume_turn_claim_token'), "
+        "updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ? "
+        "AND mode = 'resume' "
+        f"AND json_extract({doc}, '$.resume_turn_claim_token') = ?",
+        (session_id, user_id, claim_token),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def try_claim_session_evaluation(session_id: str, *, user_id: str) -> str | None:
+    """Claim report generation so concurrent /end calls cannot race writes."""
+    conn = get_db()
+    now = datetime.now()
+    claim_token = uuid.uuid4().hex
+    stale_before = (now - timedelta(seconds=EVALUATION_CLAIM_TTL_SECONDS)).isoformat()
+    sync_stale_before = (now - timedelta(seconds=SYNC_CLAIM_TTL_SECONDS)).isoformat()
+    resume_turn_stale_before = (
+        now - timedelta(seconds=RESUME_TURN_CLAIM_TTL_SECONDS)
+    ).isoformat()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    # Fencing an expired sync token is part of the same UPDATE. A stale worker
+    # may still be unwinding in another thread, but its later step/terminal
+    # writes will fail the token predicate instead of mutating this generation.
+    evaluation_doc = (
+        f"json_remove({doc}, '$.sync_claimed_at', '$.sync_claim_token', "
+        "'$.resume_turn_claimed_at', '$.resume_turn_claim_token')"
+    )
+    cursor = conn.execute(
+        f"UPDATE sessions SET meta = json_set(json_set({evaluation_doc}, "
+        "'$.evaluation_claimed_at', ?), '$.evaluation_claim_token', ?), "
+        "updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ? "
+        f"AND (json_extract({doc}, '$.evaluation_claimed_at') IS NULL "
+        f"OR json_extract({doc}, '$.evaluation_claimed_at') < ?) "
+        f"AND (json_extract({doc}, '$.sync_claimed_at') IS NULL "
+        f"OR json_extract({doc}, '$.sync_claimed_at') < ?) "
+        f"AND (mode != 'resume' "
+        f"OR json_extract({doc}, '$.resume_turn_claim_token') IS NULL "
+        f"OR json_extract({doc}, '$.resume_turn_claimed_at') IS NULL "
+        f"OR json_extract({doc}, '$.resume_turn_claimed_at') < ?) "
+        # Drill/JD recovery must use the persisted scores until every prior
+        # side-effect step is complete. Resume can re-enter through its graph;
+        # its profile operation marker remains idempotent across retries.
+        f"AND (mode = 'resume' "
+        f"OR json_extract({doc}, '$.synced_at') IS NOT NULL "
+        f"OR (json_extract({doc}, '$.sync_pending_at') IS NULL AND NOT EXISTS ("
+        f"SELECT 1 FROM json_each(COALESCE(json_extract({doc}, '$.sync_steps'), '{{}}'))"
+        f")))",
+        (now.isoformat(), claim_token, session_id, user_id,
+         stale_before, sync_stale_before, resume_turn_stale_before),
+    )
+    conn.commit()
+    return claim_token if cursor.rowcount > 0 else None
+
+
+def release_session_evaluation_claim(session_id: str, *, user_id: str,
+                                     claim_token: str) -> bool:
+    """Release only the evaluation generation still owned by this worker."""
+    if not claim_token:
+        return False
+    conn = get_db()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    cursor = conn.execute(
+        f"UPDATE sessions SET meta = json_remove({doc}, "
+        "'$.evaluation_claimed_at', '$.evaluation_claim_token'), "
+        "updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ? "
+        f"AND json_extract({doc}, '$.evaluation_claim_token') = ?",
+        (session_id, user_id, claim_token),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
 
 
 def get_session(session_id: str, *, user_id: str) -> dict | None:
@@ -276,17 +862,12 @@ def get_reference_answer(session_id: str, question_id, *, user_id: str) -> str |
 
 
 def save_reference_answer(session_id: str, question_id, answer: str, *, user_id: str):
+    """Atomically cache one answer without clobbering concurrent questions."""
     conn = get_db()
-    row = conn.execute(
-        "SELECT reference_answers FROM sessions WHERE session_id = ? AND user_id = ?",
-        (session_id, user_id),
-    ).fetchone()
-    if not row:
-        return
-    answers = json.loads(row["reference_answers"] or "{}")
-    answers[str(question_id)] = answer
     conn.execute(
-        "UPDATE sessions SET reference_answers = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ?",
-        (json.dumps(answers, ensure_ascii=False), session_id, user_id),
+        "UPDATE sessions SET reference_answers = json_patch("
+        "COALESCE(NULLIF(reference_answers, ''), '{}'), json_object(?, ?)), "
+        "updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ?",
+        (str(question_id), answer or "", session_id, user_id),
     )
     conn.commit()

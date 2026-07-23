@@ -5,7 +5,9 @@ import base64
 import json
 import logging
 import re
+import threading
 import uuid
+import weakref
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +19,21 @@ from backend.context_assembler import resolve_input_budget, count_tokens, pack_m
 from backend.utils.sse_helpers import chunk_text as _chunk_text, chunk_reasoning as _chunk_reasoning, iter_chunks_with_idle
 
 logger = logging.getLogger("uvicorn")
+
+_turn_locks: "weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
+_turn_locks_guard = threading.Lock()
+
+
+def _get_turn_lock(user_id: str, session_id: str) -> asyncio.Lock:
+    key = (user_id, session_id)
+    with _turn_locks_guard:
+        lock = _turn_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _turn_locks[key] = lock
+        return lock
 
 QA_ARENA_SYSTEM = """# 角色设定
 
@@ -647,7 +664,7 @@ async def _stream_chat_answer(
         pass  # Non-critical, don't break the chat flow
 
 
-async def stream_qa_chat(
+async def _stream_qa_chat_unlocked(
     session_id: str, message: str, user_id: str, images: list[str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream SSE events for a new QA arena chat turn (saves the user message).
@@ -673,7 +690,18 @@ async def stream_qa_chat(
         yield event
 
 
-async def stream_qa_regenerate(
+async def stream_qa_chat(
+    session_id: str, message: str, user_id: str, images: list[str] | None = None,
+) -> AsyncGenerator[str, None]:
+    """Serialize a complete user/assistant turn for one persisted session."""
+    async with _get_turn_lock(user_id, session_id):
+        async for event in _stream_qa_chat_unlocked(
+            session_id, message, user_id, images,
+        ):
+            yield event
+
+
+async def _stream_qa_regenerate_unlocked(
     session_id: str, user_id: str
 ) -> AsyncGenerator[str, None]:
     """Re-answer the last user question, replacing any prior broken/partial/empty reply.
@@ -693,6 +721,15 @@ async def stream_qa_regenerate(
     history = messages[:-1]
     async for event in _stream_chat_answer(session_id, user_id, history, prompt, prompt_images):
         yield event
+
+
+async def stream_qa_regenerate(
+    session_id: str, user_id: str,
+) -> AsyncGenerator[str, None]:
+    """Regenerate atomically with respect to normal chat turns and retries."""
+    async with _get_turn_lock(user_id, session_id):
+        async for event in _stream_qa_regenerate_unlocked(session_id, user_id):
+            yield event
 
 
 # With a large model context (≥256k) almost every real session fits in ONE pass —

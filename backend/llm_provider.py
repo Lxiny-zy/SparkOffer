@@ -168,6 +168,16 @@ def _extract_status_code(exc: Exception) -> int | None:
     return None
 
 
+def _redact_channel_error(exc: Exception, channel: dict) -> str:
+    """Render an SDK error without leaking any configured channel key."""
+    text = str(exc)
+    secrets = [channel.get("api_key"), *(channel.get("keys") or [])]
+    for secret in secrets:
+        if secret:
+            text = text.replace(str(secret), "[redacted]")
+    return text
+
+
 def _is_fatal_config_error(exc: Exception) -> bool:
     """True for a deterministic 4xx (except 429) — don't fail over on these."""
     return _extract_status_code(exc) in _FATAL_STATUS_CODES
@@ -180,7 +190,11 @@ def _reraise_if_fatal(exc: Exception, channel: dict) -> None:
     channel's cooldown. Shared by all three ResilientChatModel retry loops.
     """
     if _is_fatal_config_error(exc):
-        logger.error("LLM channel '%s' fatal config error, not failing over: %s", channel["name"], exc)
+        _release_unreported_probe("llm", channel)
+        logger.error(
+            "LLM channel '%s' fatal config error, not failing over: %s",
+            channel["name"], _redact_channel_error(exc, channel),
+        )
         raise exc
 
 
@@ -198,6 +212,31 @@ def _is_transient_error(exc: Exception) -> bool:
             return True
         cur = cur.__cause__ or cur.__context__
     return False
+
+
+def _resolve_temperature(value, default: float = 0.7) -> float:
+    """Preserve an explicit zero while applying the fallback only to missing values."""
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
+def _release_unreported_probe(section: str, channel: dict) -> None:
+    """Release a channel probe selected only to construct a long-lived client.
+
+    LlamaIndex LLM/embedding singletons do not expose per-request outcome hooks,
+    so retaining a HALF_OPEN admission here would block the channel until the
+    probe timeout without ever reporting success or failure.
+    """
+    probe_token = channel.get("_probe_token")
+    channel_id = channel.get("id")
+    if probe_token is None or not channel_id:
+        return
+    try:
+        from backend.channel_manager import release_probe
+        release_probe(section, channel_id, probe_token)
+    except Exception:
+        logger.debug("Unable to release %s probe lease", section, exc_info=True)
 
 
 # ── ResilientChatModel — transparent failover wrapper ──
@@ -248,22 +287,33 @@ class ResilientChatModel:
         tried: set[str] = set()
         channel = get_channel("llm", tier=self._tier)
         while channel:
+            probe_token = channel.get("_probe_token")
             for attempt in range(_MAX_SAME_CHANNEL_ATTEMPTS):
                 try:
                     result = self._make_and_bind(channel).invoke(messages, **kwargs)
-                    report_success("llm", channel["id"])
+                    if probe_token is None:
+                        report_success("llm", channel["id"])
+                    else:
+                        report_success("llm", channel["id"], probe_token)
                     return result
                 except Exception as e:
                     _reraise_if_fatal(e, channel)
                     if attempt + 1 < _MAX_SAME_CHANNEL_ATTEMPTS and _is_transient_error(e):
                         logger.warning(
                             "LLM channel '%s' transient error (attempt %d/%d), retrying same channel: %s",
-                            channel["name"], attempt + 1, _MAX_SAME_CHANNEL_ATTEMPTS, e,
+                            channel["name"], attempt + 1, _MAX_SAME_CHANNEL_ATTEMPTS,
+                            _redact_channel_error(e, channel),
                         )
                         time.sleep(_SAME_CHANNEL_BACKOFF_SECONDS)
                         continue
-                    logger.warning("LLM channel '%s' invoke failed: %s", channel["name"], e)
-                    report_error("llm", channel["id"])
+                    logger.warning(
+                        "LLM channel '%s' invoke failed: %s",
+                        channel["name"], _redact_channel_error(e, channel),
+                    )
+                    if probe_token is None:
+                        report_error("llm", channel["id"])
+                    else:
+                        report_error("llm", channel["id"], probe_token)
                     tried.add(channel["id"])
                     break
             channel = get_next_channel("llm", tried, tier=self._tier)
@@ -274,22 +324,33 @@ class ResilientChatModel:
         tried: set[str] = set()
         channel = get_channel("llm", tier=self._tier)
         while channel:
+            probe_token = channel.get("_probe_token")
             for attempt in range(_MAX_SAME_CHANNEL_ATTEMPTS):
                 try:
                     result = await self._make_and_bind(channel).ainvoke(messages, **kwargs)
-                    report_success("llm", channel["id"])
+                    if probe_token is None:
+                        report_success("llm", channel["id"])
+                    else:
+                        report_success("llm", channel["id"], probe_token)
                     return result
                 except Exception as e:
                     _reraise_if_fatal(e, channel)
                     if attempt + 1 < _MAX_SAME_CHANNEL_ATTEMPTS and _is_transient_error(e):
                         logger.warning(
                             "LLM channel '%s' transient error (attempt %d/%d), retrying same channel: %s",
-                            channel["name"], attempt + 1, _MAX_SAME_CHANNEL_ATTEMPTS, e,
+                            channel["name"], attempt + 1, _MAX_SAME_CHANNEL_ATTEMPTS,
+                            _redact_channel_error(e, channel),
                         )
                         await asyncio.sleep(_SAME_CHANNEL_BACKOFF_SECONDS)
                         continue
-                    logger.warning("LLM channel '%s' ainvoke failed: %s", channel["name"], e)
-                    report_error("llm", channel["id"])
+                    logger.warning(
+                        "LLM channel '%s' ainvoke failed: %s",
+                        channel["name"], _redact_channel_error(e, channel),
+                    )
+                    if probe_token is None:
+                        report_error("llm", channel["id"])
+                    else:
+                        report_error("llm", channel["id"], probe_token)
                     tried.add(channel["id"])
                     break
             channel = get_next_channel("llm", tried, tier=self._tier)
@@ -300,6 +361,7 @@ class ResilientChatModel:
         tried: set[str] = set()
         channel = get_channel("llm", tier=self._tier)
         while channel:
+            probe_token = channel.get("_probe_token")
             # Phase 1 — fetch the first chunk. Safe to fail over: nothing has been
             # yielded to the client yet.
             try:
@@ -308,12 +370,21 @@ class ResilientChatModel:
                 first_chunk = await aiter.__anext__()
             except StopAsyncIteration:
                 # Empty stream — treat as a successful (empty) response.
-                report_success("llm", channel["id"])
+                if probe_token is None:
+                    report_success("llm", channel["id"])
+                else:
+                    report_success("llm", channel["id"], probe_token)
                 return
             except Exception as e:
                 _reraise_if_fatal(e, channel)
-                logger.warning("LLM channel '%s' astream failed before first chunk: %s", channel["name"], e)
-                report_error("llm", channel["id"])
+                logger.warning(
+                    "LLM channel '%s' astream failed before first chunk: %s",
+                    channel["name"], _redact_channel_error(e, channel),
+                )
+                if probe_token is None:
+                    report_error("llm", channel["id"])
+                else:
+                    report_error("llm", channel["id"], probe_token)
                 tried.add(channel["id"])
                 channel = get_next_channel("llm", tried, tier=self._tier)
                 continue
@@ -321,7 +392,10 @@ class ResilientChatModel:
             # fail over: replaying the prompt on another channel would concatenate a
             # fresh full answer onto the partial one already sent. Let any mid-stream
             # error propagate to the caller instead.
-            report_success("llm", channel["id"])
+            if probe_token is None:
+                report_success("llm", channel["id"])
+            else:
+                report_success("llm", channel["id"], probe_token)
             yield first_chunk
             async for chunk in aiter:
                 yield chunk
@@ -357,7 +431,7 @@ def get_langchain_llm(tier: str | None = None, reasoning_effort: str | None = No
         model=get_effective("llm", "model"),
         api_key=get_effective("llm", "api_key"),
         base_url=get_effective("llm", "api_base"),
-        temperature=float(get_effective("llm", "temperature") or 0.7),
+        temperature=_resolve_temperature(get_effective("llm", "temperature")),
         max_tokens=_default_max_output(),
         http_client=sync_c,
         http_async_client=async_c,
@@ -375,6 +449,7 @@ def get_llama_llm():
         if has_channels("llm"):
             ch = get_channel("llm")
             if ch:
+                _release_unreported_probe("llm", ch)
                 add_kw: dict = {"extra_headers": _CUSTOM_HEADERS}
                 effort = _resolve_reasoning_effort(ch.get("reasoning_effort"))
                 if effort:
@@ -397,7 +472,7 @@ def get_llama_llm():
             model=get_effective("llm", "model"),
             api_key=get_effective("llm", "api_key"),
             api_base=get_effective("llm", "api_base"),
-            temperature=float(get_effective("llm", "temperature") or 0.7),
+            temperature=_resolve_temperature(get_effective("llm", "temperature")),
             max_tokens=_default_max_output(),
             timeout=240.0,
             is_chat_model=True,
@@ -459,6 +534,25 @@ def _embedding_api_kwargs(for_index: bool, proxy: str = "") -> dict:
     }
 
 
+def _create_local_embedding(local_path: str = "", local_model: str = ""):
+    try:
+        from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+    except ImportError as exc:
+        raise RuntimeError(
+            "Local embeddings require optional dependencies. "
+            "Install `pip install -r requirements.local-embedding.txt` "
+            "and a torch build that matches your environment."
+        ) from exc
+
+    target = local_path or local_model
+    if not target:
+        raise RuntimeError(
+            "LOCAL_EMBEDDING_MODEL or LOCAL_EMBEDDING_PATH is required "
+            "when EMBEDDING_BACKEND=local"
+        )
+    return HuggingFaceEmbedding(model_name=str(target))
+
+
 def _create_embedding(for_index: bool = False):
     """Create a fresh embedding instance — channel-aware.
 
@@ -471,7 +565,8 @@ def _create_embedding(for_index: bool = False):
     if has_channels("embedding"):
         ch = get_channel("embedding")
         if ch:
-            backend = ch.get("backend", "api")
+            _release_unreported_probe("embedding", ch)
+            backend = str(ch.get("backend") or "api").strip().lower()
             if backend == "api":
                 from llama_index.embeddings.openai import OpenAIEmbedding
                 kwargs = {
@@ -482,6 +577,10 @@ def _create_embedding(for_index: bool = False):
                 if ch.get("api_base"):
                     kwargs["api_base"] = ch["api_base"]
                 return OpenAIEmbedding(**kwargs)
+            if backend == "local":
+                return _create_local_embedding(
+                    ch.get("local_path", ""), ch.get("local_model", ""),
+                )
 
     backend = get_effective("embedding", "backend") or ""
     api_base = get_effective("embedding", "api_base")
@@ -501,29 +600,20 @@ def _create_embedding(for_index: bool = False):
             kwargs["api_base"] = api_base
         return OpenAIEmbedding(**kwargs)
     else:
-        try:
-            from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-        except ImportError as exc:
-            raise RuntimeError(
-                "Local embeddings require optional dependencies. "
-                "Install `pip install -r requirements.local-embedding.txt` "
-                "and a torch build that matches your environment."
-            ) from exc
-
         local_path = get_effective("embedding", "local_path")
         local_model = get_effective("embedding", "local_model")
 
         if local_path:
-            return HuggingFaceEmbedding(model_name=str(local_path))
+            return _create_local_embedding(local_path=local_path)
         elif local_model:
-            return HuggingFaceEmbedding(model_name=local_model)
+            return _create_local_embedding(local_model=local_model)
         else:
             model_path = settings.local_embedding_model_path()
             model_name = settings.local_embedding_model_name()
             if model_path is not None:
-                return HuggingFaceEmbedding(model_name=str(model_path))
+                return _create_local_embedding(local_path=str(model_path))
             elif model_name:
-                return HuggingFaceEmbedding(model_name=model_name)
+                return _create_local_embedding(local_model=model_name)
             else:
                 raise RuntimeError(
                     "LOCAL_EMBEDDING_MODEL or LOCAL_EMBEDDING_PATH is required "

@@ -11,7 +11,6 @@ fall back to keyword match only and log a warning.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 

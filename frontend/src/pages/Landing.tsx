@@ -110,10 +110,12 @@ function usePrefersReducedMotion(): boolean {
 
 function useInView<T extends HTMLElement>(threshold = 0.25): [RefObject<T | null>, boolean] {
   const ref = useRef<T | null>(null);
-  const [inView, setInView] = useState(false);
+  const [inView, setInView] = useState(
+    () => typeof window === "undefined" || !("IntersectionObserver" in window),
+  );
   useEffect(() => {
     const el = ref.current;
-    if (!el || !("IntersectionObserver" in window)) { setInView(true); return; }
+    if (!el || !("IntersectionObserver" in window)) return;
     const ob = new IntersectionObserver(([e]) => setInView(e.isIntersecting), { threshold });
     ob.observe(el);
     return () => ob.disconnect();

@@ -2,25 +2,16 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { ChevronRight, TrendingUp, Download, BarChart3, Target, Brain } from "lucide-react";
 import { getProfile, exportProfile } from "../api/interview";
-import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import ScoreTrendChart from "@/components/charts/ScoreTrendChart";
 import TopicRadarChart from "@/components/charts/TopicRadarChart";
-import SessionFrequencyChart from "@/components/charts/SessionFrequencyChart";
 import DimensionTrendChart from "@/components/charts/DimensionTrendChart";
 import LearningHeatmap from "@/components/charts/LearningHeatmap";
 import KnowledgeTreemap from "@/components/charts/KnowledgeTreemap";
 import type { Profile as ProfileType } from "../types/api";
-
-const MODE_META: Record<string, { color: string; label: string }> = {
-  resume: { color: "var(--ai-glow)", label: "简历面试" },
-  topic_drill: { color: "var(--green)", label: "专项训练" },
-  jd_prep: { color: "#60a5fa", label: "JD 备面" },
-  recording: { color: "#22d3ee", label: "录音复盘" },
-};
 
 interface CollapsibleListProps {
   items: any[];

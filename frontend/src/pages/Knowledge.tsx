@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { getTopicIcon, ICON_OPTIONS } from "../utils/topicIcons";
 import {
   getTopics, getCoreKnowledge, updateCoreKnowledge, createCoreKnowledge,
+  getCoreKnowledgeFile,
   deleteCoreKnowledge, getHighFreq, updateHighFreq, createTopic, deleteTopic, generateKnowledge,
   getKnowledgeStats, rebuildTopicIndex, rebuildAllIndices, getRebuildStatus,
   uploadCoreKnowledgeFiles, getChunkCounts,
@@ -16,14 +17,27 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
 import useDraftPersist, { readDraft } from "../hooks/useDraftPersist";
 import type { TopicInfo } from "../types/api";
 
 interface CoreFile {
   filename: string;
-  content: string;
+  content?: string;
   mtime?: number;
+  size?: number;
+  version?: string;
+  content_loaded?: boolean;
+}
+
+function hasOwnContent(contents: Record<string, string>, filename: string): boolean {
+  return Object.prototype.hasOwnProperty.call(contents, filename);
+}
+
+function formatFileSize(bytes: number | undefined): string {
+  if (bytes == null || bytes < 0) return "正文未加载";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function formatRelativeTime(ms: number | undefined): string {
@@ -52,13 +66,21 @@ export default function Knowledge() {
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
 
   const [coreFiles, setCoreFiles] = useState<CoreFile[]>([]);
+  const [coreLoading, setCoreLoading] = useState<boolean>(false);
+  const [coreLoadError, setCoreLoadError] = useState<string | null>(null);
+  const [coreLoadedTopic, setCoreLoadedTopic] = useState<string | null>(null);
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
   const [editContent, setEditContent] = useState<Record<string, string>>({});
   const [coreSaving, setCoreSaving] = useState<string | null>(null);
+  const [coreLoadingFile, setCoreLoadingFile] = useState<string | null>(null);
 
   const [highFreq, setHighFreq] = useState<string>("");
   const [highFreqDraft, setHighFreqDraft] = useState<string>("");
   const [highFreqMtime, setHighFreqMtime] = useState<number>(0);
+  const [highFreqVersion, setHighFreqVersion] = useState<string | undefined>(undefined);
+  const [highFreqLoading, setHighFreqLoading] = useState<boolean>(false);
+  const [highFreqLoadError, setHighFreqLoadError] = useState<string | null>(null);
+  const [highFreqLoadedTopic, setHighFreqLoadedTopic] = useState<string | null>(null);
   const [hfSaving, setHfSaving] = useState<boolean>(false);
 
   const [stats, setStats] = useState<KnowledgeStats | null>(null);
@@ -81,6 +103,12 @@ export default function Knowledge() {
   const [submitting, setSubmitting] = useState<boolean>(false);
   const pollRef = useRef<number | null>(null);
   const lastNotifiedRef = useRef<Record<string, string>>({});
+  const rebuildStatusRequestRef = useRef(0);
+  const topicGenerationRef = useRef(0);
+  const coreFileRequestRef = useRef(0);
+  const coreListRequestRef = useRef(0);
+  const highFreqRequestRef = useRef(0);
+  const selectedRef = useRef<string | null>(null);
 
   const refreshTopics = useCallback(async () => {
     const t = await getTopics();
@@ -92,6 +120,8 @@ export default function Knowledge() {
     try { setChunkCounts(await getChunkCounts()); } catch { /* best-effort: leave prior counts */ }
   }, []);
 
+  selectedRef.current = selected;
+
   useEffect(() => {
     refreshTopics().then((t: Record<string, TopicInfo>) => {
       const keys = Object.keys(t);
@@ -100,13 +130,29 @@ export default function Knowledge() {
     loadChunkCounts();
   }, [refreshTopics, loadChunkCounts]);
 
-  const loadCore = useCallback(async (topic: string) => {
+  const loadCore = useCallback(async (topic: string, generation = topicGenerationRef.current) => {
+    if (generation !== topicGenerationRef.current || selectedRef.current !== topic) return;
+    const requestId = ++coreListRequestRef.current;
+    setCoreLoading(true);
+    setCoreLoadError(null);
     try {
-      const files: CoreFile[] = await getCoreKnowledge(topic);
+      const payload: any = await getCoreKnowledge(topic);
+      const rawFiles: CoreFile[] = Array.isArray(payload) ? payload : (payload?.files || []);
+      const files = rawFiles.map((file) => {
+        const contentLoaded = file.content_loaded ?? file.content !== undefined;
+        return {
+          ...file,
+          content: contentLoaded ? (file.content ?? "") : undefined,
+          content_loaded: contentLoaded,
+        };
+      });
+      if (requestId !== coreListRequestRef.current || generation !== topicGenerationRef.current || selectedRef.current !== topic) return;
       setCoreFiles(files);
       setExpandedFile(null);
       const buf: Record<string, string> = {};
-      files.forEach((f) => { buf[f.filename] = f.content; });
+      files.forEach((f) => {
+        if (f.content !== undefined) buf[f.filename] = f.content;
+      });
       // Reconcile with an unsaved draft (survives refresh / accidental close).
       const draft = readDraft<Record<string, string>>(`knowledge:core:${topic}`);
       if (draft) {
@@ -115,36 +161,131 @@ export default function Knowledge() {
         });
       }
       setEditContent(buf);
-    } catch { setCoreFiles([]); }
+      setCoreLoadedTopic(topic);
+      setCoreLoadError(null);
+    } catch (error: any) {
+      if (requestId === coreListRequestRef.current && generation === topicGenerationRef.current && selectedRef.current === topic) {
+        setCoreLoadError(error?.message || "无法加载知识文件");
+      }
+    } finally {
+      if (requestId === coreListRequestRef.current) setCoreLoading(false);
+    }
   }, []);
 
-  const loadHighFreq = useCallback(async (topic: string) => {
+  const loadHighFreq = useCallback(async (topic: string, generation = topicGenerationRef.current) => {
+    if (generation !== topicGenerationRef.current || selectedRef.current !== topic) return;
+    const requestId = ++highFreqRequestRef.current;
+    setHighFreqLoading(true);
+    setHighFreqLoadError(null);
     try {
       const data = await getHighFreq(topic);
+      if (requestId !== highFreqRequestRef.current || generation !== topicGenerationRef.current || selectedRef.current !== topic) return;
       setHighFreq(data.content || "");
       const draft = readDraft<string>(`knowledge:hf:${topic}`);
       setHighFreqDraft(draft ?? (data.content || ""));
       setHighFreqMtime(data.mtime || 0);
-    } catch { setHighFreq(""); setHighFreqDraft(""); setHighFreqMtime(0); }
+      setHighFreqVersion(data.version);
+      setHighFreqLoadedTopic(topic);
+      setHighFreqLoadError(null);
+    } catch (error: any) {
+      if (requestId === highFreqRequestRef.current && generation === topicGenerationRef.current && selectedRef.current === topic) {
+        setHighFreqLoadError(error?.message || "无法加载高频题库");
+      }
+    } finally {
+      if (requestId === highFreqRequestRef.current) setHighFreqLoading(false);
+    }
   }, []);
 
-  const loadStats = useCallback(async (topic: string) => {
+  const loadStats = useCallback(async (topic: string, generation = topicGenerationRef.current) => {
     try {
       const s = await getKnowledgeStats(topic);
+      if (generation !== topicGenerationRef.current || selectedRef.current !== topic) return;
       setStats(s);
-    } catch { setStats(null); }
+    } catch {
+      if (generation === topicGenerationRef.current && selectedRef.current === topic) setStats(null);
+    }
   }, []);
 
   useEffect(() => {
     if (!selected) return;
-    loadCore(selected);
-    loadHighFreq(selected);
-    loadStats(selected);
+    const generation = ++topicGenerationRef.current;
+    coreFileRequestRef.current += 1;
+    coreListRequestRef.current += 1;
+    highFreqRequestRef.current += 1;
+    selectedRef.current = selected;
+    setCoreFiles([]);
+    setEditContent({});
+    setExpandedFile(null);
+    setCoreLoadingFile(null);
+    setCoreLoading(false);
+    setCoreLoadError(null);
+    setCoreLoadedTopic(null);
+    setHighFreq("");
+    setHighFreqDraft("");
+    setHighFreqMtime(0);
+    setHighFreqVersion(undefined);
+    setHighFreqLoading(false);
+    setHighFreqLoadError(null);
+    setHighFreqLoadedTopic(null);
+    setStats(null);
+    loadCore(selected, generation);
+    loadHighFreq(selected, generation);
+    loadStats(selected, generation);
   }, [selected, loadCore, loadHighFreq, loadStats]);
+
+  const loadCoreFile = useCallback(async (topic: string, filename: string, generation: number) => {
+    if (generation !== topicGenerationRef.current || selectedRef.current !== topic) return false;
+    const requestId = ++coreFileRequestRef.current;
+    setCoreLoadingFile(filename);
+    try {
+      const data = await getCoreKnowledgeFile(topic, filename);
+      if (
+        requestId !== coreFileRequestRef.current ||
+        generation !== topicGenerationRef.current ||
+        selectedRef.current !== topic
+      ) return false;
+
+      const content = typeof data?.content === "string" ? data.content : "";
+      const draft = readDraft<Record<string, string>>(`knowledge:core:${topic}`);
+      setCoreFiles((prev) => prev.map((file) => file.filename === filename ? {
+        ...file,
+        content,
+        content_loaded: true,
+        mtime: data?.mtime ?? file.mtime,
+        size: data?.size ?? file.size,
+        version: data?.version ?? file.version,
+      } : file));
+      setEditContent((prev) => {
+        if (hasOwnContent(prev, filename)) return prev;
+        const draftContent = draft?.[filename];
+        return { ...prev, [filename]: typeof draftContent === "string" ? draftContent : content };
+      });
+      return true;
+    } catch (error: any) {
+      if (generation === topicGenerationRef.current && selectedRef.current === topic) {
+        toast.error(`加载 ${filename} 失败: ${error.message}`);
+      }
+      return false;
+    } finally {
+      if (requestId === coreFileRequestRef.current) setCoreLoadingFile(null);
+    }
+  }, []);
+
+  const handleToggleCoreFile = (file: CoreFile) => {
+    if (expandedFile === file.filename) {
+      setExpandedFile(null);
+      return;
+    }
+    setExpandedFile(file.filename);
+    if (file.content === undefined && selected) {
+      void loadCoreFile(selected, file.filename, topicGenerationRef.current);
+    }
+  };
 
   const dirtyCoreDraft = useMemo(() => {
     const dirty: Record<string, string> = {};
     coreFiles.forEach((f) => {
+      if (f.content === undefined) return;
       const current = editContent[f.filename] ?? f.content;
       if (current !== f.content) dirty[f.filename] = current;
     });
@@ -168,49 +309,73 @@ export default function Knowledge() {
   });
 
   const handleSaveCore = async (filename: string) => {
+    const topic = selected;
+    const generation = topicGenerationRef.current;
+    const content = editContent[filename];
+    if (!topic || content === undefined) {
+      toast.error("文件内容尚未加载");
+      return;
+    }
     setCoreSaving(filename);
     try {
-      await updateCoreKnowledge(selected!, filename, editContent[filename] || "");
-      const now = Date.now();
-      const savedContent = editContent[filename] || "";
-      setCoreFiles((prev) => prev.map((f) => f.filename === filename ? { ...f, content: savedContent, mtime: now } : f));
-      setEditContent((prev) => ({ ...prev, [filename]: savedContent }));
-      loadStats(selected!);
+      const currentFile = coreFiles.find((file) => file.filename === filename);
+      const result = await updateCoreKnowledge(topic, filename, content, currentFile?.version);
+      if (selectedRef.current !== topic || generation !== topicGenerationRef.current) return;
+      setCoreFiles((prev) => prev.map((f) => f.filename === filename ? {
+        ...f,
+        content,
+        content_loaded: true,
+        version: result.version,
+        mtime: result.mtime,
+        size: result.size,
+      } : f));
+      loadStats(topic, generation);
       toast.success(`${filename} 已保存`);
     } catch (e: any) { toast.error("保存失败: " + e.message); }
-    setTimeout(() => setCoreSaving(null), 1500);
+    finally { setCoreSaving(null); }
   };
 
   const handleSaveHighFreq = async () => {
+    const topic = selected;
+    const generation = topicGenerationRef.current;
+    if (!topic || highFreqLoading || highFreqLoadError) return;
     setHfSaving(true);
     try {
-      await updateHighFreq(selected!, highFreqDraft);
-      setHighFreq(highFreqDraft);
-      setHighFreqMtime(Date.now());
-      loadStats(selected!);
+      const content = highFreqDraft;
+      const result = await updateHighFreq(topic, content, highFreqVersion);
+      if (selectedRef.current !== topic || generation !== topicGenerationRef.current) return;
+      setHighFreq(content);
+      setHighFreqMtime(result.mtime);
+      setHighFreqVersion(result.version);
+      loadStats(topic, generation);
       clearHfDraft(); // Persisted to server — clear draft
       toast.success("高频题库已保存");
     } catch (e: any) { toast.error("保存失败: " + e.message); }
-    setTimeout(() => setHfSaving(false), 1500);
+    finally { setHfSaving(false); }
   };
 
   const handleCreateFile = async () => {
+    if (!selected) return;
+    const topic = selected;
+    const generation = topicGenerationRef.current;
     const name = newFileName.trim();
     if (!name) return;
     const ALLOWED_EXTS = [".md", ".txt", ".py"];
-    const hasValidExt = ALLOWED_EXTS.some((ext) => name.endsWith(ext));
+    const hasValidExt = ALLOWED_EXTS.some((ext) => name.toLowerCase().endsWith(ext));
     const fname = hasValidExt ? name : name + ".md";
     try {
-      await createCoreKnowledge(selected!, fname, "");
+      await createCoreKnowledge(topic, fname, "");
       setNewFileName("");
       setShowNewFile(false);
-      loadCore(selected!);
+      loadCore(topic, generation);
       toast.success(`已创建 ${fname}`);
     } catch (e: any) { toast.error("创建失败: " + e.message); }
   };
 
   const handleUploadFiles = async (fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return;
+    if (!selected || !fileList || fileList.length === 0) return;
+    const topic = selected;
+    const generation = topicGenerationRef.current;
     const all = Array.from(fileList);
     const mdFiles = all.filter((f) => {
       const isMd = f.name.toLowerCase().endsWith(".md");
@@ -228,9 +393,9 @@ export default function Knowledge() {
     }
     setUploading(true);
     try {
-      const result = await uploadCoreKnowledgeFiles(selected!, validFiles);
-      await loadCore(selected!);
-      loadStats(selected!);
+      const result = await uploadCoreKnowledgeFiles(topic, validFiles);
+      await loadCore(topic, generation);
+      loadStats(topic, generation);
       toast.success(`已上传 ${result.saved.length} 个文件`);
       const extras: string[] = [];
       if (result.skipped?.length) extras.push(`${result.skipped.length} 个已跳过`);
@@ -244,30 +409,50 @@ export default function Knowledge() {
     }
   };
 
-  const handleDeleteFile = async (filename: string) => {
+  const handleDeleteFile = async (file: CoreFile) => {
+    const topic = selected;
+    if (!topic) return;
+    const { filename, version } = file;
     if (!confirm(`确定删除「${filename}」？此操作不可撤销。`)) return;
     try {
-      await deleteCoreKnowledge(selected!, filename);
+      await deleteCoreKnowledge(topic, filename, version);
+      if (selectedRef.current !== topic) return;
       setCoreFiles((prev) => prev.filter((f) => f.filename !== filename));
-      if (expandedFile === filename) setExpandedFile(null);
+      setEditContent((prev) => {
+        const next = { ...prev };
+        delete next[filename];
+        return next;
+      });
+      setExpandedFile((current) => current === filename ? null : current);
+      void loadStats(topic);
       toast.success("文件已删除");
     } catch (e: any) { toast.error("删除失败: " + e.message); }
   };
 
   const handleGenerate = async () => {
+    if (!selected) return;
+    const topic = selected;
     setGenerating(true);
     setGenProgress("");
+    const generation = topicGenerationRef.current;
     try {
-      await generateKnowledge(selected!, { onProgress: (msg) => setGenProgress(msg) });
-      await loadCore(selected!);
+      await generateKnowledge(topic, {
+        onProgress: (msg) => {
+          if (selectedRef.current === topic && generation === topicGenerationRef.current) setGenProgress(msg);
+        },
+      });
+      await loadCore(topic, generation);
+      if (selectedRef.current !== topic || generation !== topicGenerationRef.current) return;
       setExpandedFile("README.md");
+      await loadCoreFile(topic, "README.md", generation);
       toast.success("AI 已生成基础内容");
     } catch (e: any) { toast.error("生成失败: " + e.message); }
-    setGenerating(false);
+    finally { setGenerating(false); }
   };
 
-  const coreIsEmpty = coreFiles.length === 0 ||
-    (coreFiles.length === 1 && coreFiles[0].filename === "README.md" && (coreFiles[0].content?.length || 0) <= 20);
+  const coreIsEmpty = coreLoadedTopic === selected && !coreLoading && !coreLoadError && (coreFiles.length === 0 ||
+    (coreFiles.length === 1 && coreFiles[0].filename === "README.md" &&
+      coreFiles[0].content !== undefined && coreFiles[0].content.length <= 20));
 
   // ── Dirty tracking for unsaved-change protection ──
   const coreDirty = Object.keys(dirtyCoreDraft).length > 0;
@@ -298,8 +483,10 @@ export default function Knowledge() {
   // Polling stops when no task is still pending/running, so idle pages don't hit the API.
 
   const refreshStatus = useCallback(async () => {
+    const requestId = ++rebuildStatusRequestRef.current;
     try {
       const { tasks } = await getRebuildStatus();
+      if (requestId !== rebuildStatusRequestRef.current) return;
       setRebuildTasks(tasks);
 
       // Toast on state transitions we haven't notified about yet.
@@ -316,8 +503,9 @@ export default function Knowledge() {
           lastNotifiedRef.current[t.task_id] = t.state;
           if (t.state === "completed") {
             toast.success(`${t.label} 完成（${t.file_count} 文件）`);
-            if (selected && t.topic === selected) loadStats(selected);
-            loadChunkCounts();
+            const currentTopic = selectedRef.current;
+            if (currentTopic && t.topic === currentTopic) void loadStats(currentTopic);
+            void loadChunkCounts();
           } else {
             toast.error(`${t.label} 失败：${t.error || "未知错误"}`);
           }
@@ -340,19 +528,21 @@ export default function Knowledge() {
     } catch {
       // network glitch — keep the timer, next tick will retry
     }
-  }, [selected, loadStats]);
+  }, [loadChunkCounts, loadStats]);
 
   const startPolling = useCallback(() => {
     if (pollRef.current) return;
-    refreshStatus();  // immediate first poll
-    pollRef.current = window.setInterval(refreshStatus, 3000);
+    void refreshStatus();  // immediate first poll
+    pollRef.current = window.setInterval(() => { void refreshStatus(); }, 3000);
   }, [refreshStatus]);
 
   // On mount: pull current status — if a rebuild was already in progress, the UI resumes
   // and starts polling. refreshStatus does the fetch; we kick off polling here if needed.
   useEffect(() => {
     (async () => {
+      const requestId = ++rebuildStatusRequestRef.current;
       const { tasks } = await getRebuildStatus().catch(() => ({ tasks: [] as RebuildTaskStatus[] }));
+      if (requestId !== rebuildStatusRequestRef.current) return;
       // Seed the notified ref so we don't fire a toast for tasks that completed
       // before this page was opened.
       for (const t of tasks) lastNotifiedRef.current[t.task_id] = t.state;
@@ -360,6 +550,7 @@ export default function Knowledge() {
       if (tasks.some(t => t.state === "pending" || t.state === "running")) startPolling();
     })();
     return () => {
+      rebuildStatusRequestRef.current += 1;
       if (pollRef.current) {
         window.clearInterval(pollRef.current);
         pollRef.current = null;
@@ -408,7 +599,7 @@ export default function Knowledge() {
       await deleteTopic(key);
       const t = await refreshTopics();
       const keys = Object.keys(t);
-      if (selected === key) setSelected(keys.length > 0 ? keys[0] : null);
+      if (selectedRef.current === key) setSelected(keys.length > 0 ? keys[0] : null);
       toast.success("领域已删除");
     } catch (e: any) { toast.error("删除失败: " + e.message); }
   };
@@ -770,18 +961,32 @@ export default function Knowledge() {
                 )}
               </div>
 
-              {coreFiles.length === 0 ? (
+              {(coreLoading || coreLoadedTopic !== selected) && !coreLoadError && coreFiles.length === 0 ? (
+                <div className="text-center py-15 text-dim text-sm flex items-center justify-center gap-2">
+                  <Loader2 size={16} className="animate-spin text-primary" /> 正在加载知识文件...
+                </div>
+              ) : coreLoadError && coreFiles.length === 0 ? (
+                <div className="text-center py-15 text-dim text-sm flex flex-col items-center justify-center gap-3">
+                  <span>知识文件加载失败：{coreLoadError}</span>
+                  <Button variant="outline" size="sm" onClick={() => selected && void loadCore(selected, topicGenerationRef.current)}>
+                    <RefreshCw size={14} /> 重试
+                  </Button>
+                </div>
+              ) : coreFiles.length === 0 ? (
                 <div className="text-center py-15 text-dim text-sm">该领域暂无知识文件</div>
               ) : (
                 <div className="flex flex-col gap-3 stagger-children">
                   {coreFiles.map((f) => {
-                    const fileDirty = (editContent[f.filename] ?? f.content) !== f.content;
+                    const fileDirty = f.content !== undefined &&
+                      hasOwnContent(editContent, f.filename) &&
+                      editContent[f.filename] !== f.content;
                     const isAutoDeposit = f.filename === "自动沉淀.md";
+                    const isLoading = coreLoadingFile === f.filename;
                     return (
                     <Card key={f.filename} className={cn("overflow-hidden transition-all duration-300", fileDirty && "ring-1 ring-orange/30", isAutoDeposit && "border-primary/30")}>
                       <div
                         className="flex justify-between items-center px-4 py-3 cursor-pointer text-sm font-medium hover:bg-secondary/50 transition-colors"
-                        onClick={() => setExpandedFile(expandedFile === f.filename ? null : f.filename)}
+                        onClick={() => handleToggleCoreFile(f)}
                       >
                         <div className="flex items-center gap-2 min-w-0 flex-1">
                           <span className="truncate">{f.filename}</span>
@@ -802,37 +1007,60 @@ export default function Knowledge() {
                               {formatRelativeTime(f.mtime)}
                             </span>
                           ) : null}
-                          <span className="text-xs text-dim flex items-center gap-1">{expandedFile === f.filename ? <ChevronDown size={14} /> : <ChevronRight size={14} />} {(f.content?.length || 0)} 字</span>
+                          <span className="text-xs text-dim flex items-center gap-1">
+                            {isLoading ? <Loader2 size={14} className="animate-spin" /> : expandedFile === f.filename ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            {f.content === undefined ? formatFileSize(f.size) : `${f.content.length} 字`}
+                          </span>
                           <button
                             className="text-dim cursor-pointer p-1 rounded opacity-50 hover:text-red hover:opacity-100 transition-all"
                             title="删除文件"
-                            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDeleteFile(f.filename); }}
+                            onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleDeleteFile(f); }}
                           ><X size={14} /></button>
                         </div>
                       </div>
                       {expandedFile === f.filename && (
                         <div className="border-t border-border p-4 animate-fade-in">
-                          <textarea
-                            className="w-full min-h-[300px] p-3 rounded-lg border border-border bg-bg text-text text-[13px] font-mono leading-relaxed resize-y focus:outline-none focus:border-primary transition-colors"
-                            value={editContent[f.filename] ?? f.content}
-                            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditContent((prev) => ({ ...prev, [f.filename]: e.target.value }))}
-                          />
-                          <div className="flex gap-2 mt-3 justify-end items-center">
-                            {coreSaving === f.filename && <span className="text-xs text-green self-center mr-3 animate-fade-in">✓ 已保存</span>}
-                            {fileDirty && coreSaving !== f.filename && (
-                              <Button variant="ghost" size="sm" onClick={() => setEditContent((prev) => ({ ...prev, [f.filename]: f.content }))}>
-                                撤销修改
-                              </Button>
-                            )}
-                            <Button
-                              variant={fileDirty ? "default" : "outline"}
-                              size="sm"
-                              onClick={() => handleSaveCore(f.filename)}
-                              disabled={!fileDirty}
-                            >
-                              保存
-                            </Button>
-                          </div>
+                          {f.content === undefined ? (
+                            <div className="min-h-[180px] flex flex-col items-center justify-center gap-3 text-sm text-dim">
+                              {isLoading ? (
+                                <><Loader2 size={20} className="animate-spin text-primary" /><span>正在加载正文...</span></>
+                              ) : (
+                                <>
+                                  <span>正文未加载</span>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => selected && void loadCoreFile(selected, f.filename, topicGenerationRef.current)}
+                                  >
+                                    <RefreshCw size={14} /> 重试
+                                  </Button>
+                                </>
+                              )}
+                            </div>
+                          ) : (
+                            <>
+                              <textarea
+                                className="w-full min-h-[300px] p-3 rounded-lg border border-border bg-bg text-text text-[13px] font-mono leading-relaxed resize-y focus:outline-none focus:border-primary transition-colors"
+                                value={editContent[f.filename] ?? f.content}
+                                onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditContent((prev) => ({ ...prev, [f.filename]: e.target.value }))}
+                              />
+                              <div className="flex gap-2 mt-3 justify-end items-center">
+                                {fileDirty && coreSaving !== f.filename && (
+                                  <Button variant="ghost" size="sm" onClick={() => setEditContent((prev) => ({ ...prev, [f.filename]: f.content! }))}>
+                                    撤销修改
+                                  </Button>
+                                )}
+                                <Button
+                                  variant={fileDirty ? "default" : "outline"}
+                                  size="sm"
+                                  onClick={() => handleSaveCore(f.filename)}
+                                  disabled={!fileDirty || coreSaving !== null}
+                                >
+                                  {coreSaving === f.filename ? <><Loader2 size={14} className="animate-spin" /> 保存中</> : "保存"}
+                                </Button>
+                              </div>
+                            </>
+                          )}
                         </div>
                       )}
                     </Card>
@@ -851,19 +1079,36 @@ export default function Knowledge() {
                   </span>
                 )}
               </div>
-              <textarea
-                className="w-full min-h-[300px] md:min-h-[500px] p-3 rounded-xl border border-border bg-bg text-text text-[13px] font-mono leading-relaxed resize-y focus:outline-none focus:border-primary"
-                value={highFreqDraft}
-                onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setHighFreqDraft(e.target.value)}
-                placeholder={"# 高频题\n\n## 1. xxx原理是什么？为什么这样设计？\n\n## 2. 实际项目中遇到xxx问题怎么解决？"}
-              />
-              <div className="flex gap-2 mt-3 justify-end">
-                {hfSaving && <span className="text-xs text-green self-center mr-3">已保存</span>}
-                {highFreqDraft !== highFreq && (
-                  <Button variant="outline" size="sm" onClick={() => setHighFreqDraft(highFreq)}>撤销修改</Button>
-                )}
-                <Button variant="default" size="sm" onClick={handleSaveHighFreq} disabled={highFreqDraft === highFreq}>保存</Button>
-              </div>
+              {(highFreqLoading || highFreqLoadedTopic !== selected) && !highFreqLoadError ? (
+                <div className="min-h-[300px] flex items-center justify-center gap-2 text-sm text-dim">
+                  <Loader2 size={16} className="animate-spin text-primary" /> 正在加载高频题库...
+                </div>
+              ) : highFreqLoadError ? (
+                <div className="min-h-[300px] flex flex-col items-center justify-center gap-3 text-sm text-dim">
+                  <span>高频题库加载失败：{highFreqLoadError}</span>
+                  <Button variant="outline" size="sm" onClick={() => selected && void loadHighFreq(selected, topicGenerationRef.current)}>
+                    <RefreshCw size={14} /> 重试
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  <textarea
+                    className="w-full min-h-[300px] md:min-h-[500px] p-3 rounded-xl border border-border bg-bg text-text text-[13px] font-mono leading-relaxed resize-y focus:outline-none focus:border-primary"
+                    value={highFreqDraft}
+                    onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setHighFreqDraft(e.target.value)}
+                    placeholder={"# 高频题\n\n## 1. xxx原理是什么？为什么这样设计？\n\n## 2. 实际项目中遇到xxx问题怎么解决？"}
+                  />
+                  <div className="flex gap-2 mt-3 justify-end">
+                    {hfSaving && <span className="text-xs text-dim self-center mr-3">保存中...</span>}
+                    {highFreqDraft !== highFreq && (
+                      <Button variant="outline" size="sm" onClick={() => setHighFreqDraft(highFreq)}>撤销修改</Button>
+                    )}
+                    <Button variant="default" size="sm" onClick={handleSaveHighFreq} disabled={highFreqDraft === highFreq || hfSaving}>
+                      {hfSaving ? <><Loader2 size={14} className="animate-spin" /> 保存中</> : "保存"}
+                    </Button>
+                  </div>
+                </>
+              )}
             </div>
           )}
             </>

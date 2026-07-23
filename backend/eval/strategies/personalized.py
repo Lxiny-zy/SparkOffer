@@ -37,7 +37,6 @@ def _materialize_persona(persona: dict, topic: str) -> str:
     each other. Caller is responsible for cleanup via ``_cleanup_persona``.
     """
     user_id = f"{_EVAL_USER_PREFIX}{persona.get('persona_id', 'anon')}_{uuid.uuid4().hex[:6]}"
-    user_dir = settings.user_data_dir(user_id)
     profile_dir = settings.user_profile_dir(user_id)
     profile_dir.mkdir(parents=True, exist_ok=True)
 

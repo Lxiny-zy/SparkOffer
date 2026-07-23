@@ -7,97 +7,83 @@ import sqlite3
 from pathlib import Path
 
 from backend.config import settings
-from backend.auth import _hash_password
+from backend.auth import (
+    _copy_missing_tree,
+    _default_user_id,
+    _merge_user_data,
+    _preflight_tree_merge,
+    _quote_identifier,
+    _rollback_merged_paths,
+    _remove_user_data,
+    _tables_with_user_id,
+    ensure_default_user,
+    migrate_user_references,
+)
 from backend.storage.database import init_all_tables
 
-DEFAULT_USER_ID = "default0"
-DEFAULT_EMAIL = "legend@sparkoffer.local"
-DEFAULT_PASSWORD = "legend"
+LEGACY_DEFAULT_USER_ID = "default0"
+DEFAULT_EMAIL = settings.default_email.lower().strip()
+DEFAULT_USER_ID = _default_user_id(DEFAULT_EMAIL)
 
 DB_PATH = settings.db_path
 DATA_DIR = settings.base_dir / "data"
 USER_DIR = DATA_DIR / "users" / DEFAULT_USER_ID
 
 
-def _col_exists(conn: sqlite3.Connection, table: str, col: str) -> bool:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return any(r[1] == col for r in rows)
-
-
 def migrate_database():
-    """Add user_id column to sessions, memory_vectors, question_embeddings."""
+    """Assign all legacy and unowned rows to the configured default user."""
     if not DB_PATH.exists():
         print(f"Database not found at {DB_PATH}, skipping DB migration.")
         return
 
     conn = sqlite3.connect(str(DB_PATH))
-
-    tables = [
-        ("sessions", "user_id", f"'{DEFAULT_USER_ID}'"),
-        ("memory_vectors", "user_id", f"'{DEFAULT_USER_ID}'"),
-        ("question_embeddings", "user_id", f"'{DEFAULT_USER_ID}'"),
-    ]
-
-    for table, col, default in tables:
-        # Check table exists
-        exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone()
-        if not exists:
-            print(f"  Table {table} does not exist, skipping.")
-            continue
-
-        if _col_exists(conn, table, col):
-            print(f"  {table}.{col} already exists, skipping.")
-        else:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT {default}")
-            print(f"  Added {table}.{col} with default={default}")
-
-        # Create index
-        idx_name = f"idx_{table}_user"
-        conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table}({col})")
-
-    conn.commit()
-    conn.close()
-    print("Database migration done.")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        changed = migrate_user_references(
+            conn, LEGACY_DEFAULT_USER_ID, DEFAULT_USER_ID
+        )
+        # Only these columns were introduced as nullable fields by the legacy
+        # single-user schema. Nullable audit_logs.user_id intentionally keeps
+        # anonymous events anonymous.
+        legacy_nullable_tables = {"sessions", "memory_vectors", "question_embeddings"}
+        for table in _tables_with_user_id(conn):
+            if table not in legacy_nullable_tables:
+                continue
+            cursor = conn.execute(
+                f"UPDATE {_quote_identifier(table)} SET user_id = ? "
+                "WHERE user_id IS NULL OR user_id = ''",
+                (DEFAULT_USER_ID,),
+            )
+            changed += max(cursor.rowcount, 0)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    print(f"Database migration done ({changed} row(s) assigned to {DEFAULT_USER_ID}).")
 
 
 def create_default_user():
-    """Create the default user account for existing data."""
+    """Create or migrate the configured default user account."""
     init_all_tables()
-
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    existing = conn.execute("SELECT id FROM users WHERE id = ?", (DEFAULT_USER_ID,)).fetchone()
-    if existing:
-        print(f"Default user '{DEFAULT_USER_ID}' already exists, skipping.")
-        conn.close()
-        return
-
-    hashed = _hash_password(DEFAULT_PASSWORD)
-    conn.execute(
-        "INSERT INTO users (id, email, password, name) VALUES (?, ?, ?, ?)",
-        (DEFAULT_USER_ID, DEFAULT_EMAIL, hashed, "Default User"),
-    )
-    conn.commit()
-    conn.close()
-    print(f"Created default user: {DEFAULT_EMAIL} / {DEFAULT_PASSWORD}")
+    ensure_default_user()
+    print(f"Default user ready: {DEFAULT_EMAIL} ({DEFAULT_USER_ID})")
 
 
 def _move_dir(src: Path, dst: Path):
-    """Move directory contents, skipping if dst already has content."""
+    """Merge directory contents without discarding an existing target."""
     if not src.exists():
         return
-    if dst.exists() and any(dst.iterdir()):
-        print(f"  {dst} already has content, skipping.")
-        return
-    dst.mkdir(parents=True, exist_ok=True)
-    for item in src.iterdir():
-        target = dst / item.name
-        if item.is_dir():
-            shutil.copytree(item, target, dirs_exist_ok=True)
-        else:
-            shutil.copy2(item, target)
+    if src.is_symlink() or not src.is_dir():
+        raise RuntimeError(f"Refusing to migrate non-directory data: {src}")
+    _preflight_tree_merge(src, dst)
+    created = []
+    try:
+        _copy_missing_tree(src, dst, created)
+    except Exception:
+        _rollback_merged_paths(created)
+        raise
     print(f"  {src} -> {dst}")
 
 
@@ -113,25 +99,30 @@ def _move_file(src: Path, dst: Path):
 
 
 def migrate_files():
-    """Copy existing data files into the default user's directory."""
+    """Copy global and legacy per-user files into the stable user directory."""
     print("Migrating files to per-user directory...")
 
-    # user_profile/ -> users/default0/profile/
+    # Merge both user-scoped roots before removing the legacy copy. Existing
+    # target files are retained unless the source contains the same path.
+    _merge_user_data(LEGACY_DEFAULT_USER_ID, DEFAULT_USER_ID)
+    _remove_user_data(LEGACY_DEFAULT_USER_ID)
+
+    # user_profile/ -> users/<stable-id>/profile/
     _move_dir(DATA_DIR / "user_profile", USER_DIR / "profile")
 
-    # resume/ -> users/default0/resume/
+    # resume/ -> users/<stable-id>/resume/
     _move_dir(DATA_DIR / "resume", USER_DIR / "resume")
 
-    # knowledge/ -> users/default0/knowledge/
+    # knowledge/ -> users/<stable-id>/knowledge/
     _move_dir(DATA_DIR / "knowledge", USER_DIR / "knowledge")
 
-    # high_freq/ -> users/default0/high_freq/
+    # high_freq/ -> users/<stable-id>/high_freq/
     _move_dir(DATA_DIR / "high_freq", USER_DIR / "high_freq")
 
-    # topics.json -> users/default0/topics.json
+    # topics.json -> users/<stable-id>/topics.json
     _move_file(DATA_DIR / "topics.json", USER_DIR / "topics.json")
 
-    # .index_cache/ -> users/default0/.index_cache/
+    # .index_cache/ -> users/<stable-id>/.index_cache/
     _move_dir(DATA_DIR / ".index_cache", USER_DIR / ".index_cache")
 
     print("File migration done.")
@@ -184,6 +175,7 @@ def migrate_weak_point_mastery():
 
 
 def main():
+    settings.validate_security_settings()
     print("=== SparkOffer Migration: Single-user -> Multi-user ===\n")
 
     print("[1/4] Creating default user...")
@@ -199,7 +191,7 @@ def main():
     migrate_weak_point_mastery()
 
     print("\n=== Migration complete! ===")
-    print(f"Default login: {DEFAULT_EMAIL} / {DEFAULT_PASSWORD}")
+    print(f"Default account: {DEFAULT_EMAIL} ({DEFAULT_USER_ID})")
 
 
 if __name__ == "__main__":

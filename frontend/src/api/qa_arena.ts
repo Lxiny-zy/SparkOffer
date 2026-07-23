@@ -1,4 +1,4 @@
-import { API_BASE, authHeaders, handleStreamUnauthorized, iterSSEFrames } from "./client";
+import { API_BASE, authFetch, authHeaders, iterSSEFrames } from "./client";
 
 export interface QASession {
   id: string;
@@ -29,7 +29,7 @@ export interface QASummaryResult {
 // ── Session CRUD ──
 
 export async function createQASession(title?: string): Promise<QASession> {
-  const res = await fetch(`${API_BASE}/qa-arena/sessions`, {
+  const res = await authFetch(`${API_BASE}/qa-arena/sessions`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(title ? { title } : {}),
@@ -39,15 +39,13 @@ export async function createQASession(title?: string): Promise<QASession> {
 }
 
 export async function listQASessions(limit = 50, offset = 0): Promise<{ sessions: QASession[]; total: number }> {
-  const res = await fetch(`${API_BASE}/qa-arena/sessions?limit=${limit}&offset=${offset}`, {
-    headers: authHeaders(),
-  });
-  if (!res.ok) return { sessions: [], total: 0 };
+  const res = await authFetch(`${API_BASE}/qa-arena/sessions?limit=${limit}&offset=${offset}`);
+  if (!res.ok) throw new Error(`Failed to load sessions (${res.status})`);
   return res.json();
 }
 
 export async function deleteQASession(sessionId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}`, {
+  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}`, {
     method: "DELETE",
     headers: authHeaders(),
   });
@@ -55,7 +53,7 @@ export async function deleteQASession(sessionId: string): Promise<void> {
 }
 
 export async function renameQASession(sessionId: string, title: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}`, {
+  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}`, {
     method: "PATCH",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ title }),
@@ -74,19 +72,17 @@ export function qaImageUrl(sessionId: string, name: string): string {
 // Fetch an auth-protected image and return an object URL usable as <img src>.
 // The caller must URL.revokeObjectURL it on unmount. Local blob:/data: URLs are
 // returned as-is (already directly renderable).
-export async function fetchAuthedImage(url: string): Promise<string> {
+export async function fetchAuthedImage(url: string, signal?: AbortSignal): Promise<string> {
   if (url.startsWith("blob:") || url.startsWith("data:")) return url;
-  const res = await fetch(url, { headers: authHeaders() });
+  const res = await authFetch(url, { signal });
   if (!res.ok) throw new Error(`图片加载失败: ${res.status}`);
   const blob = await res.blob();
   return URL.createObjectURL(blob);
 }
 
 export async function loadQAMessages(sessionId: string): Promise<QAMessage[]> {
-  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/messages`, {
-    headers: authHeaders(),
-  });
-  if (!res.ok) return [];
+  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/messages`);
+  if (!res.ok) throw new Error(`Failed to load messages (${res.status})`);
   const data = await res.json();
   return (data.messages || []).map((m: any) => ({
     ...m,
@@ -96,25 +92,22 @@ export async function loadQAMessages(sessionId: string): Promise<QAMessage[]> {
 }
 
 export async function clearQAMessages(sessionId: string): Promise<void> {
-  await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/messages`, {
+  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/messages`, {
     method: "DELETE",
     headers: authHeaders(),
   });
+  if (!res.ok) throw new Error(`Failed to clear messages (${res.status})`);
 }
 
 // ── Streaming Chat ──
 
 export async function* streamQAChat(sessionId: string, message: string, images: string[] | undefined, signal?: AbortSignal): AsyncGenerator<any> {
-  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/chat`, {
+  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/chat`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ message, images: images || [] }),
     signal,
   });
-
-  if (handleStreamUnauthorized(res)) {
-    return;
-  }
 
   if (!res.ok) throw new Error(`问答演练场错误: ${res.status}`);
 
@@ -126,15 +119,11 @@ export async function* streamQAChat(sessionId: string, message: string, images: 
 // Re-answer the last user question (regenerate). No body: the backend re-uses the
 // last stored user message and drops any trailing (broken/partial/empty) AI reply.
 export async function* regenerateQAChat(sessionId: string, signal?: AbortSignal): AsyncGenerator<any> {
-  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/regenerate`, {
+  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/regenerate`, {
     method: "POST",
     headers: authHeaders(),
     signal,
   });
-
-  if (handleStreamUnauthorized(res)) {
-    return;
-  }
 
   if (!res.ok) throw new Error(`重新生成失败: ${res.status}`);
 
@@ -149,11 +138,13 @@ export async function generateQASummary(
   sessionId: string,
   onProgress?: (msg: string) => void,
   effort?: string,
+  signal?: AbortSignal,
 ): Promise<QASummaryResult> {
   const qs = effort ? `?effort=${encodeURIComponent(effort)}` : "";
-  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/summary${qs}`, {
+  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/summary${qs}`, {
     method: "POST",
     headers: authHeaders(),
+    signal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -184,11 +175,16 @@ export async function generateQASummary(
 export async function ingestQACardToKnowledge(
   sessionId: string,
   content: string,
+  options: { signal?: AbortSignal; idempotencyKey?: string } = {},
 ): Promise<{ ok: boolean; topic: string | null; reason: string }> {
-  const res = await fetch(`${API_BASE}/qa-arena/sessions/${sessionId}/ingest-knowledge`, {
+  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/ingest-knowledge`, {
     method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
+    headers: authHeaders({
+      "Content-Type": "application/json",
+      ...(options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}),
+    }),
     body: JSON.stringify({ content }),
+    signal: options.signal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

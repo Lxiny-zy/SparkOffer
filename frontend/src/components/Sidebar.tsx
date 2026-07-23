@@ -62,15 +62,14 @@ export default function Sidebar() {
   const location = useLocation();
   const { user, logout } = useAuth();
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
-  const [open, setOpen] = useState(false);
+  const [openForLocation, setOpenForLocation] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false);
+  const open = openForLocation === location.key;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     localStorage.setItem("theme", theme);
   }, [theme]);
-
-  useEffect(() => { setOpen(false); }, [location.pathname]);
 
   const toggleTheme = () => setTheme((t: string) => t === "dark" ? "light" : "dark");
   const isActive = (path: string) =>
@@ -85,7 +84,10 @@ export default function Sidebar() {
     const active = isActive(path);
     const btn = (
       <button
-        onClick={() => navigate(path)}
+        onClick={() => {
+          setOpenForLocation(null);
+          navigate(path);
+        }}
         className={cn(
           "sig-navitem active:scale-[0.97]",
           active && !collapsed && "sig-navitem-active",
@@ -224,11 +226,21 @@ export default function Sidebar() {
         className="md:hidden flex items-center justify-between px-4 py-3 shrink-0 border-b"
         style={{ background: "var(--sig-bg)", borderColor: "var(--sig-line)" }}
       >
-        <div className="flex items-center gap-2.5 cursor-pointer" onClick={() => navigate("/")}>
+        <div
+          className="flex items-center gap-2.5 cursor-pointer"
+          onClick={() => {
+            setOpenForLocation(null);
+            navigate("/");
+          }}
+        >
           <CatAvatar size={28} mood="static" />
           <span className="sig-display text-base tracking-[-0.02em]">SparkOffer</span>
         </div>
-        <Button variant="ghost" size="icon" onClick={() => setOpen((o: boolean) => !o)}>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setOpenForLocation((current) => current === location.key ? null : location.key)}
+        >
           {open ? <X size={18} /> : <Menu size={18} />}
         </Button>
       </div>
@@ -238,7 +250,7 @@ export default function Sidebar() {
       {open && (
         <div className="fixed inset-0 z-50 md:hidden flex">
           <div className="animate-fade-in">{nav}</div>
-          <div className="flex-1" style={{ background: "var(--sig-overlay)" }} onClick={() => setOpen(false)} />
+          <div className="flex-1" style={{ background: "var(--sig-overlay)" }} onClick={() => setOpenForLocation(null)} />
         </div>
       )}
     </>

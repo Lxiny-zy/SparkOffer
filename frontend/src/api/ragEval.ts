@@ -203,6 +203,16 @@ export interface RagEvalRunFilters {
   offset?: number;
 }
 
+export class RagEvalHttpError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "RagEvalHttpError";
+    this.status = status;
+  }
+}
+
 async function _detailError(res: Response, fallback: string): Promise<never> {
   let msg = `${fallback} (${res.status})`;
   try {
@@ -211,15 +221,19 @@ async function _detailError(res: Response, fallback: string): Promise<never> {
   } catch {
     // non-JSON error body — keep fallback
   }
-  throw new Error(msg);
+  throw new RagEvalHttpError(msg, res.status);
 }
 
 export async function startRagEval(
   opts: StartRagEvalOpts,
+  options: { idempotencyKey?: string } = {},
 ): Promise<StartRagEvalResponse> {
   const res = await authFetch(`${API_BASE}/rag-eval/start`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}),
+    },
     body: JSON.stringify(opts),
   });
   if (!res.ok) return _detailError(res, "启动评测失败");

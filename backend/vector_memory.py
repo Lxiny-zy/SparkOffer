@@ -19,8 +19,6 @@ from backend.vector_store import MemoryRecord, get_vector_store
 from backend.vector_store.base import (
     MAX_VECTORS_PER_USER,
     _cosine_similarity,
-    _deserialize,
-    _serialize,
 )
 
 logger = logging.getLogger("uvicorn")
@@ -38,6 +36,10 @@ TIME_DECAY_WEIGHT = 0.3      # max 30% score reduction from age
 
 _MAX_EMBED_RETRIES = 2  # Retry count for transient failures
 _RETRY_BACKOFF_BASE = 1.5  # Exponential backoff base (seconds)
+
+
+class IncompleteMemoryIndexError(RuntimeError):
+    """Raised when a durable memory index operation cannot write every chunk."""
 
 
 def _zero_vec() -> np.ndarray:
@@ -63,20 +65,23 @@ async def _embed(text: str) -> np.ndarray:
     from backend.embedding_tasks import get_circuit_breaker
 
     cb = get_circuit_breaker()
-    if not cb.can_execute():
-        logger.debug("Embedding circuit breaker OPEN, returning zero vector")
-        return _zero_vec()
-
     for attempt in range(_MAX_EMBED_RETRIES + 1):
+        permit = cb.acquire()
+        if permit is None:
+            logger.debug("Embedding circuit breaker OPEN, returning zero vector")
+            return _zero_vec()
         try:
             vec = await asyncio.wait_for(
                 asyncio.to_thread(_embed_sync, text),
                 timeout=_EMBED_TIMEOUT_SECONDS,
             )
-            cb.record_success()
+            cb.record_success(permit)
             return np.array(vec, dtype=np.float32)
+        except asyncio.CancelledError:
+            cb.release_probe(permit)
+            raise
         except asyncio.TimeoutError:
-            cb.record_failure()
+            cb.record_failure(permit)
             if attempt < _MAX_EMBED_RETRIES:
                 backoff = _RETRY_BACKOFF_BASE ** (attempt + 1)
                 logger.warning(
@@ -87,7 +92,7 @@ async def _embed(text: str) -> np.ndarray:
             else:
                 logger.warning(f"Embedding timeout after all retries: {text[:50]!r}...")
         except Exception as e:
-            cb.record_failure()
+            cb.record_failure(permit)
             if attempt < _MAX_EMBED_RETRIES:
                 backoff = _RETRY_BACKOFF_BASE ** (attempt + 1)
                 logger.warning(
@@ -119,9 +124,6 @@ async def _embed_batch(texts: list[str]) -> list[np.ndarray]:
     from backend.embedding_tasks import get_circuit_breaker
 
     cb = get_circuit_breaker()
-    if not cb.can_execute():
-        logger.debug(f"Embedding circuit breaker OPEN, returning {len(texts)} zero vectors")
-        return [_zero_vec() for _ in texts]
 
     # Split large batches into chunks of 10 to limit blast radius
     CHUNK_SIZE = 10
@@ -141,15 +143,32 @@ async def _embed_batch_chunk(texts: list[str], cb) -> list[np.ndarray]:
     timeout = max(_EMBED_TIMEOUT_SECONDS, len(texts) * 3.0)
 
     for attempt in range(_MAX_EMBED_RETRIES + 1):
+        permit = cb.acquire()
+        if permit is None:
+            logger.debug(
+                "Embedding circuit breaker OPEN, returning %d zero vectors",
+                len(texts),
+            )
+            return [_zero_vec() for _ in texts]
         try:
             vecs = await asyncio.wait_for(
                 asyncio.to_thread(_embed_batch_sync, texts),
                 timeout=timeout,
             )
-            cb.record_success()
-            return [np.array(v, dtype=np.float32) for v in vecs]
+            vecs = list(vecs)
+            if len(vecs) != len(texts):
+                raise ValueError(
+                    "Embedding batch returned "
+                    f"{len(vecs)} vectors for {len(texts)} texts"
+                )
+            converted = [np.array(v, dtype=np.float32) for v in vecs]
+            cb.record_success(permit)
+            return converted
+        except asyncio.CancelledError:
+            cb.release_probe(permit)
+            raise
         except asyncio.TimeoutError:
-            cb.record_failure()
+            cb.record_failure(permit)
             if attempt < _MAX_EMBED_RETRIES:
                 backoff = _RETRY_BACKOFF_BASE ** (attempt + 1)
                 logger.warning(
@@ -160,7 +179,7 @@ async def _embed_batch_chunk(texts: list[str], cb) -> list[np.ndarray]:
             else:
                 logger.warning(f"Batch embedding timeout after all retries ({len(texts)} texts)")
         except Exception as e:
-            cb.record_failure()
+            cb.record_failure(permit)
             if attempt < _MAX_EMBED_RETRIES:
                 backoff = _RETRY_BACKOFF_BASE ** (attempt + 1)
                 logger.warning(
@@ -239,12 +258,14 @@ def index_session_memory_sync(
     user_id: str,
     strong_points: list[dict] | None = None,
     insight_text: str = "",
+    require_complete: bool = False,
 ):
     """Sync wrapper for index_session_memory."""
     return _run_async(index_session_memory(
         session_id=session_id, topic=topic, summary=summary,
         weak_points=weak_points, user_id=user_id,
         strong_points=strong_points, insight_text=insight_text,
+        require_complete=require_complete,
     ))
 
 
@@ -272,8 +293,14 @@ async def index_session_memory(
     user_id: str,
     strong_points: list[dict] | None = None,
     insight_text: str = "",
+    require_complete: bool = False,
 ):
-    """Embed and store memory chunks for a completed session."""
+    """Embed and store memory chunks for a completed session.
+
+    Background callers retain graceful degradation and write only usable
+    vectors. Durable callers set ``require_complete`` so a missing or invalid
+    vector fails before any partial write can be mistaken for completion.
+    """
     chunks: list[tuple[str, str, str | None, str | None, dict]] = []
 
     if summary:
@@ -295,6 +322,47 @@ async def index_session_memory(
     texts = [c[1] for c in chunks]
     vectors = await _embed_batch(texts)
 
+    if len(vectors) != len(chunks):
+        message = (
+            "index_session_memory: embedding batch returned "
+            f"{len(vectors)} vectors for {len(chunks)} chunks"
+        )
+        if require_complete:
+            raise IncompleteMemoryIndexError(message)
+        logger.warning("%s; usable results will still be indexed.", message)
+
+    usable: list[tuple[
+        tuple[str, str, str | None, str | None, dict], np.ndarray,
+    ]] = []
+    invalid_count = max(0, len(chunks) - len(vectors))
+    for chunk, vector in zip(chunks, vectors):
+        vec = np.asarray(vector, dtype=np.float32)
+        if (
+            vec.ndim != 1
+            or vec.size == 0
+            or not np.all(np.isfinite(vec))
+            or not np.any(vec)
+        ):
+            invalid_count += 1
+            continue
+        usable.append((chunk, vec))
+
+    dimensions = {vec.size for _, vec in usable}
+    if require_complete and (
+        invalid_count
+        or len(usable) != len(chunks)
+        or len(dimensions) != 1
+    ):
+        reason = (
+            f"{invalid_count} invalid/missing vectors"
+            if invalid_count
+            else f"mixed embedding dimensions: {sorted(dimensions)}"
+        )
+        raise IncompleteMemoryIndexError(
+            "Durable session memory index is incomplete: "
+            f"{reason} for {len(chunks)} chunks"
+        )
+
     now = datetime.now().isoformat()
     # embedding 失败/熔断时 _embed_batch 会返回全零兜底向量；这些零向量不能当正常
     # record 入库，否则脏行会污染后续检索（且可能是错误维度）。写库前过滤掉全零项。
@@ -303,8 +371,7 @@ async def index_session_memory(
             content=content, chunk_type=chunk_type, topic=t,
             session_id=sid, embedding=vec, created_at=now, metadata=meta,
         )
-        for (chunk_type, content, t, sid, meta), vec in zip(chunks, vectors)
-        if np.any(vec)
+        for (chunk_type, content, t, sid, meta), vec in usable
     ]
     if not records:
         logger.warning("index_session_memory: 所有向量均为兜底零向量，跳过写库。")

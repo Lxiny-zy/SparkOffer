@@ -470,8 +470,21 @@ async def stream_evaluate_job_prep_answers(
 
     accumulated = ""
     chars_since_heartbeat = 0
-    _fallback_scores = lambda: [{"question_id": q["id"], "score": None, "assessment": "评估失败"} for q in questions]
-    _fallback_overall = lambda: {"avg_score": None, "summary": "评估过程出错。", "new_weak_points": [], "new_strong_points": [], "dimension_scores": {}}
+
+    def _fallback_scores():
+        return [
+            {"question_id": q["id"], "score": None, "assessment": "评估失败"}
+            for q in questions
+        ]
+
+    def _fallback_overall():
+        return {
+            "avg_score": None,
+            "summary": "评估过程出错。",
+            "new_weak_points": [],
+            "new_strong_points": [],
+            "dimension_scores": {},
+        }
 
     try:
         async for kind, delta in iter_llm_stream(llm, lc_messages):

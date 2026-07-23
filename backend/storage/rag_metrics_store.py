@@ -7,6 +7,21 @@ from typing import Any
 from backend.storage.database import get_db
 
 
+_UPSERT_RAG_METRICS = """
+ON CONFLICT(user_id, session_id, stage) DO UPDATE SET
+    topic = excluded.topic,
+    context_relevance = excluded.context_relevance,
+    coverage = excluded.coverage,
+    diversity = excluded.diversity,
+    faithfulness = excluded.faithfulness,
+    answer_relevance = excluded.answer_relevance,
+    answer_correctness = excluded.answer_correctness,
+    chunk_count = excluded.chunk_count,
+    detail_json = excluded.detail_json,
+    created_at = CURRENT_TIMESTAMP
+"""
+
+
 def save_rag_metrics(
     session_id: str,
     user_id: str,
@@ -21,28 +36,52 @@ def save_rag_metrics(
     answer_correctness: float | None = None,
     chunk_count: int | None = None,
     detail: dict | None = None,
-) -> None:
+    evaluation_token: str | None = None,
+) -> bool:
     # question_gen writes relevance into the legacy context_relevance column (so
     # historical trend charts stay continuous) plus coverage + diversity;
     # answer_eval writes the generation-side columns. Circular precision/recall
     # are no longer written.
     conn = get_db()
-    conn.execute(
-        """INSERT INTO rag_metrics
+    values = (
+        session_id, user_id, topic, stage,
+        relevance, coverage, diversity,
+        faithfulness, answer_relevance, answer_correctness,
+        chunk_count,
+        json.dumps(detail or {}, ensure_ascii=False),
+    )
+    if evaluation_token is not None:
+        doc = "COALESCE(NULLIF(meta, ''), '{}')"
+        cursor = conn.execute(
+            f"""INSERT INTO rag_metrics
+               (session_id, user_id, topic, stage,
+                context_relevance, coverage, diversity,
+                faithfulness, answer_relevance, answer_correctness,
+                chunk_count, detail_json)
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+               WHERE EXISTS (
+                 SELECT 1
+                 FROM sessions
+                 WHERE session_id = ?
+                   AND user_id = ?
+                   AND json_extract({doc}, '$.evaluation_claim_token') = ?
+               )
+               {_UPSERT_RAG_METRICS}""",
+            (*values, session_id, user_id, evaluation_token),
+        )
+    else:
+        cursor = conn.execute(
+            f"""INSERT INTO rag_metrics
            (session_id, user_id, topic, stage,
             context_relevance, coverage, diversity,
             faithfulness, answer_relevance, answer_correctness,
             chunk_count, detail_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            session_id, user_id, topic, stage,
-            relevance, coverage, diversity,
-            faithfulness, answer_relevance, answer_correctness,
-            chunk_count,
-            json.dumps(detail or {}, ensure_ascii=False),
-        ),
-    )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           {_UPSERT_RAG_METRICS}""",
+            values,
+        )
     conn.commit()
+    return cursor.rowcount > 0
 
 
 def get_rag_metrics_history(

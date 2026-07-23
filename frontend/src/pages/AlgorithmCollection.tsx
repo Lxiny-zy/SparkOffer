@@ -1,9 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Markdown } from "../components/ChatBubble";
 import {
   Library, Trash2, Download, Tag, ChevronDown, ChevronUp,
-  Filter, X, Edit3, Check, Code2, ExternalLink, Search,
+  Filter, X, Check, Code2, ExternalLink, Search,
 } from "lucide-react";
 import {
   getAlgorithmCards, deleteAlgorithmCard, updateAlgorithmCard,
@@ -49,8 +49,10 @@ export default function AlgorithmCollection() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [editingTags, setEditingTags] = useState<string | null>(null);
   const [tagInput, setTagInput] = useState("");
+  const loadGenerationRef = useRef(0);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
+    const generation = ++loadGenerationRef.current;
     setLoading(true);
     try {
       const [cardData, tags] = await Promise.all([
@@ -62,16 +64,22 @@ export default function AlgorithmCollection() {
         }),
         getAlgorithmTags(),
       ]);
-      setItems(cardData.items);
-      setTotal(cardData.total);
-      setAllTags(tags);
+      if (generation === loadGenerationRef.current) {
+        setItems(cardData.items);
+        setTotal(cardData.total);
+        setAllTags(tags);
+      }
     } catch (e) {
       console.error("加载算法收藏失败:", e);
     }
-    setLoading(false);
-  };
+    if (generation === loadGenerationRef.current) setLoading(false);
+  }, [difficultyFilter, searchQuery, sortBy, tagFilter]);
 
-  useEffect(() => { loadData(); }, [difficultyFilter, tagFilter, sortBy, searchQuery]);
+  useEffect(() => {
+    // Loading filtered server data is the external synchronization performed by this effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadData();
+  }, [loadData]);
 
   const handleDelete = async (id: string) => {
     try {
@@ -116,7 +124,7 @@ export default function AlgorithmCollection() {
       setItems((prev) => prev.map((it) => it.id === id ? { ...it, tags } : it));
       setEditingTags(null);
       setTagInput("");
-      loadData();
+      void loadData();
     } catch (e) {
       console.error("更新标签失败:", e);
     }
@@ -140,7 +148,8 @@ export default function AlgorithmCollection() {
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
       const s = new Set(prev);
-      s.has(id) ? s.delete(id) : s.add(id);
+      if (s.has(id)) s.delete(id);
+      else s.add(id);
       return s;
     });
   };

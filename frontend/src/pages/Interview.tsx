@@ -5,7 +5,6 @@ import { Check, Minus, Star, Lightbulb, Eye, Loader2, RefreshCw } from "lucide-r
 import { toast } from "sonner";
 import ChatBubble from "../components/ChatBubble";
 import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics, type DrillProgressPayload } from "../api/interview";
-import { cn } from "@/lib/utils";
 import { formatQuestionLabel } from "@/lib/question";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -31,7 +30,11 @@ export default function Interview() {
   const isBatchMode = effectiveInit.mode === "topic_drill" || effectiveInit.mode === "jd_prep";
   const isJobPrep = effectiveInit.mode === "jd_prep";
 
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => (
+    !isBatchMode && initData.message
+      ? [{ role: "assistant", content: initData.message }]
+      : []
+  ));
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [sendProgress, setSendProgress] = useState("");
@@ -58,12 +61,6 @@ export default function Interview() {
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
 
   const draftKey = sessionId ? `drill:draft:${sessionId}` : null;
-
-  useEffect(() => {
-    if (!isBatchMode && initData.message) {
-      setMessages([{ role: "assistant", content: initData.message }]);
-    }
-  }, []);
 
   // Restore from backend when location.state is empty (page refresh / direct visit)
   useEffect(() => {
@@ -142,7 +139,7 @@ export default function Interview() {
         setRestoreError(err?.message || "无法加载会话，请返回首页重试");
       })
       .finally(() => setRestoring(false));
-  }, [sessionId, initData.mode]);
+  }, [sessionId, initData.mode, draftKey]);
 
   // Debounced persist of in-progress state.
   // Two-tier strategy:
@@ -518,7 +515,8 @@ export default function Interview() {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey && !(e.nativeEvent as any).isComposing) {
       e.preventDefault();
-      isBatchMode ? handleDrillSubmit() : handleSend();
+      if (isBatchMode) handleDrillSubmit();
+      else handleSend();
     }
   };
 

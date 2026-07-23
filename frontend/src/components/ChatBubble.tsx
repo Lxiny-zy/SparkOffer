@@ -3,7 +3,6 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { cn } from "@/lib/utils";
 
 // 按需注册语法高亮：只把面试场景高频的几种语言打进包，而非 Prism 全量入口的 200+ 种。
 // 这是构建模块数 / 内存峰值的最大单一来源。未注册的语言会安全降级为纯文本（不报错、仅无配色）。

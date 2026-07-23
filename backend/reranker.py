@@ -32,39 +32,72 @@ MAX_DOC_CHARS = 2000
 MAX_QUERY_CHARS = 512
 
 
-def _get_reranker_config() -> dict | None:
+def _get_reranker_config(exclude: set[str] | None = None) -> dict | None:
     """Resolve reranker API config from channel_manager or .env fallback.
 
-    Returns {"api_base", "api_key", "api_model", "channel_id", "proxy"} or None.
+    Returns provider config including ``channel_id`` and an internal probe token,
+    or None.  ``exclude`` contains managed channels already tried by this call.
     ``channel_id`` is the channel_manager id (used to report success/failure so
     a bad channel cools down), or None on the .env fallback path.
     """
-    from backend.channel_manager import get_channel, has_channels
+    from backend.channel_manager import (
+        get_channel,
+        get_next_channel,
+        has_channels,
+        release_probe,
+    )
 
     if has_channels("reranker"):
-        ch = get_channel("reranker")
-        # Require both base and key: an enabled-but-keyless channel would
-        # otherwise yield a non-None config and fire a guaranteed-401 request
-        # every drill. Fall through to .env when the channel is incomplete.
-        if ch and ch.get("api_base") and ch.get("api_key"):
-            return {
-                "api_base": ch["api_base"],
-                "api_key": ch["api_key"],
-                "api_model": ch.get("api_model", ""),
-                "channel_id": ch.get("id"),
-                "proxy": ch.get("proxy", "") or "",
-            }
+        skipped = set(exclude or ())
+        while True:
+            ch = (
+                get_next_channel("reranker", skipped)
+                if skipped
+                else get_channel("reranker")
+            )
+            if not ch:
+                break
+
+            channel_id = ch.get("id")
+            probe_token = ch.get("_probe_token")
+            # Runtime validation normally prevents incomplete enabled channels,
+            # but legacy JSON may still contain one. Skip it without consuming a
+            # HALF_OPEN lease or firing a guaranteed-401 request.
+            if ch.get("api_base") and ch.get("api_key"):
+                return {
+                    "api_base": ch["api_base"],
+                    "api_key": ch["api_key"],
+                    "api_model": ch.get("api_model", ""),
+                    "channel_id": channel_id,
+                    "probe_token": probe_token,
+                    "proxy": ch.get("proxy", "") or "",
+                }
+            if channel_id:
+                if probe_token is not None:
+                    release_probe("reranker", channel_id, probe_token)
+                skipped.add(channel_id)
 
     from backend.ai_config import get_effective
     base = get_effective("reranker", "api_base")
     key = get_effective("reranker", "api_key")
     model = get_effective("reranker", "api_model")
     if base and key:
-        return {"api_base": base, "api_key": key, "api_model": model, "channel_id": None, "proxy": ""}
+        return {
+            "api_base": base,
+            "api_key": key,
+            "api_model": model,
+            "channel_id": None,
+            "probe_token": None,
+            "proxy": "",
+        }
     return None
 
 
-def _report(channel_id: str | None, ok: bool) -> None:
+def _report(
+    channel_id: str | None,
+    ok: bool,
+    probe_token: str | None = None,
+) -> None:
     """Feed the rerank outcome back to channel_manager so a failing channel
     cools down (3-strike / 60s) and a recovered one resets. No-op on the .env
     fallback path (channel_id is None — no channel state to track)."""
@@ -72,7 +105,22 @@ def _report(channel_id: str | None, ok: bool) -> None:
         return
     try:
         from backend.channel_manager import report_error, report_success
-        (report_success if ok else report_error)("reranker", channel_id)
+        reporter = report_success if ok else report_error
+        if probe_token is None:
+            reporter("reranker", channel_id)
+        else:
+            reporter("reranker", channel_id, probe_token)
+    except Exception:
+        pass
+
+
+def _release_probe(channel_id: str | None, probe_token: str | None) -> None:
+    """Return an unused HALF_OPEN admission without declaring recovery."""
+    if not channel_id or probe_token is None:
+        return
+    try:
+        from backend.channel_manager import release_probe
+        release_probe("reranker", channel_id, probe_token)
     except Exception:
         pass
 
@@ -141,6 +189,12 @@ def _validated_indices(
     return indices
 
 
+def _redact_secret(value: object, secret: str) -> str:
+    """Keep provider credentials out of diagnostic logs."""
+    text = str(value)
+    return text.replace(secret, "[redacted]") if secret else text
+
+
 async def rerank(
     query: str,
     chunks: list[str],
@@ -148,13 +202,7 @@ async def rerank(
     *,
     read_timeout: float | None = None,
 ) -> tuple[list[str], str]:
-    """Re-rank chunks by relevance to query via Cross-Encoder API.
-
-    Returns (chunks, status) where status is one of:
-      "applied"  — reranked successfully (order may have changed)
-      "degraded" — a reranker is configured but the call failed → original order
-      "off"      — no reranker configured (or nothing to rerank) → original order
-    """
+    """Re-rank chunks, failing over through every available managed channel."""
     if not chunks or len(chunks) <= 1:
         return chunks, "off"
 
@@ -162,43 +210,11 @@ async def rerank(
     if not config:
         return chunks, "off"
 
-    # 输入上限：仅约束送去打分的候选集与文本长度，避免撑爆上游 rerank API。
-    # 注意：候选条数截断后，reordered 仍取 chunks[i] 的【完整原文】（见下方
-    # documents 单独做字符截断，chunks 本身不截短），保证回传内容不被截断。
+    # Only provider input is bounded. Returned chunks retain their full text.
     chunks = chunks[:MAX_RERANK_DOCS]
     query = query[:MAX_QUERY_CHARS]
-
     effective_top_n = min(top_n, len(chunks))
-    api_base = config["api_base"].rstrip("/")
     cache = get_cache()
-    ck = _cache_key(
-        query,
-        chunks,
-        effective_top_n,
-        model=config.get("api_model", ""),
-        endpoint=api_base,
-    )
-    cached = await asyncio.to_thread(cache.get_json, ck)
-    cached_indices = _validated_indices(
-        cached,
-        chunk_count=len(chunks),
-        max_results=effective_top_n,
-    )
-    if cached_indices is not None:
-        logger.debug("Reranker cache hit: %s", ck)
-        return [chunks[index] for index in cached_indices], "applied"
-
-    url = api_base if api_base.endswith("/rerank") else f"{api_base}/rerank"
-    channel_id = config.get("channel_id")
-
-    payload = {
-        "model": config["api_model"],
-        "query": query,
-        # 单条文档截断仅用于打分输入；reordered 回传时取的是未截断的 chunks[i] 完整原文。
-        "documents": [c[:MAX_DOC_CHARS] for c in chunks],
-        "top_n": effective_top_n,
-        "return_documents": False,
-    }
 
     from backend.ai_config import get_retrieval_setting
     read_to = (
@@ -206,78 +222,139 @@ async def rerank(
         else get_retrieval_setting("reranker_read_timeout")
     )
 
-    try:
-        client_kw: dict = {
-            "timeout": httpx.Timeout(connect=10.0, read=read_to, write=10.0, pool=10.0),
-            "headers": {"User-Agent": "curl/7.88.1"},
-            "follow_redirects": True,
-        }
-        proxy = config.get("proxy", "")
-        if proxy:
-            from backend.llm_provider import _normalize_proxy_url
-            client_kw["proxy"] = _normalize_proxy_url(proxy)
+    tried: set[str] = set()
+    fallback_attempted = False
+    while config:
+        channel_id = config.get("channel_id")
+        probe_token = config.get("probe_token")
+        if channel_id:
+            tried.add(channel_id)
+        elif fallback_attempted:
+            # The legacy .env provider has no channel id for ``tried``.
+            break
+        else:
+            fallback_attempted = True
 
-        async with httpx.AsyncClient(**client_kw) as client:
-            resp = await client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {config['api_key']}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-        # HTTP 200 + parseable body → the channel is reachable, so reset its
-        # failure count even if the model returned nothing useful below (that's
-        # an upstream/data issue, not a channel fault).
-        _report(channel_id, True)
-
-        results = data.get("results", [])
-        if not results:
-            logger.warning("Reranker returned empty results")
-            return chunks, "degraded"
-
-        ranked_results = sorted(
-            results,
-            key=lambda r: r.get("relevance_score", 0) if isinstance(r, dict) else 0,
-            reverse=True,
+        api_base = config["api_base"].rstrip("/")
+        ck = _cache_key(
+            query,
+            chunks,
+            effective_top_n,
+            model=config.get("api_model", ""),
+            endpoint=api_base,
         )
-        raw_indices = [
-            r.get("index") if isinstance(r, dict) else None
-            for r in ranked_results
-        ]
-        indices = _validated_indices(
-            raw_indices,
+        try:
+            cached = await asyncio.to_thread(cache.get_json, ck)
+        except Exception as exc:
+            logger.warning("Reranker cache read failed: %s", exc)
+            cached = None
+        cached_indices = _validated_indices(
+            cached,
             chunk_count=len(chunks),
             max_results=effective_top_n,
         )
-        if indices is None:
-            logger.warning("Reranker returned invalid indices")
-            return chunks, "degraded"
+        if cached_indices is not None:
+            logger.debug("Reranker cache hit: %s", ck)
+            _release_probe(channel_id, probe_token)
+            return [chunks[index] for index in cached_indices], "applied"
 
-        reordered = [chunks[index] for index in indices]
+        url = api_base if api_base.endswith("/rerank") else f"{api_base}/rerank"
+        payload = {
+            "model": config["api_model"],
+            "query": query,
+            "documents": [chunk[:MAX_DOC_CHARS] for chunk in chunks],
+            "top_n": effective_top_n,
+            "return_documents": False,
+        }
+        api_key = config["api_key"]
 
-        await asyncio.to_thread(cache.set_json, ck, indices, 3600)
-        logger.info(
-            "Reranker applied: query=%r, %d chunks → top %d, model=%s",
-            query[:50], len(chunks), len(reordered), config["api_model"],
-        )
-        return reordered, "applied"
+        try:
+            client_kw: dict = {
+                "timeout": httpx.Timeout(
+                    connect=10.0, read=read_to, write=10.0, pool=10.0,
+                ),
+                "headers": {"User-Agent": "curl/7.88.1"},
+                "follow_redirects": True,
+            }
+            proxy = config.get("proxy", "")
+            if proxy:
+                from backend.llm_provider import _normalize_proxy_url
+                client_kw["proxy"] = _normalize_proxy_url(proxy)
 
-    except httpx.TimeoutException:
-        logger.warning("Reranker timeout (%ds read): query=%r, %d chunks", read_to, query[:50], len(chunks))
-        _report(channel_id, False)
-    except httpx.HTTPStatusError as e:
-        status = e.response.status_code
-        logger.warning("Reranker HTTP error %d: %s", status, e.response.text[:200])
-        # 400/413/422 是确定性的输入过大/格式错误，换渠道也救不了，不应污染
-        # 渠道失败计数（否则 3 次后会误把可用渠道冷却 60s）；其余（5xx 等）仍上报。
-        if status not in (400, 413, 422):
-            _report(channel_id, False)
-    except Exception as e:
-        logger.warning("Reranker failed: %s", e)
-        _report(channel_id, False)
+            async with httpx.AsyncClient(**client_kw) as client:
+                response = await client.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.TimeoutException:
+            logger.warning(
+                "Reranker timeout (%ss read): query=%r, %d chunks",
+                read_to, query[:50], len(chunks),
+            )
+            _report(channel_id, False, probe_token)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            detail = _redact_secret(exc.response.text[:200], api_key)
+            logger.warning("Reranker HTTP error %d: %s", status, detail)
+            if status in (400, 413, 422):
+                # These describe deterministic input/shape errors. Switching
+                # providers cannot help, and they must not poison health state.
+                _release_probe(channel_id, probe_token)
+                return chunks, "degraded"
+            _report(channel_id, False, probe_token)
+        except Exception as exc:
+            logger.warning(
+                "Reranker failed: %s", _redact_secret(exc, api_key),
+            )
+            _report(channel_id, False, probe_token)
+        else:
+            # A parseable 2xx proves reachability. Empty or malformed rankings
+            # are data-quality failures and should not cool down the channel.
+            _report(channel_id, True, probe_token)
+            results = data.get("results", []) if isinstance(data, dict) else []
+            if not isinstance(results, list) or not results:
+                logger.warning("Reranker returned empty results")
+                return chunks, "degraded"
+
+            def _score(item: object) -> float:
+                value = item.get("relevance_score") if isinstance(item, dict) else 0
+                return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+            ranked_results = sorted(
+                results,
+                key=_score,
+                reverse=True,
+            )
+            raw_indices = [
+                item.get("index") if isinstance(item, dict) else None
+                for item in ranked_results
+            ]
+            indices = _validated_indices(
+                raw_indices,
+                chunk_count=len(chunks),
+                max_results=effective_top_n,
+            )
+            if indices is None:
+                logger.warning("Reranker returned invalid indices")
+                return chunks, "degraded"
+
+            reordered = [chunks[index] for index in indices]
+            try:
+                await asyncio.to_thread(cache.set_json, ck, indices, 3600)
+            except Exception as exc:
+                logger.warning("Reranker cache write failed: %s", exc)
+            logger.info(
+                "Reranker applied: query=%r, %d chunks -> top %d, model=%s",
+                query[:50], len(chunks), len(reordered), config["api_model"],
+            )
+            return reordered, "applied"
+
+        config = _get_reranker_config(tried)
 
     return chunks, "degraded"

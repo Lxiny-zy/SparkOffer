@@ -9,7 +9,68 @@ These helpers mirror the temp-file + ``os.replace`` pattern already used in
 """
 import os
 import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
+
+
+def file_mutation_lock_path(path: Path) -> Path:
+    """Return the shared sidecar used by every writer of one logical file."""
+    path = Path(path)
+    return path.with_name(f".{path.name}.lock")
+
+
+@contextmanager
+def exclusive_file_lock(path: Path, *, timeout: float = 30.0):
+    """Cross-process exclusive lock backed by a persistent sidecar file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    deadline = time.monotonic() + timeout
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            while True:
+                try:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Timed out locking {path}")
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Timed out locking {path}")
+                    time.sleep(0.05)
+        yield
+    finally:
+        if locked:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:

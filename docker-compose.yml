@@ -10,15 +10,21 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+    networks:
+      - data
 
   qdrant:
-    image: qdrant/qdrant:latest        # 建议生产环境 pin 具体版本，如 :v1.12.0
-    ports:
-      - "6333:6333"                     # REST / HTTP API
-      - "6334:6334"                     # gRPC
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.12.0}
+    expose:
+      - "6333"                          # REST / HTTP API (Docker network only)
+      - "6334"                          # gRPC (Docker network only)
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?Set QDRANT_API_KEY in .env}
     volumes:
       - ./data/qdrant:/qdrant/storage
     restart: unless-stopped
+    networks:
+      - data
     # qdrant/qdrant 基于 distroless，无 shell/curl —— 无法配 exec healthcheck。
     # backend 是 qdrant-only（VECTOR_BACKEND=qdrant 时不降级 numpy）：连不上时
     # 检索降级为空上下文并委派后台重建，服务本身不崩，故不强制等它 healthy。
@@ -29,19 +35,27 @@ services:
       dockerfile: backend/Dockerfile
       args:
         APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
-    ports:
-      - "9001:8000"
+    expose:
+      - "8000"                          # accessed through frontend nginx only
     volumes:
       - ./data:/app/data
+    # The backend needs application data, but must not bypass the service APIs
+    # by reading Qdrant/Redis persistence files from the shared host tree.
+    tmpfs:
+      - /app/data/qdrant:ro,noexec,nosuid,size=64k
+      - /app/data/redis:ro,noexec,nosuid,size=64k
     env_file:
       - .env
     environment:
+      - APP_ENV=${APP_ENV:-production}
       - REDIS_URL=redis://redis:6379/0
       # 向量后端默认 qdrant（KB + 记忆库都走同进程外的 Qdrant，消除大索引进程内冷加载）。
       # 仍可在 .env 覆盖：设 VECTOR_BACKEND=numpy 退回本地。
       - VECTOR_BACKEND=${VECTOR_BACKEND:-qdrant}
       - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
-      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:?Set QDRANT_API_KEY in .env}
+      # Trust the frontend and the proxy-network gateway used by host TLS ingress.
+      - TRUSTED_PROXY_CIDRS=${TRUSTED_PROXY_CIDRS:-172.30.10.1/32,172.30.10.10/32}
     depends_on:
       redis:
         condition: service_healthy
@@ -58,19 +72,36 @@ services:
         limits:
           memory: 2G
     restart: unless-stopped
+    networks:
+      - proxy
+      - data
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "9000:80"
+      # Production TLS ingress proxies to this loopback-only HTTP listener.
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:9000:80"
     depends_on:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:80/"]
       interval: 30s
       timeout: 5s
       retries: 3
     restart: unless-stopped
+    networks:
+      proxy:
+        ipv4_address: 172.30.10.10
+
+networks:
+  # Backend trusts forwarding headers only from the host-ingress gateway and
+  # the fixed frontend address; other Docker peers are not trusted proxies.
+  proxy:
+    ipam:
+      config:
+        - subnet: 172.30.10.0/24
+  data:
+    internal: true

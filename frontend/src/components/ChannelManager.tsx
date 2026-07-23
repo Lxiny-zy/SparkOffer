@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus, Trash2, ChevronDown, ChevronRight, FlaskConical,
   ArrowUp, ArrowDown, Eye, EyeOff, Loader2, CheckCircle2,
@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getChannels, saveChannels, testChannel } from "@/api/settings";
+import { getChannels, saveChannelSection, testChannel } from "@/api/settings";
 import type { ChannelHealth } from "@/types/channels";
 import { REASONING_EFFORT_HINT } from "@/lib/badge-presets";
 
@@ -27,6 +27,14 @@ const SECTION_DEFAULTS: Record<string, () => ChannelData> = {
   embedding: () => ({ id: "", name: "", backend: "api", api_base: "", keys: [""], api_model: "", local_model: "", local_path: "", priority: 1, enabled: true, proxy: "" }),
   reranker: () => ({ id: "", name: "", api_base: "", keys: [""], api_model: "", priority: 1, enabled: true, proxy: "" }),
 };
+
+function readLocalStorage(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
 
 function SecretInput({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
   const [visible, setVisible] = useState(false);
@@ -63,30 +71,46 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [testing, setTesting] = useState<Record<string, "loading" | "ok" | "error" | null>>({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [allData, setAllData] = useState<Record<string, any>>({});
+  const editGenerationRef = useRef(0);
+  const loadGenerationRef = useRef(0);
   const lastEditedKey = `channels:lastEdited:${section}`;
   const lastEditedRef = useRef<string | null>(
-    typeof window !== "undefined" ? localStorage.getItem(lastEditedKey) : null
+    typeof window !== "undefined" ? readLocalStorage(lastEditedKey) : null
   );
 
   const load = useCallback(async () => {
+    const requestGeneration = ++loadGenerationRef.current;
     try {
       const data = await getChannels();
-      setAllData(data);
+      if (requestGeneration !== loadGenerationRef.current) return;
       const sec = data[section] || {};
-      setChannels(sec.channels || []);
+      const loadedChannels = Array.isArray(sec.channels) ? sec.channels : [];
+      setChannels(loadedChannels.map((ch: ChannelData, index: number) => ({
+        ...ch,
+        keys: Array.isArray(ch.keys) ? ch.keys : [],
+        priority: Number.isFinite(ch.priority) ? ch.priority : index + 1,
+      })));
       const hm: Record<string, ChannelHealth> = {};
       for (const h of sec.health || []) hm[h.id] = h;
       setHealthMap(hm);
+      setLoadError(null);
     } catch (e: any) {
-      toast.error("Failed to load channels: " + e.message);
+      if (requestGeneration !== loadGenerationRef.current) return;
+      setLoadError(e?.message || "Unable to load channels");
+      toast.error("Failed to load channels: " + (e?.message || "Unknown error"));
     } finally {
-      setLoading(false);
+      if (requestGeneration === loadGenerationRef.current) setLoading(false);
     }
   }, [section]);
 
   useEffect(() => { load(); }, [load]);
+
+  const markEdited = () => {
+    editGenerationRef.current += 1;
+    onDirty?.(true);
+  };
 
   const updateChannel = (idx: number, patch: Partial<ChannelData>) => {
     setChannels((prev) => prev.map((ch, i) => i === idx ? { ...ch, ...patch } : ch));
@@ -95,21 +119,28 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
       lastEditedRef.current = ch.id;
       try { localStorage.setItem(lastEditedKey, ch.id); } catch { /* ignore */ }
     }
-    onDirty?.(true);
+    markEdited();
   };
 
   const addChannel = () => {
     const ch = SECTION_DEFAULTS[section]();
+    const localId = typeof crypto !== "undefined" && crypto.randomUUID
+      ? `new-${crypto.randomUUID()}`
+      : `new-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    ch.id = localId;
     ch.priority = channels.length + 1;
     ch.name = `Channel ${channels.length + 1}`;
-    setChannels((prev) => [...prev, ch]);
-    setExpanded((prev) => ({ ...prev, [`new-${channels.length}`]: true }));
-    onDirty?.(true);
+    if (section === "embedding") {
+      ch.api_model = channels.find((item) => item.api_model)?.api_model || "";
+    }
+    setChannels((prev) => [...prev, ch].map((item, index) => ({ ...item, priority: index + 1 })));
+    setExpanded((prev) => ({ ...prev, [localId]: true }));
+    markEdited();
   };
 
   const removeChannel = (idx: number) => {
-    setChannels((prev) => prev.filter((_, i) => i !== idx));
-    onDirty?.(true);
+    setChannels((prev) => prev.filter((_, i) => i !== idx).map((ch, i) => ({ ...ch, priority: i + 1 })));
+    markEdited();
   };
 
   const movePriority = (idx: number, dir: -1 | 1) => {
@@ -120,7 +151,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
       [next[idx], next[target]] = [next[target], next[idx]];
       return next.map((ch, i) => ({ ...ch, priority: i + 1 }));
     });
-    onDirty?.(true);
+    markEdited();
   };
 
   const handleKeyChange = (chIdx: number, keyIdx: number, value: string) => {
@@ -146,7 +177,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
     const chId = ch.id || `idx-${idx}`;
     setTesting((prev) => ({ ...prev, [chId]: "loading" }));
     try {
-      const testKeys = (ch.keys || []).filter((k: string) => !!k);
+      const testKeys = (ch.keys || []).map((k: string) => k.trim()).filter(Boolean);
       const testKey = testKeys[0] || "";
       const payload: any = { ...ch, api_key: testKey };
       const res = await testChannel(section, payload);
@@ -164,24 +195,29 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
   };
 
   const handleSave = async () => {
+    if (loadError || saving) return;
+    const saveGeneration = editGenerationRef.current;
+    const snapshot = channels;
     setSaving(true);
     try {
-      const cleanChannels = channels.map((ch) => {
+      const cleanChannels = snapshot.map((ch, index) => {
         const cleaned = { ...ch };
-        cleaned.keys = (cleaned.keys || []).filter((k: string) => !!k);
-        if (!cleaned.keys.length) cleaned.keys = undefined;
+        cleaned.keys = (Array.isArray(cleaned.keys) ? cleaned.keys : [])
+          .filter((k: unknown): k is string => typeof k === "string")
+          .map((k: string) => k.trim())
+          .filter(Boolean);
+        cleaned.priority = index + 1;
+        if (cleaned.temperature !== "" && cleaned.temperature != null) {
+          const temperature = Number(cleaned.temperature);
+          cleaned.temperature = Number.isFinite(temperature) ? temperature : 0.7;
+        }
         return cleaned;
       });
-      const payload: any = {};
-      // Preserve every section the backend returned (incl. reranker) and only
-      // overwrite the one being edited.
-      const sections = Object.keys(allData).length
-        ? Object.keys(allData)
-        : ["llm", "embedding", "reranker"];
-      for (const sec of sections) {
-        payload[sec] = sec === section ? cleanChannels : (allData[sec]?.channels || []);
-      }
-      await saveChannels(payload);
+      await saveChannelSection(section, cleanChannels);
+      // A future server snapshot must never overwrite edits made while the
+      // request was in flight. (The fieldset is disabled for normal UI edits,
+      // but this also protects against parent-driven updates and hot reloads.)
+      if (editGenerationRef.current !== saveGeneration) return;
       toast.success("Channels saved");
       onDirty?.(false);
       await load();
@@ -198,8 +234,19 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
     return <div className="p-6 text-center text-dim"><Loader2 className="animate-spin inline mr-2" size={16} />Loading channels...</div>;
   }
 
+  if (loadError) {
+    return (
+      <div className="p-6 text-center text-dim text-sm">
+        <p className="mb-3">Unable to load channel settings.</p>
+        <Button variant="outline" size="sm" onClick={() => { setLoading(true); void load(); }}>
+          <Loader2 size={13} className="mr-1" /> Retry
+        </Button>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-3">
+    <fieldset disabled={saving} className="space-y-3 min-w-0">
       {channels.length === 0 && (
         <div className="text-center py-6 text-dim text-sm">
           No channels configured. Add one to get started.
@@ -227,7 +274,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
           >
             <div
               className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none hover:bg-muted/30"
-              onClick={() => setExpanded((prev) => ({ ...prev, [chId]: !isOpen }))}
+              onClick={() => !saving && setExpanded((prev) => ({ ...prev, [chId]: !isOpen }))}
             >
               {isOpen ? <ChevronDown size={14} className="text-dim" /> : <ChevronRight size={14} className="text-dim" />}
               <HealthDot health={health} />
@@ -316,8 +363,11 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                           value={ch.api_model || ""}
                           onChange={(e) => {
                             const model = e.target.value;
-                            setChannels((prev) => prev.map((c, i) => ({ ...c, api_model: i === 0 ? model : model })));
-                            onDirty?.(true);
+                            setChannels((prev) => prev.map((c) => ({
+                              ...c,
+                              api_model: model,
+                            })));
+                            markEdited();
                           }}
                           placeholder="Qwen3-Embedding-8B"
                           className="h-8 text-sm"
@@ -345,7 +395,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                   {section === "llm" && (
                     <div>
                       <Label className="text-xs">Temperature</Label>
-                      <Input type="number" min={0} max={2} step={0.1} value={ch.temperature ?? 0.7} onChange={(e) => updateChannel(idx, { temperature: parseFloat(e.target.value) || 0.7 })} className="h-8 text-sm" />
+                      <Input type="number" min={0} max={2} step={0.1} value={ch.temperature ?? 0.7} onChange={(e) => updateChannel(idx, { temperature: e.target.value === "" ? "" : Number(e.target.value) })} className="h-8 text-sm" />
                     </div>
                   )}
                 </div>
@@ -453,6 +503,6 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
           Save {section.toUpperCase()} Channels
         </Button>
       </div>
-    </div>
+    </fieldset>
   );
 }

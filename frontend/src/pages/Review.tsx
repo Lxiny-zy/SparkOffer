@@ -910,44 +910,105 @@ export default function Review() {
   // review/scores, so an empty backend response for an in-progress session would
   // otherwise let it re-fire getReview on every subsequent render.
   const fetchedRef = useRef<string | null>(null);
+  const reviewRouteRef = useRef<{ sessionId: string | undefined; locationKey: string }>({
+    sessionId,
+    locationKey: location.key,
+  });
+  const reviewRequestGenerationRef = useRef(0);
+  const ragRequestGenerationRef = useRef(0);
+
+  // React Router reuses this component when only the session parameter changes.
+  // Clear the previous session's state before allowing the new request to run.
+  useEffect(() => {
+    const previous = reviewRouteRef.current;
+    if (previous.sessionId === sessionId && previous.locationKey === location.key) return;
+
+    reviewRouteRef.current = { sessionId, locationKey: location.key };
+    reviewRequestGenerationRef.current += 1;
+    ragRequestGenerationRef.current += 1;
+    fetchedRef.current = null;
+
+    const nextState: any = location.state || {};
+    setReview(nextState.review || null);
+    setScores(nextState.scores || null);
+    setOverall(nextState.overall || null);
+    setQuestions(nextState.questions || []);
+    setAnswers(nextState.answers || []);
+    setMessages(nextState.messages || []);
+    setMode(nextState.mode || null);
+    setTopic(nextState.topic || null);
+    setTopicsCovered(nextState.topics_covered || []);
+    setMeta(nextState.meta || {});
+    setShowTranscript(false);
+    setRefAnswersCache({});
+    setRagEvalMetrics(nextState.ragEvalMetrics || null);
+    setLoading(!nextState.review && !nextState.scores);
+    setSyncing(false);
+  }, [sessionId, location.key, location.state]);
 
   useEffect(() => {
-    if (!review && !scores) {
-      if (fetchedRef.current === sessionId) return;
-      fetchedRef.current = sessionId;
-      setLoading(true);
-      getReview(sessionId)
-        .then((data: any) => {
-          setReview(data.review);
-          if (data.scores) setScores(data.scores);
-          if (data.questions) setQuestions(data.questions);
-          if (data.transcript) setMessages(data.transcript);
-          if (data.mode) setMode(data.mode);
-          if (data.topic) setTopic(data.topic);
-          if (data.overall && Object.keys(data.overall).length) {
-            setOverall(data.overall);
-          } else if (data.weak_points) {
-            const wp = Array.isArray(data.weak_points) ? data.weak_points : [];
-            if (wp.length) setOverall((prev) => ({ ...prev, new_weak_points: wp }));
-          }
-          if (data.topics_covered) setTopicsCovered(data.topics_covered);
-          if (data.meta) setMeta(data.meta);
-          if (data.reference_answers && Object.keys(data.reference_answers).length) {
-            setRefAnswersCache(data.reference_answers);
-          }
-          if (data.mode === "topic_drill" || data.mode === "jd_prep") {
-            setAnswers(inferAnswers(data.questions || [], data.transcript || []));
-          }
-        })
-        .catch((err: any) => setReview("加载失败: " + err.message))
-        .finally(() => setLoading(false));
-    }
-  }, [sessionId, review, scores]);
+    if (!sessionId || review || scores) return;
+    if (location.state?.review || location.state?.scores) return;
+    if (fetchedRef.current === sessionId) return;
+
+    fetchedRef.current = sessionId;
+    const requestSessionId = sessionId;
+    const requestLocationKey = location.key;
+    const generation = ++reviewRequestGenerationRef.current;
+    const isCurrentRequest = () => (
+      generation === reviewRequestGenerationRef.current
+      && reviewRouteRef.current.sessionId === requestSessionId
+      && reviewRouteRef.current.locationKey === requestLocationKey
+    );
+
+    setLoading(true);
+    getReview(requestSessionId)
+      .then((data: any) => {
+        if (!isCurrentRequest()) return;
+        setReview(data.review);
+        if (data.scores) setScores(data.scores);
+        if (data.questions) setQuestions(data.questions);
+        if (data.transcript) setMessages(data.transcript);
+        if (data.mode) setMode(data.mode);
+        if (data.topic) setTopic(data.topic);
+        if (data.overall && Object.keys(data.overall).length) {
+          setOverall(data.overall);
+        } else if (data.weak_points) {
+          const wp = Array.isArray(data.weak_points) ? data.weak_points : [];
+          if (wp.length) setOverall((prev) => ({ ...prev, new_weak_points: wp }));
+        }
+        if (data.topics_covered) setTopicsCovered(data.topics_covered);
+        if (data.meta) setMeta(data.meta);
+        if (data.reference_answers && Object.keys(data.reference_answers).length) {
+          setRefAnswersCache(data.reference_answers);
+        }
+        if (data.mode === "topic_drill" || data.mode === "jd_prep") {
+          setAnswers(inferAnswers(data.questions || [], data.transcript || []));
+        }
+      })
+      .catch((err: any) => {
+        if (isCurrentRequest()) setReview("加载失败: " + err.message);
+      })
+      .finally(() => {
+        if (isCurrentRequest()) setLoading(false);
+      });
+  }, [sessionId, location.key, location.state, review, scores]);
 
   useEffect(() => {
     if (ragEvalMetrics || !sessionId) return;
-    getSessionRAGMetrics(sessionId)
+    if (location.state?.ragEvalMetrics) return;
+    const requestSessionId = sessionId;
+    const requestLocationKey = location.key;
+    const generation = ++ragRequestGenerationRef.current;
+    const isCurrentRequest = () => (
+      generation === ragRequestGenerationRef.current
+      && reviewRouteRef.current.sessionId === requestSessionId
+      && reviewRouteRef.current.locationKey === requestLocationKey
+    );
+
+    getSessionRAGMetrics(requestSessionId)
       .then((records) => {
+        if (!isCurrentRequest()) return;
         const evalRec = records.find((r) => r.stage === "answer_eval");
         if (evalRec && (evalRec.faithfulness != null || evalRec.answer_relevance != null)) {
           setRagEvalMetrics({
@@ -963,9 +1024,14 @@ export default function Review() {
         }
       })
       .catch(() => {});
-  }, [sessionId, ragEvalMetrics]);
+  }, [sessionId, location.key, location.state, ragEvalMetrics]);
 
-  if (loading) {
+  const routeChanged = (
+    reviewRouteRef.current.sessionId !== sessionId
+    || reviewRouteRef.current.locationKey !== location.key
+  );
+
+  if (loading || routeChanged) {
     return (
       <div className="flex-1 flex items-center justify-center py-15 text-dim">
         <div className="flex flex-col items-center gap-3">
@@ -993,18 +1059,35 @@ export default function Review() {
   const synced = !!meta?.synced_at;
   const handleSync = async () => {
     if (!sessionId || syncing) return;
+    const requestSessionId = sessionId;
+    const requestLocationKey = location.key;
+    const isCurrentSession = () => (
+      reviewRouteRef.current.sessionId === requestSessionId
+      && reviewRouteRef.current.locationKey === requestLocationKey
+    );
     if (!window.confirm(
       "将本次评估结果同步到用户画像与知识库沉淀。\n\n仅在该会话的画像/知识库此前未更新时使用；已正常计入的会话请勿重复同步，以免重复计数。"
     )) return;
     setSyncing(true);
     try {
-      const res = await syncSession(sessionId);
-      setMeta((m) => ({ ...m, synced_at: res.synced_at || new Date().toISOString() }));
+      const res = await syncSession(requestSessionId);
+      if (!isCurrentSession()) return;
+      if (res.status === "sync_in_progress") {
+        // Another worker owns the claim. Do not manufacture a local synced_at:
+        // doing so would hide the retry path while the durable side-effects may
+        // still be incomplete.
+        toast.info("该会话仍在同步中，请稍后刷新");
+        return;
+      }
+      setMeta((m) => ({
+        ...m,
+        synced_at: res.synced_at || new Date().toISOString(),
+      }));
       toast.success(res.status === "already_synced" ? "该会话此前已同步" : "已同步到画像与知识库");
     } catch (e: any) {
-      toast.error("同步失败: " + (e?.message || e));
+      if (isCurrentSession()) toast.error("同步失败: " + (e?.message || e));
     } finally {
-      setSyncing(false);
+      if (isCurrentSession()) setSyncing(false);
     }
   };
 
@@ -1047,7 +1130,7 @@ export default function Review() {
         )}
       </div>
 
-      <div className="stagger-children">
+      <div className="stagger-children" key={`${sessionId || "review"}:${location.key}`}>
         {isRecording && !isRecordingDual ? (
           <SoloRecordingReview topicsCovered={topicsCovered} overall={overall} />
         ) : isJobPrep ? (

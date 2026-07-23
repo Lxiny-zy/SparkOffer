@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { FileText, ChevronRight, Sparkles, Target, TrendingUp, Zap, BriefcaseBusiness, AlertCircle, CheckCircle2, Brain } from "lucide-react";
+import { FileText, ChevronRight, Target, TrendingUp, Zap, BriefcaseBusiness, AlertCircle, CheckCircle2, Brain } from "lucide-react";
 import { toast } from "sonner";
 import TopicCard from "../components/TopicCard";
 import { getTopics, startInterview, startInterviewStream, getResumeStatus, uploadResume, getProfile, getDueReviews } from "../api/interview";

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis,
-  CartesianGrid, Tooltip, Legend,
+  CartesianGrid, Tooltip,
 } from "recharts";
 import { ScoreHistoryEntry } from "../../types/api";
 
@@ -21,15 +21,16 @@ interface DimensionTrendChartProps {
 
 export default function DimensionTrendChart({ history }: DimensionTrendChartProps) {
   const entries = (history || []).filter((h) => h.dimension_scores && Object.keys(h.dimension_scores).length > 0);
-  if (entries.length < 2) return null;
-
   const allDims = new Set<string>();
   entries.forEach((e) => {
     Object.keys(e.dimension_scores!).forEach((k) => allDims.add(k));
   });
   const dims = [...allDims].filter((d) => DIMENSIONS[d]);
+  // Store opt-outs so dimensions that arrive after the first render are
+  // visible by default without synchronizing derived state in an effect.
+  const [hidden, setHidden] = useState<Set<string>>(() => new Set());
 
-  const [visible, setVisible] = useState<Set<string>>(new Set(dims));
+  if (entries.length < 2) return null;
 
   const data = entries.map((e, i) => ({
     index: i,
@@ -38,7 +39,7 @@ export default function DimensionTrendChart({ history }: DimensionTrendChartProp
   }));
 
   const toggle = (dim: string) => {
-    setVisible((prev) => {
+    setHidden((prev) => {
       const next = new Set(prev);
       if (next.has(dim)) next.delete(dim);
       else next.add(dim);
@@ -51,7 +52,7 @@ export default function DimensionTrendChart({ history }: DimensionTrendChartProp
       <div className="flex flex-wrap gap-2 mb-3">
         {dims.map((dim) => {
           const info = DIMENSIONS[dim];
-          const active = visible.has(dim);
+          const active = !hidden.has(dim);
           return (
             <button
               key={dim}
@@ -96,7 +97,7 @@ export default function DimensionTrendChart({ history }: DimensionTrendChartProp
             ]}
           />
           {dims
-            .filter((d) => visible.has(d))
+            .filter((d) => !hidden.has(d))
             .map((dim) => (
               <Line
                 key={dim}

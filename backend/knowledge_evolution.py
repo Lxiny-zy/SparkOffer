@@ -1,11 +1,17 @@
 """Knowledge evolution — auto-writeback from interviews + high-freq collection."""
 import asyncio
+import hashlib
 import logging
+import re
 from pathlib import Path
 
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
-from backend.utils.files import atomic_write_text
+from backend.utils.files import (
+    atomic_write_text,
+    exclusive_file_lock,
+    file_mutation_lock_path,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -34,16 +40,43 @@ def _cap_deposit(text: str) -> str:
     return head.rstrip() + "\n\n<!-- 已截断（超单次沉淀上限） -->"
 
 
-def _append_sync(path: Path, block: str) -> None:
-    """Read-modify-write append, atomic. Runs in a worker thread."""
-    existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    atomic_write_text(path, existing + block)
+def _append_sync(path: Path, block: str, marker: str = "") -> bool:
+    """Read-dedup-write atomically. Return whether a new block was appended."""
+    with exclusive_file_lock(file_mutation_lock_path(path)):
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        if marker and marker in existing:
+            return False
+        atomic_write_text(path, existing + block)
+        return True
 
 
-async def _append_atomic(path: Path, block: str) -> None:
+async def _append_atomic(path: Path, block: str, marker: str = "") -> bool:
     """Append ``block`` to ``path`` race-safe (lock) + crash-safe (atomic) + off-loop."""
     async with _writeback_lock:
-        await asyncio.to_thread(_append_sync, path, block)
+        return await asyncio.to_thread(_append_sync, path, block, marker)
+
+
+def _marker_exists_sync(path: Path, marker: str) -> bool:
+    with exclusive_file_lock(file_mutation_lock_path(path)):
+        return bool(
+            marker
+            and path.exists()
+            and marker in path.read_text(encoding="utf-8")
+        )
+
+
+async def _marker_exists(path: Path, marker: str) -> bool:
+    if not marker:
+        return False
+    async with _writeback_lock:
+        return await asyncio.to_thread(_marker_exists_sync, path, marker)
+
+
+def _operation_marker(operation_id: str | None) -> str:
+    if not operation_id:
+        return ""
+    digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+    return f"<!-- session-sync-operation:{digest} -->"
 
 _EXTRACT_PROMPT = """你是一个知识提取引擎。请从以下面试 Q&A 中提取有价值的知识点。
 
@@ -59,25 +92,43 @@ _EXTRACT_PROMPT = """你是一个知识提取引擎。请从以下面试 Q&A 中
 
 
 async def extract_and_writeback(
-    topic: str, questions: list, answers: list, scores: list, user_id: str
-):
+    topic: str, questions: list, answers: list, scores: list, user_id: str,
+    operation_id: str | None = None,
+)-> bool:
     """Extract knowledge from Q&A and append to topic knowledge base."""
     try:
         worthy = []
         for i, s in enumerate(scores):
             if i >= len(questions):
                 break
-            score_val = s.get("score", 5) if isinstance(s, dict) else 5
+            from backend.rag_metrics import clamp_score_0_10
+            score_val = clamp_score_0_10(s.get("score")) if isinstance(s, dict) else None
+            if score_val is None:
+                continue
             if score_val >= 7 or score_val < 6:
                 q_text = questions[i].get("question", str(questions[i])) if isinstance(questions[i], dict) else str(questions[i])
-                a_text = answers[i] if i < len(answers) else "(未作答)"
+                raw_answer = answers[i] if i < len(answers) else "(未作答)"
+                a_text = raw_answer.get("answer", "") if isinstance(raw_answer, dict) else raw_answer
                 assessment = s.get("assessment", "") if isinstance(s, dict) else ""
                 worthy.append(
                     f"Q: {q_text}\nA: {a_text}\n得分: {score_val}\n评价: {assessment}"
                 )
 
         if not worthy:
-            return
+            return True
+
+        topics = _get_topic_dir(topic, user_id)
+        if not topics:
+            return False
+
+        target = topics / "自动沉淀.md"
+        operation_marker = _operation_marker(operation_id)
+        if await _marker_exists(target, operation_marker):
+            # The append may have committed before its incremental index task
+            # was queued. Make the source file authoritative on recovery.
+            from backend.indexer import mark_topic_index_dirty
+            await asyncio.to_thread(mark_topic_index_dirty, topic, user_id)
+            return True
 
         qa_text = "\n\n---\n\n".join(worthy)
         llm = get_langchain_llm()
@@ -85,17 +136,21 @@ async def extract_and_writeback(
         response = await llm.ainvoke([HumanMessage(content=_EXTRACT_PROMPT.format(qa_text=qa_text))])
         extracted = response.content.strip()
         if not extracted or len(extracted) < 20:
-            return
+            return True
 
-        topics = _get_topic_dir(topic, user_id)
-        if not topics:
-            return
-
-        target = topics / "自动沉淀.md"
         from datetime import datetime
-        header = f"\n\n---\n\n<!-- 自动沉淀 {datetime.now().strftime('%Y-%m-%d %H:%M')} -->\n\n"
+        header = (
+            f"\n\n---\n\n<!-- 自动沉淀 {datetime.now().strftime('%Y-%m-%d %H:%M')} -->"
+            f"{operation_marker}\n\n"
+        )
         extracted = _cap_deposit(extracted)
-        await _append_atomic(target, header + extracted + "\n")
+        appended = await _append_atomic(
+            target, header + extracted + "\n", operation_marker,
+        )
+        if not appended:
+            from backend.indexer import mark_topic_index_dirty
+            await asyncio.to_thread(mark_topic_index_dirty, topic, user_id)
+            return True
 
         # Background embedding: only embed the new knowledge content (incremental insert).
         # No full rebuild — the new .md content is the only thing that changed,
@@ -103,40 +158,58 @@ async def extract_and_writeback(
         from backend.embedding_tasks import schedule_incremental_insert
         schedule_incremental_insert(topic, user_id, extracted)
         logger.info(f"Knowledge writeback: {len(worthy)} items → {target}")
+        return True
     except Exception as e:
         logger.warning(f"Knowledge writeback failed for {topic}: {e}")
+        return False
 
 
 async def collect_high_freq(
-    topic: str, questions: list, scores: list, user_id: str
-):
+    topic: str, questions: list, scores: list, user_id: str,
+    operation_id: str | None = None,
+)-> bool:
     """Collect low-scoring questions into high-freq bank for future review."""
     try:
         low_score_items = []
         for i, s in enumerate(scores):
             if i >= len(questions):
                 break
-            score_val = s.get("score", 5) if isinstance(s, dict) else 5
+            from backend.rag_metrics import clamp_score_0_10
+            score_val = clamp_score_0_10(s.get("score")) if isinstance(s, dict) else None
+            if score_val is None:
+                continue
             if score_val < 6:
                 q_text = questions[i].get("question", str(questions[i])) if isinstance(questions[i], dict) else str(questions[i])
                 assessment = s.get("assessment", "") if isinstance(s, dict) else ""
                 low_score_items.append((q_text, score_val, assessment))
 
         if not low_score_items:
-            return
+            return True
 
         high_freq_dir = settings.user_high_freq_path(user_id)
         filepath = high_freq_dir / f"{topic}.md"
+        operation_marker = _operation_marker(operation_id)
+        if await _marker_exists(filepath, operation_marker):
+            return True
 
         from datetime import datetime
-        lines = [f"\n\n<!-- {datetime.now().strftime('%Y-%m-%d %H:%M')} -->"]
+        lines = [
+            f"\n\n<!-- {datetime.now().strftime('%Y-%m-%d %H:%M')} -->"
+            f"{operation_marker}"
+        ]
         for q, score, assessment in low_score_items:
             lines.append(f"\n## Q: {q}\n得分: {score}\n评估: {assessment}\n---")
 
-        await _append_atomic(filepath, "\n".join(lines) + "\n")
+        appended = await _append_atomic(
+            filepath, "\n".join(lines) + "\n", operation_marker,
+        )
+        if not appended:
+            return True
         logger.info(f"High-freq collection: {len(low_score_items)} items → {filepath}")
+        return True
     except Exception as e:
         logger.warning(f"High-freq collection failed for {topic}: {e}")
+        return False
 
 
 def _get_topic_dir(topic: str, user_id: str) -> Path | None:
@@ -181,7 +254,13 @@ def _resolve_topic_key(raw: str, topics: dict) -> str:
     return ""
 
 
-async def ingest_qa_card_to_knowledge(card_content: str, user_id: str) -> dict:
+async def ingest_qa_card_to_knowledge(
+    card_content: str,
+    user_id: str,
+    *,
+    idempotency_marker: str | None = None,
+    claim_token: str | None = None,
+) -> dict:
     """Promote a QA-arena knowledge card into the RAG knowledge base (user-confirmed).
 
     Unlike drill writeback (score-gated), a free-chat summary has no quality signal, so we
@@ -191,7 +270,7 @@ async def ingest_qa_card_to_knowledge(card_content: str, user_id: str) -> dict:
     embedded so future RAG retrieval can use it. Returns {ok, topic, reason}.
     """
     from langchain_core.messages import HumanMessage
-    from backend.indexer import load_topics, get_topic_map
+    from backend.indexer import load_topics
     from backend.prompts.knowledge import QA_TOPIC_CLASSIFY_PROMPT, QA_KNOWLEDGE_CLEAN_PROMPT
 
     card_content = (card_content or "").strip()
@@ -202,73 +281,139 @@ async def ingest_qa_card_to_knowledge(card_content: str, user_id: str) -> dict:
     if not topics:
         return {"ok": False, "topic": None, "reason": "暂无可用知识库主题"}
 
-    # 1) classify into ONE existing topic key (or NONE). Low reasoning — trivial routing;
-    #    high effort would only add latency (and a long "thinking" wait on the button).
-    #    (Not "minimal": some models don't expose that tier, so "low" is the safe floor.)
-    classify_llm = get_langchain_llm(reasoning_effort="low")
-    topic_list = "\n".join(f"- {k}: {v.get('name', k)}" for k, v in topics.items())
-    # Window-derived budget for the card text instead of the old [:3000] / [:8000]
-    # char cuts. Helper trims card_content to fit whatever room the template leaves.
-    from backend.context_assembler import ContextBudget, Section, resolve_input_budget, count_tokens
+    marker = (
+        idempotency_marker
+        if idempotency_marker and re.fullmatch(r"[a-f0-9]{64}", idempotency_marker)
+        else None
+    )
+    plan = None
+    if marker and claim_token:
+        from backend.storage.qa_sessions import get_ingest_plan
 
-    def _fit_card(template_filled_blank: str) -> str:
-        budget = max(1000, resolve_input_budget() - count_tokens(template_filled_blank))
-        return ContextBudget(budget).pack([Section("card", card_content, priority=1)]).get("card")
+        plan = get_ingest_plan(user_id, marker, claim_token)
 
-    try:
-        resp = await classify_llm.ainvoke([HumanMessage(
-            content=QA_TOPIC_CLASSIFY_PROMPT.format(
-                topics=topic_list,
-                card=_fit_card(QA_TOPIC_CLASSIFY_PROMPT.format(topics=topic_list, card="")),
+    if plan is not None:
+        key, cleaned = plan
+        if key not in topics:
+            return {
+                "ok": False,
+                "topic": None,
+                "reason": "原收录主题已不存在，未继续写入",
+            }
+    else:
+        # 1) Classify into one existing topic. Persist the resulting write plan
+        # before touching disk so a crash/retry cannot drift into another topic.
+        classify_llm = get_langchain_llm(reasoning_effort="low")
+        topic_list = "\n".join(
+            f"- {k}: {v.get('name', k)}" for k, v in topics.items()
+        )
+        from backend.context_assembler import (
+            ContextBudget,
+            Section,
+            count_tokens,
+            resolve_input_budget,
+        )
+
+        def _fit_card(template_filled_blank: str) -> str:
+            budget = max(
+                1000,
+                resolve_input_budget() - count_tokens(template_filled_blank),
             )
-        )])
-        raw_key = (resp.content or "").strip()
-    except Exception as e:
-        logger.warning("QA card topic classify failed: %s", e)
-        return {"ok": False, "topic": None, "reason": "主题分类失败，请重试"}
+            return ContextBudget(budget).pack([
+                Section("card", card_content, priority=1)
+            ]).get("card")
 
-    # Tolerant match: case-insensitive, against both topic keys AND display names, so a model
-    # returning "Python" / "Python后端" / "PYTHON" still resolves to the key.
-    key = _resolve_topic_key(raw_key, topics)
-    if not key:
-        return {"ok": False, "topic": None, "reason": "这张卡片与现有知识库主题都不太匹配，未收录"}
+        try:
+            resp = await classify_llm.ainvoke([HumanMessage(
+                content=QA_TOPIC_CLASSIFY_PROMPT.format(
+                    topics=topic_list,
+                    card=_fit_card(
+                        QA_TOPIC_CLASSIFY_PROMPT.format(
+                            topics=topic_list, card="",
+                        )
+                    ),
+                )
+            )])
+            raw_key = (resp.content or "").strip()
+        except Exception as e:
+            logger.warning("QA card topic classify failed: %s", e)
+            return {"ok": False, "topic": None, "reason": "主题分类失败，请重试"}
 
-    # 2) factualize / clean before it becomes retrieval "knowledge". "low" effort is plenty
-    #    for extract-and-rewrite and avoids the multi-minute think a reasoning model would do.
-    clean_llm = get_langchain_llm(reasoning_effort="low")
-    try:
-        resp2 = await clean_llm.ainvoke([HumanMessage(
-            content=QA_KNOWLEDGE_CLEAN_PROMPT.format(card=_fit_card(QA_KNOWLEDGE_CLEAN_PROMPT.format(card="")))
-        )])
-        cleaned = (resp2.content or "").strip()
-    except Exception as e:
-        logger.warning("QA card clean failed: %s", e)
-        return {"ok": False, "topic": None, "reason": "清洗失败，请重试"}
+        key = _resolve_topic_key(raw_key, topics)
+        if not key:
+            return {
+                "ok": False,
+                "topic": None,
+                "reason": "这张卡片与现有知识库主题都不太匹配，未收录",
+            }
 
-    if not cleaned or cleaned.upper() == "NONE" or len(cleaned) < 20:
-        return {"ok": False, "topic": None, "reason": "卡片中没有适合长期收录的确定知识，未收录"}
+        # 2) Factualize before it becomes retrieval knowledge.
+        clean_llm = get_langchain_llm(reasoning_effort="low")
+        try:
+            resp2 = await clean_llm.ainvoke([HumanMessage(
+                content=QA_KNOWLEDGE_CLEAN_PROMPT.format(
+                    card=_fit_card(QA_KNOWLEDGE_CLEAN_PROMPT.format(card=""))
+                )
+            )])
+            cleaned = (resp2.content or "").strip()
+        except Exception as e:
+            logger.warning("QA card clean failed: %s", e)
+            return {"ok": False, "topic": None, "reason": "清洗失败，请重试"}
+
+        if not cleaned or cleaned.upper() == "NONE" or len(cleaned) < 20:
+            return {
+                "ok": False,
+                "topic": None,
+                "reason": "卡片中没有适合长期收录的确定知识，未收录",
+            }
+        cleaned = _cap_deposit(cleaned)
 
     # 3) write to a provenance-marked, QA-specific file under the topic dir.
     topic_dir = _get_topic_dir(key, user_id)
     if topic_dir is None:
         return {"ok": False, "topic": None, "reason": "主题目录不存在，未收录"}
-    target = topic_dir / "用户沉淀_qa.md"
     cleaned = _cap_deposit(cleaned)
+    if marker and claim_token:
+        from backend.storage.qa_sessions import save_ingest_plan
+
+        # Re-persisting an existing plan also refreshes and fences the lease.
+        # If a stale session was deleted while this worker was paused, the
+        # token-scoped update fails before the knowledge file can be touched.
+        if not save_ingest_plan(
+            user_id, marker, claim_token, key, cleaned,
+        ):
+            raise RuntimeError("QA ingest lease changed before write plan persisted")
+
+    target = topic_dir / "用户沉淀_qa.md"
     from datetime import datetime
-    header = f"\n\n---\n\n<!-- 问答演练场收录 {datetime.now().strftime('%Y-%m-%d %H:%M')} -->\n\n"
+    marker_comment = f"<!-- qa-ingest-id:{marker} -->" if marker else ""
+    header = (
+        f"\n\n---\n\n<!-- 问答演练场收录 {datetime.now().strftime('%Y-%m-%d %H:%M')} -->"
+        f"{marker_comment}\n\n"
+    )
 
     def _dedup_append() -> bool:
         """Read-dedup-write under one critical section so a concurrent ingest
         can't slip a duplicate past the check. Returns False if already present."""
-        existing = target.read_text(encoding="utf-8") if target.exists() else ""
-        if cleaned[:200] in existing:
-            return False
-        atomic_write_text(target, existing + header + cleaned + "\n")
-        return True
+        with exclusive_file_lock(file_mutation_lock_path(target)):
+            existing = target.read_text(encoding="utf-8") if target.exists() else ""
+            if (
+                (marker_comment and marker_comment in existing)
+                or cleaned[:200] in existing
+            ):
+                return False
+            atomic_write_text(target, existing + header + cleaned + "\n")
+            return True
 
     async with _writeback_lock:
         appended = await asyncio.to_thread(_dedup_append)
     if not appended:
+        # A prior worker may have crashed after the durable append but before
+        # enqueueing the incremental insert. Invalidating the fingerprint makes
+        # the source file authoritative again without risking a duplicate
+        # incremental node when the first insert actually did finish.
+        from backend.indexer import mark_topic_index_dirty
+        await asyncio.to_thread(mark_topic_index_dirty, key, user_id)
         return {"ok": True, "topic": topics[key].get("name", key), "reason": "该内容已在知识库中"}
 
     # 4) incremental embed so RAG retrieval can use it without a full rebuild.

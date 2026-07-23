@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { X, Clock, MessageSquare, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
@@ -30,12 +30,14 @@ export default function History() {
   const [topicFilter, setTopicFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"completed" | "in_progress">("completed");
   const [topics, setTopics] = useState<{ key: string; name: string }[]>([]);
+  const filterGenerationRef = useRef(0);
 
   useEffect(() => { getInterviewTopics().then(setTopics).catch(() => {}); }, []);
 
   // sessions.length intentionally NOT in deps — that would refetch every time
   // setSessions runs and re-create the callback. Loaders pass their own offset.
   const fetchSessions = useCallback((reset: boolean, currentLen = 0) => {
+    const generation = reset ? ++filterGenerationRef.current : filterGenerationRef.current;
     const offset = reset ? 0 : currentLen;
     const setter = reset ? setLoading : setLoadingMore;
     setter(true);
@@ -43,14 +45,21 @@ export default function History() {
     const topic = topicFilter === "all" ? null : topicFilter;
     getHistory(PAGE_SIZE, offset, mode, topic, statusFilter)
       .then((data: any) => {
+        if (generation !== filterGenerationRef.current) return;
         setSessions((prev) => (reset ? data.items : [...prev, ...data.items]));
         setTotal(data.total);
       })
       .catch(() => {})
-      .finally(() => setter(false));
+      .finally(() => {
+        if (generation === filterGenerationRef.current) setter(false);
+      });
   }, [modeFilter, topicFilter, statusFilter]);
 
-  useEffect(() => { fetchSessions(true); }, [modeFilter, topicFilter, statusFilter, fetchSessions]);
+  useEffect(() => {
+    // Fetching the current server-side filter is this effect's external synchronization.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchSessions(true);
+  }, [fetchSessions]);
 
   const handleModeChange = (mode: string) => {
     if (mode === "resume") setTopicFilter("all");

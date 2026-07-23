@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Bot, Database, Eye, EyeOff, Loader2,
   Save, User, Lock, Activity, ListOrdered, SlidersHorizontal,
@@ -165,7 +165,7 @@ function AccountSection() {
     }
     setSavingPassword(true);
     try {
-      await changePassword({ old_password: currentPassword, new_password: newPassword });
+      await changePassword({ current_password: currentPassword, new_password: newPassword });
       toast.success("Password changed successfully");
       setCurrentPassword("");
       setNewPassword("");
@@ -252,10 +252,13 @@ export default function Settings() {
   const { user } = useAuth();
   const isOwner = !!user?.is_owner;
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
+  const healthGenerationRef = useRef(0);
 
   const loadHealth = useCallback(async () => {
+    const generation = ++healthGenerationRef.current;
     try {
       const data = await getChannelsHealth();
+      if (generation !== healthGenerationRef.current) return;
       const summarize = (list: any[] | undefined): SectionHealth => {
         const arr = Array.isArray(list) ? list : [];
         const healthy = arr.filter((h) => h.healthy).length;
@@ -271,10 +274,14 @@ export default function Settings() {
 
   useEffect(() => {
     if (!isOwner) return;
-    loadHealth();
-    const onFocus = () => loadHealth();
+    const initialLoad = window.setTimeout(() => { void loadHealth(); }, 0);
+    const onFocus = () => { void loadHealth(); };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    return () => {
+      healthGenerationRef.current += 1;
+      window.clearTimeout(initialLoad);
+      window.removeEventListener("focus", onFocus);
+    };
   }, [loadHealth, isOwner]);
 
   return (

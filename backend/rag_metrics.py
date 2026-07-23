@@ -35,6 +35,7 @@ measure — callers must treat that as "not measured", never persist it.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -70,7 +71,10 @@ def clamp_score_0_10(value) -> float | None:
             return None
     if not isinstance(value, (int, float)):
         return None
-    return max(0.0, min(10.0, float(value)))
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return None
+    return max(0.0, min(10.0, numeric))
 
 
 @dataclass

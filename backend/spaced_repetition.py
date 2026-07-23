@@ -9,7 +9,13 @@ from datetime import date, timedelta
 from contextlib import contextmanager
 
 from backend import memory as _memory
-from backend.memory import _load_profile, _save_profile, ProfileTransactionAbort
+from backend.memory import (
+    _get_applied_operation,
+    _load_profile,
+    _record_applied_operation,
+    _save_profile,
+    ProfileTransactionAbort,
+)
 
 
 @contextmanager
@@ -96,7 +102,8 @@ def get_due_reviews(user_id: str, topic: str = None) -> list[dict]:
 
 
 def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str,
-                          difficulty: int = 3):
+                          difficulty: int = 3,
+                          operation_id: str | None = None):
     """Update spaced repetition state + per-WP mastery for matching weak points.
 
     Per-WP mastery uses EWMA so it tracks recent performance rather than
@@ -124,7 +131,12 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
 
     # Whole read-modify-write inside the per-user lock: SR state must not be
     # clobbered by a concurrent profile writer holding an older snapshot.
+    matched = 0
+    duplicate = False
     with _profile_transaction(user_id) as profile:
+        if _get_applied_operation(profile, operation_id) is not None:
+            duplicate = True
+            raise ProfileTransactionAbort
         matched = 0
         for wp in profile.get("weak_points", []):
             if wp.get("improved"):
@@ -174,10 +186,11 @@ def update_weak_point_sr(topic: str, point_text: str, score: float, user_id: str
                     })
             matched += 1
 
-        if not matched:
+        _record_applied_operation(profile, operation_id)
+        if not matched and not operation_id:
             raise ProfileTransactionAbort  # nothing changed — skip the save
 
-    return matched > 0
+    return not duplicate and matched > 0
 
 
 def init_sr_for_existing_points(user_id: str):

@@ -1,8 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Markdown } from "../components/ChatBubble";
 import {
   Star, Trash2, Download, Tag, ChevronDown, ChevronUp,
-  Filter, SortAsc, X, Edit3, Check,
+  Filter, X, Check,
 } from "lucide-react";
 import {
   getFavorites, deleteFavorite, updateFavorite,
@@ -47,24 +47,32 @@ export default function Favorites() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [editingTags, setEditingTags] = useState<string | null>(null);
   const [tagInput, setTagInput] = useState("");
+  const loadGenerationRef = useRef(0);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
+    const generation = ++loadGenerationRef.current;
     setLoading(true);
     try {
       const [favData, tags] = await Promise.all([
         getFavorites({ topic: topicFilter || undefined, tag: tagFilter || undefined, sort_by: sortBy }),
         getFavoriteTags(),
       ]);
-      setItems(favData.items);
-      setTotal(favData.total);
-      setAllTags(tags);
+      if (generation === loadGenerationRef.current) {
+        setItems(favData.items);
+        setTotal(favData.total);
+        setAllTags(tags);
+      }
     } catch (e) {
       console.error("加载收藏失败:", e);
     }
-    setLoading(false);
-  };
+    if (generation === loadGenerationRef.current) setLoading(false);
+  }, [sortBy, tagFilter, topicFilter]);
 
-  useEffect(() => { loadData(); }, [topicFilter, tagFilter, sortBy]);
+  useEffect(() => {
+    // Loading filtered server data is the external synchronization performed by this effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadData();
+  }, [loadData]);
 
   const handleDelete = async (id: string) => {
     if (!confirm("确定删除这条收藏？")) return;
@@ -121,7 +129,7 @@ export default function Favorites() {
       setItems((prev) => prev.map((it) => it.id === id ? { ...it, tags } : it));
       setEditingTags(null);
       setTagInput("");
-      loadData();
+      void loadData();
     } catch (e) {
       console.error("更新标签失败:", e);
     }
@@ -132,7 +140,8 @@ export default function Favorites() {
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
       const s = new Set(prev);
-      s.has(id) ? s.delete(id) : s.add(id);
+      if (s.has(id)) s.delete(id);
+      else s.add(id);
       return s;
     });
   };

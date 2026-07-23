@@ -1,11 +1,32 @@
+import ipaddress
 from pathlib import Path
+from urllib.parse import urlsplit
 from pydantic_settings import BaseSettings
 
 
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
+_DEVELOPMENT_ENVS = {"dev", "development", "local", "test"}
+_DEFAULT_JWT_SECRET = "change-me-in-production"
+_DEFAULT_PASSWORD = "legend"
+
+
+def _is_loopback_hostname(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    folded = hostname.rstrip(".").casefold()
+    if folded == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(folded).is_loopback
+    except ValueError:
+        return False
 
 
 class Settings(BaseSettings):
+    # Runtime environment. Insecure bootstrap defaults are allowed only when
+    # development is explicitly selected.
+    app_env: str = "production"
+
     # LLM (OpenAI-compatible proxy)
     api_base: str = ""
     api_key: str = ""
@@ -38,9 +59,9 @@ class Settings(BaseSettings):
     checkpoint_db_path: Path = Path(__file__).resolve().parent.parent / "data" / "checkpoints.db"
 
     # Auth
-    jwt_secret: str = "change-me-in-production"
+    jwt_secret: str = _DEFAULT_JWT_SECRET
     default_email: str = "legend@sparkoffer.local"
-    default_password: str = "legend"
+    default_password: str = _DEFAULT_PASSWORD
     default_name: str = "Legend"
     allow_registration: bool = False
     # Non-empty → registration additionally requires this invite code.
@@ -48,6 +69,9 @@ class Settings(BaseSettings):
     # Comma-separated allowed CORS origins. Default "*" keeps current behavior;
     # set to your frontend origin(s) in production (e.g. "https://app.example.com").
     cors_allow_origins: str = "*"
+    # Comma-separated IP addresses or CIDRs whose forwarding headers may be
+    # trusted. Empty means the direct TCP peer is always used.
+    trusted_proxy_cidrs: str = ""
 
     # Interview settings
     max_questions_per_phase: int = 5
@@ -88,6 +112,91 @@ class Settings(BaseSettings):
 
     def user_index_cache_path(self, user_id: str) -> Path:
         return self.user_data_dir(user_id) / ".index_cache"
+
+    def is_development(self) -> bool:
+        return self.app_env.strip().lower() in _DEVELOPMENT_ENVS
+
+    def trusted_proxy_networks(self) -> tuple:
+        networks = []
+        for raw in self.trusted_proxy_cidrs.split(","):
+            value = raw.strip()
+            if not value:
+                continue
+            try:
+                networks.append(ipaddress.ip_network(value, strict=False))
+            except ValueError as exc:
+                raise ValueError(f"Invalid TRUSTED_PROXY_CIDRS entry: {value!r}") from exc
+        return tuple(networks)
+
+    def validate_security_settings(self) -> list[str]:
+        """Validate deployment-critical settings and return dev-only warnings."""
+        issues = []
+        jwt_secret = self.jwt_secret.strip()
+        if not jwt_secret or jwt_secret == _DEFAULT_JWT_SECRET:
+            issues.append("JWT_SECRET is empty or still uses the public default")
+        elif len(jwt_secret.encode("utf-8")) < 32:
+            issues.append("JWT_SECRET must contain at least 32 UTF-8 bytes")
+        if not self.default_password.strip() or self.default_password.strip() == _DEFAULT_PASSWORD:
+            issues.append("DEFAULT_PASSWORD is empty or still uses the public default")
+        elif len(self.default_password) < 12:
+            issues.append("DEFAULT_PASSWORD must contain at least 12 characters in production")
+        elif len(self.default_password.encode("utf-8")) > 72:
+            issues.append("DEFAULT_PASSWORD exceeds bcrypt's 72-byte UTF-8 limit")
+        origins = {origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()}
+        if not origins or "*" in origins:
+            issues.append("CORS_ALLOW_ORIGINS must not be '*' outside development")
+        else:
+            invalid_origins = []
+            insecure_origins = []
+            for origin in origins:
+                parsed = urlsplit(origin)
+                if (
+                    parsed.scheme not in {"http", "https"}
+                    or not parsed.netloc
+                    or parsed.username is not None
+                    or parsed.password is not None
+                    or parsed.path not in {"", "/"}
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    invalid_origins.append(origin)
+                elif (
+                    parsed.scheme == "http"
+                    and not _is_loopback_hostname(parsed.hostname)
+                ):
+                    insecure_origins.append(origin)
+            if invalid_origins:
+                issues.append(
+                    "CORS_ALLOW_ORIGINS contains invalid browser origins: "
+                    + ", ".join(sorted(invalid_origins))
+                )
+            if insecure_origins:
+                issues.append(
+                    "CORS_ALLOW_ORIGINS must use HTTPS for non-loopback origins: "
+                    + ", ".join(sorted(insecure_origins))
+                )
+        try:
+            proxy_networks = self.trusted_proxy_networks()
+            vector_backend = self.vector_backend_mode()
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid security configuration: {exc}") from exc
+        if any(network.prefixlen == 0 for network in proxy_networks):
+            issues.append("TRUSTED_PROXY_CIDRS must not trust the entire IPv4 or IPv6 internet")
+        if vector_backend == "qdrant" and not self.qdrant_api_key.strip():
+            issues.append("QDRANT_API_KEY is required when VECTOR_BACKEND=qdrant")
+        elif (
+            vector_backend == "qdrant"
+            and len(self.qdrant_api_key.encode("utf-8")) < 32
+        ):
+            issues.append("QDRANT_API_KEY must contain at least 32 UTF-8 bytes")
+
+        if issues and not self.is_development():
+            details = "; ".join(issues)
+            raise RuntimeError(
+                f"Refusing to start with insecure {self.app_env!r} configuration: {details}. "
+                "Set APP_ENV=development only for an isolated local environment."
+            )
+        return issues
 
     def embedding_backend_mode(self) -> str:
         if self.embedding_backend:

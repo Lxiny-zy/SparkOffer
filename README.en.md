@@ -94,7 +94,7 @@ Mastery scoring uses a **deterministic algorithm** (no LLM subjectivity). Profil
 cp .env.example .env
 ```
 
-**Minimum required**: LLM + Embedding (one of two embedding backends).
+**Required model configuration**: LLM + Embedding (choose one embedding backend).
 
 ```env
 # LLM (any OpenAI-compatible endpoint)
@@ -109,22 +109,28 @@ EMBEDDING_API_KEY=sk-your-embedding-key
 EMBEDDING_API_MODEL=BAAI/bge-m3
 ```
 
-**Auth defaults** (works out of the box for local use):
+**Required Docker / production security configuration**: production mode rejects blank values, public weak credentials, and unsafe browser origins. Every value below is a placeholder to replace, not a usable default credential:
 
 ```env
-JWT_SECRET=change-me-in-production
+APP_ENV=production
+FRONTEND_BIND_ADDRESS=127.0.0.1
+JWT_SECRET=<independently-generated-random-secret>
 DEFAULT_EMAIL=admin@sparkoffer.local
-DEFAULT_PASSWORD=admin123
+DEFAULT_PASSWORD=<unique-strong-password-at-least-12-characters>
 ALLOW_REGISTRATION=false
+CORS_ALLOW_ORIGINS=https://app.example.com
+QDRANT_API_KEY=<another-independently-generated-random-secret>
 ```
+
+Run `openssl rand -hex 32` separately for `JWT_SECRET` and `QDRANT_API_KEY`. See [DEPLOYMENT.md](DEPLOYMENT.md) for TLS certificates, the host reverse proxy, trusted proxy configuration, and the complete production checklist.
 
 ### 2. Docker (recommended)
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
-Open `http://localhost`.
+Compose binds its plaintext frontend listener only to host loopback at `127.0.0.1:9000`; that address is an upstream for host Nginx/Caddy/load-balancer TLS termination, not the production browser entry point. After configuring TLS, open `https://your-domain`. Do not expose port 9000 publicly or access that plaintext listener directly. See [DEPLOYMENT.md](DEPLOYMENT.md) for the complete procedure.
 
 ### 3. Manual setup
 

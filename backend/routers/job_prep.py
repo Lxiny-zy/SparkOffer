@@ -1,14 +1,12 @@
 """JD-targeted prep routes — preview and start."""
-import uuid
 
 from fastapi import APIRouter, HTTPException, Depends
 
 from backend.models import (
     JobPrepPreviewRequest, JobPrepStartRequest, InterviewMode,
 )
-from backend.storage.sessions import create_session
+from backend.storage.sessions import create_session, new_session_id
 from backend.graphs.job_prep import (
-    generate_job_prep_preview, generate_job_prep_questions,
     stream_generate_job_prep_preview, stream_generate_job_prep_questions,
 )
 from backend.live_store import job_prep_sessions, save_live
@@ -72,7 +70,7 @@ async def job_prep_start(req: JobPrepStartRequest, user_id: str = Depends(get_cu
         if questions is None:
             return
 
-        session_id = str(uuid.uuid4())[:8]
+        session_id = new_session_id()
         meta = {
             "company": preview.get("company") or (req.company or "").strip(),
             "position": preview.get("position") or (req.position or "").strip() or "JD 备面",

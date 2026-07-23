@@ -1,11 +1,12 @@
 """AI settings routes — runtime config, connection tests, multi-channel management."""
 import httpx as _httpx
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from backend.models import (
     AIConfigUpdate, TestLLMRequest, TestEmbeddingRequest,
-    ChannelsConfig, TestChannelRequest, TuningConfig,
+    ChannelsConfig, LLMChannelConfig, EmbeddingChannelConfig, RerankerChannelConfig,
+    TestChannelRequest, TuningConfig,
 )
 from backend.auth import require_owner
 from backend.routers.auth import client_ip
@@ -26,7 +27,8 @@ def update_ai_settings(req: AIConfigUpdate, request: Request, user_id: str = Dep
     from backend.llm_provider import invalidate_singletons
 
     config = req.model_dump(exclude_none=True)
-    config = {k: v for k, v in config.items() if v}
+    # Preserve valid falsy values such as temperature=0.
+    config = {k: v for k, v in config.items() if v != ""}
     save_ai_config(config)
     invalidate_singletons()
     log_event("ai_config_updated", user_id=user_id, ip=client_ip(request),
@@ -95,28 +97,117 @@ def get_channels_config(user_id: str = Depends(require_owner)):
     }
 
 
+def _ensure_embedding_models_match(channels: list[EmbeddingChannelConfig]) -> None:
+    emb_models = {
+        ch.api_model for ch in channels
+        if ch.enabled and ch.backend.strip().lower() == "api" and ch.api_model
+    }
+    if len(emb_models) > 1:
+        raise HTTPException(400, f"All embedding channels must use the same model. Found: {emb_models}")
+
+
+_CHANNEL_SECTION_MODELS = {
+    "llm": LLMChannelConfig,
+    "embedding": EmbeddingChannelConfig,
+    "reranker": RerankerChannelConfig,
+}
+
+
+def _validate_channel_section(section: str, channels: list[dict]):
+    model = _CHANNEL_SECTION_MODELS.get(section)
+    if model is None:
+        raise HTTPException(400, f"Unknown channel section: {section}")
+    try:
+        parsed = [model.model_validate(ch) for ch in channels]
+    except Exception as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    errors: list[str] = []
+    for index, channel in enumerate(parsed):
+        # Keep persisted values canonical so provider selection and validation
+        # use the same branch even when a client sends "API" / "LOCAL".
+        if section == "embedding":
+            channel.backend = channel.backend.strip().lower()
+        if not channel.enabled:
+            continue
+        label = channel.name.strip() or f"channel {index + 1}"
+        if section == "llm":
+            if not channel.model.strip():
+                errors.append(f"{label}: model is required when enabled")
+            if not channel.api_base.strip() and not any(k.strip() for k in channel.keys):
+                errors.append(f"{label}: api_base or an API key is required when enabled")
+        elif section == "embedding":
+            backend = channel.backend.strip().lower()
+            if backend == "api":
+                if not channel.api_model.strip():
+                    errors.append(f"{label}: api_model is required for an enabled API channel")
+                if not channel.api_base.strip() and not any(k.strip() for k in channel.keys):
+                    errors.append(f"{label}: api_base or an API key is required for an enabled API channel")
+            elif backend == "local":
+                if not channel.local_model.strip() and not channel.local_path.strip():
+                    errors.append(f"{label}: local_model or local_path is required for an enabled local channel")
+            else:
+                errors.append(f"{label}: backend must be 'api' or 'local'")
+        elif section == "reranker":
+            if not channel.api_base.strip():
+                errors.append(f"{label}: api_base is required when enabled")
+            if not any(k.strip() for k in channel.keys):
+                errors.append(f"{label}: at least one API key is required when enabled")
+
+    if errors:
+        raise HTTPException(422, {
+            "message": "Invalid enabled channel configuration",
+            "errors": errors,
+        })
+    if section == "embedding":
+        _ensure_embedding_models_match(parsed)
+    return parsed
+
+
 @router.put("/settings/ai/channels")
 def update_channels_config(req: ChannelsConfig, request: Request, user_id: str = Depends(require_owner)):
     from backend.ai_config import save_channels
     from backend.llm_provider import invalidate_singletons
 
-    emb_models = set()
-    for ch in req.embedding:
-        if ch.enabled and ch.backend == "api" and ch.api_model:
-            emb_models.add(ch.api_model)
-    if len(emb_models) > 1:
-        raise HTTPException(400, f"All embedding channels must use the same model. Found: {emb_models}")
-
+    parsed = {
+        section: _validate_channel_section(
+            section,
+            [channel.model_dump() for channel in getattr(req, section)],
+        )
+        for section in _CHANNEL_SECTION_MODELS
+    }
     config = {
-        "llm": [ch.model_dump() for ch in req.llm],
-        "embedding": [ch.model_dump() for ch in req.embedding],
-        "reranker": [ch.model_dump() for ch in req.reranker],
+        section: [channel.model_dump() for channel in channels]
+        for section, channels in parsed.items()
     }
     save_channels(config)
     invalidate_singletons()
     log_event("channels_updated", user_id=user_id, ip=client_ip(request),
               detail={s: [c.get("name", "?") for c in config[s]] for s in config})
     return {"ok": True}
+
+
+@router.put("/settings/ai/channels/{section}")
+def update_channel_section(section: str, request: Request,
+                           channels: list[dict] = Body(...),
+                           user_id: str = Depends(require_owner)):
+    """Update exactly one channel section.
+
+    The settings page renders LLM / embedding / reranker as independent managers.
+    Saving a full stale snapshot from any one manager can roll back another
+    section. This endpoint keeps the old full-save API for compatibility while
+    giving each manager an atomic per-section write path.
+    """
+    from backend.ai_config import save_channels
+    from backend.llm_provider import invalidate_singletons
+
+    parsed = _validate_channel_section(section, channels)
+    config = {section: [ch.model_dump() for ch in parsed]}
+    save_channels(config)
+    invalidate_singletons()
+    log_event("channel_section_updated", user_id=user_id, ip=client_ip(request),
+              detail={section: [c.get("name", "?") for c in config[section]]})
+    return {"ok": True, "section": section}
 
 
 @router.post("/settings/ai/channels/test")
@@ -243,7 +334,10 @@ def update_tuning_settings(req: TuningConfig, request: Request, user_id: str = D
 # ── Admin: audit log + user list (owner only) ──
 
 @router.get("/admin/audit")
-def admin_audit_logs(event: str = None, limit: int = 100, offset: int = 0,
+def admin_audit_logs(
+                     event: str | None = Query(default=None, max_length=100),
+                     limit: int = Query(default=100, ge=1, le=500),
+                     offset: int = Query(default=0, ge=0),
                      user_id: str = Depends(require_owner)):
     from backend.storage.audit import list_audit_logs, list_event_names
     result = list_audit_logs(event=event, limit=limit, offset=offset)
@@ -260,5 +354,3 @@ def admin_list_users(user_id: str = Depends(require_owner)):
         "SELECT id, email, name, created_at FROM users ORDER BY created_at ASC"
     ).fetchall()
     return {"users": [dict(r) | {"is_owner": is_owner(r["id"])} for r in rows]}
-
-

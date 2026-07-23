@@ -492,6 +492,7 @@ async def run_frozen_benchmark(
                 error="",
                 manifest=manifest,
                 detail=detail,
+                durable_claim=job.get("_durable_claim"),
             )
 
         job.update({
@@ -503,6 +504,9 @@ async def run_frozen_benchmark(
             "updated_at": time.time(),
         })
     except Exception as exc:
+        from backend.storage.rag_eval_store import RagEvalPersistenceFenceError
+        if isinstance(exc, RagEvalPersistenceFenceError):
+            raise
         logger.exception("frozen RAG benchmark failed")
         message = str(exc)[:300]
         job.update({
@@ -533,7 +537,10 @@ async def run_frozen_benchmark(
                         "done": job.get("done", 0),
                         "total": job.get("total", 0),
                     },
+                    durable_claim=job.get("_durable_claim"),
                 )
+            except RagEvalPersistenceFenceError:
+                raise
             except Exception:
                 logger.exception("failed to persist failed frozen RAG benchmark")
 

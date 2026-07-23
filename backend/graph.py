@@ -6,14 +6,16 @@ from datetime import datetime
 
 import numpy as np
 
-from backend.vector_memory import _embed, _serialize, _deserialize, _cosine_similarity
+from backend.vector_store.base import _serialize, _deserialize, _cosine_similarity
 from backend.storage.database import get_db
 
 SIMILARITY_THRESHOLD = 0.65
+MAX_GRAPH_QUESTIONS = 500
 
 
-def _hash_question(text: str) -> str:
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
+def _hash_question(text: str, user_id: str, topic: str, fingerprint: str) -> str:
+    identity = "\0".join((user_id, topic, fingerprint, text))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def _extract_questions(conn: sqlite3.Connection, topic: str, user_id: str) -> tuple[list[dict], dict]:
@@ -34,6 +36,7 @@ def _extract_questions(conn: sqlite3.Connection, topic: str, user_id: str) -> tu
 
     # question_text → latest record (dedup by keeping last occurrence)
     seen: dict[str, dict] = {}
+    question_order = 0
     sessions_total = len(rows)
     sessions_with_scores = 0
     sessions_without_review = 0
@@ -49,9 +52,15 @@ def _extract_questions(conn: sqlite3.Connection, topic: str, user_id: str) -> tu
         if not row["review"]:
             sessions_without_review += 1
         questions = json.loads(row["questions"] or "[]")
-        score_map = {s["question_id"]: s for s in scores if "question_id" in s}
+        score_map = {
+            s["question_id"]: s
+            for s in scores
+            if isinstance(s, dict) and "question_id" in s
+        }
 
         for q in questions:
+            if not isinstance(q, dict):
+                continue
             text = q.get("question", "").strip()
             if not text:
                 continue
@@ -62,6 +71,7 @@ def _extract_questions(conn: sqlite3.Connection, topic: str, user_id: str) -> tu
             if not isinstance(score_val, (int, float)):
                 continue
 
+            question_order += 1
             seen[text] = {
                 "question": text,
                 "score": score_val,
@@ -69,7 +79,13 @@ def _extract_questions(conn: sqlite3.Connection, topic: str, user_id: str) -> tu
                 "difficulty": q.get("difficulty", 3),
                 "date": row["created_at"][:10] if row["created_at"] else "",
                 "session_id": row["session_id"],
+                "_order": question_order,
             }
+
+    all_questions = sorted(seen.values(), key=lambda item: item["_order"])
+    selected_questions = all_questions[-MAX_GRAPH_QUESTIONS:]
+    for question in selected_questions:
+        question.pop("_order", None)
 
     meta = {
         "sessions_total": sessions_total,
@@ -77,25 +93,35 @@ def _extract_questions(conn: sqlite3.Connection, topic: str, user_id: str) -> tu
         "sessions_without_review": sessions_without_review,
         "last_session_at": last_session_at,
         "unique_questions": len(seen),
+        "returned_questions": len(selected_questions),
+        "truncated": len(all_questions) > len(selected_questions),
     }
-    return list(seen.values()), meta
+    return selected_questions, meta
 
 
 def _get_or_compute_embeddings(
     conn: sqlite3.Connection,
     questions: list[dict],
     topic: str,
+    user_id: str,
 ) -> np.ndarray:
     """Return (N, 1024) embedding matrix. Uses cache table, computes missing."""
-    hashes = [_hash_question(q["question"]) for q in questions]
+    from backend.indexer import _embedding_fingerprint
+
+    fingerprint = _embedding_fingerprint()
+    hashes = [
+        _hash_question(q["question"], user_id, topic, fingerprint)
+        for q in questions
+    ]
 
     # Load cached
     cached: dict[str, np.ndarray] = {}
     if hashes:
         placeholders = ",".join("?" for _ in hashes)
         rows = conn.execute(
-            f"SELECT question_hash, embedding FROM question_embeddings WHERE question_hash IN ({placeholders})",
-            hashes,
+            f"SELECT question_hash, embedding FROM question_embeddings "
+            f"WHERE user_id = ? AND topic = ? AND question_hash IN ({placeholders})",
+            [user_id, topic, *hashes],
         ).fetchall()
         for r in rows:
             cached[r["question_hash"]] = _deserialize(r["embedding"])
@@ -119,9 +145,10 @@ def _get_or_compute_embeddings(
             h = hashes[idx]
             cached[h] = vec_np
             conn.execute(
-                "INSERT OR REPLACE INTO question_embeddings (question_hash, topic, question_text, embedding, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (h, topic, text, _serialize(vec_np), now),
+                "INSERT OR REPLACE INTO question_embeddings "
+                "(question_hash, topic, question_text, embedding, user_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (h, topic, text, _serialize(vec_np), user_id, now),
             )
         conn.commit()
 
@@ -147,7 +174,7 @@ def build_graph(topic: str, user_id: str) -> dict:
             "meta": meta,
         }
 
-    embeddings = _get_or_compute_embeddings(conn, questions, topic)
+    embeddings = _get_or_compute_embeddings(conn, questions, topic, user_id)
 
     # Build nodes
     nodes = []

@@ -6,13 +6,11 @@ import type {
   EndInterviewResponse,
   Profile,
   DueReview,
-  TopicInfo,
-  AlgorithmCard,
-  Favorite,
 } from "../types/api";
 
 export async function getTopics(): Promise<any> {
   const res = await authFetch(`${API_BASE}/topics`);
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -36,6 +34,7 @@ export async function deleteTopic(key: string): Promise<any> {
 
 export async function getResumeStatus(): Promise<any> {
   const res = await authFetch(`${API_BASE}/resume/status`);
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -191,7 +190,11 @@ export async function getReview(sessionId: string): Promise<any> {
  */
 export async function syncSession(
   sessionId: string,
-): Promise<{ status: "synced" | "already_synced"; synced_at?: string }> {
+): Promise<{
+  status: "synced" | "already_synced" | "sync_in_progress";
+  synced_at?: string;
+  claimed_at?: string;
+}> {
   const res = await authFetch(`${API_BASE}/interview/sync/${sessionId}`, { method: "POST" });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -224,6 +227,7 @@ export async function getHistory(
   if (mode) params.set("mode", mode);
   if (topic) params.set("topic", topic);
   const res = await authFetch(`${API_BASE}/interview/history?${params}`);
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -267,6 +271,7 @@ export async function deleteSession(sessionId: string): Promise<any> {
 
 export async function getInterviewTopics(): Promise<any> {
   const res = await authFetch(`${API_BASE}/interview/topics`);
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -282,6 +287,7 @@ export async function getGraphData(topic: string): Promise<any> {
 
 export async function getProfile(): Promise<Profile> {
   const res = await authFetch(`${API_BASE}/profile`);
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -290,6 +296,7 @@ export async function getDueReviews(topic?: string): Promise<DueReview[]> {
     ? `${API_BASE}/profile/due-reviews?topic=${encodeURIComponent(topic)}`
     : `${API_BASE}/profile/due-reviews`;
   const res = await authFetch(url);
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -307,6 +314,7 @@ export async function getTopicRetrospective(topic: string, callbacks?: SSECallba
 
 export async function getTopicHistory(topic: string): Promise<any> {
   const res = await authFetch(`${API_BASE}/profile/topic/${topic}/history`);
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -314,22 +322,42 @@ export async function getTopicHistory(topic: string): Promise<any> {
 
 export async function getCoreKnowledge(topic: string): Promise<any> {
   const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/core`);
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function updateCoreKnowledge(topic: string, filename: string, content: string): Promise<any> {
+/** Fetch one knowledge file body. The list endpoint may intentionally omit large bodies. */
+export async function getCoreKnowledgeFile(topic: string, filename: string): Promise<any> {
+  const res = await authFetch(
+    `${API_BASE}/knowledge/${encodeURIComponent(topic)}/core/${encodeURIComponent(filename)}`,
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function updateCoreKnowledge(
+  topic: string,
+  filename: string,
+  content: string,
+  expectedVersion?: string,
+): Promise<any> {
   const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/core/${encodeURIComponent(filename)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, expected_version: expectedVersion }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function deleteCoreKnowledge(topic: string, filename: string): Promise<any> {
+export async function deleteCoreKnowledge(
+  topic: string,
+  filename: string,
+  expectedVersion?: string,
+): Promise<any> {
   const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/core/${encodeURIComponent(filename)}`, {
     method: "DELETE",
+    headers: expectedVersion ? { "If-Match": expectedVersion } : undefined,
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -420,14 +448,19 @@ export async function getRebuildStatus(): Promise<{ tasks: RebuildTaskStatus[] }
 
 export async function getHighFreq(topic: string): Promise<any> {
   const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/high_freq`);
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function updateHighFreq(topic: string, content: string): Promise<any> {
+export async function updateHighFreq(
+  topic: string,
+  content: string,
+  expectedVersion?: string,
+): Promise<any> {
   const res = await authFetch(`${API_BASE}/knowledge/${encodeURIComponent(topic)}/high_freq`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, expected_version: expectedVersion }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();

@@ -155,7 +155,7 @@ def render_strategy_block(plan: StrategyPlan) -> str:
     Output is consumed verbatim as ``question_strategy`` in DRILL_QUESTION_GEN_PROMPT.
     """
     lines: list[str] = [
-        f"按以下「槽位计划」生成 10 道题（按顺序，q1=slot1, q2=slot2, ...）：",
+        "按以下「槽位计划」生成 10 道题（按顺序，q1=slot1, q2=slot2, ...）：",
         "",
     ]
     for i, slot in enumerate(plan.slots, start=1):

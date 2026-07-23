@@ -10,7 +10,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
 from backend.indexer import retrieve_topic_context, gather_topic_contexts, safe_retrieve_topic_context, load_topics
-from backend.memory import get_profile_summary, get_profile_summary_for_drill, get_topic_context_for_drill
+from backend.memory import get_profile_summary_for_drill, get_topic_context_for_drill
 from backend.prompts.interviewer import DRILL_QUESTION_GEN_PROMPT, DRILL_BATCH_EVAL_PROMPT
 from backend.utils.sse_helpers import iter_llm_stream, chunk_text
 from backend.utils.stream_parser import extract_complete_objects

@@ -91,7 +91,7 @@ SparkOffer 是一个面向技术岗求职者的 **AI 面试训练系统**。
 cp .env.example .env
 ```
 
-**最小必填**：LLM + Embedding（Embedding 必须二选一）。
+**模型配置必填**：LLM + Embedding（Embedding 必须二选一）。
 
 ```env
 # LLM（任意 OpenAI 兼容端点）
@@ -106,22 +106,28 @@ EMBEDDING_API_KEY=sk-your-embedding-key
 EMBEDDING_API_MODEL=BAAI/bge-m3
 ```
 
-**认证默认值**（不配置也能启动，仅用于本地）：
+**Docker / 生产安全配置必填**：生产模式会拒绝空值、公开弱口令和不安全的跨域来源。以下值都是待替换的安全占位，不是可直接使用的默认凭据：
 
 ```env
-JWT_SECRET=change-me-in-production
+APP_ENV=production
+FRONTEND_BIND_ADDRESS=127.0.0.1
+JWT_SECRET=<独立生成的随机强密钥>
 DEFAULT_EMAIL=admin@sparkoffer.local
-DEFAULT_PASSWORD=admin123
+DEFAULT_PASSWORD=<至少12字符的唯一强密码>
 ALLOW_REGISTRATION=false
+CORS_ALLOW_ORIGINS=https://app.example.com
+QDRANT_API_KEY=<另一份独立生成的随机强密钥>
 ```
+
+可用 `openssl rand -hex 32` 分别生成 `JWT_SECRET` 和 `QDRANT_API_KEY`。HTTPS 证书、宿主反向代理、可信代理链和完整生产检查见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ### 2. Docker 启动（推荐）
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
-访问 `http://localhost`。
+Compose 只把前端 HTTP 监听绑定到宿主回环地址 `127.0.0.1:9000`，供宿主 Nginx/Caddy/负载均衡器反代；它不是浏览器的生产访问入口。配置 TLS 后请访问 `https://你的域名`，不要把 9000 暴露到公网或直接访问该明文监听。完整步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ### 3. 手动启动
 

@@ -1,7 +1,7 @@
 """Aggregation semantics for synthetic end-to-end RAG evaluation."""
 from __future__ import annotations
 
-from backend.rag_eval import QuestionResult, _aggregate
+from backend.rag_eval import QuestionResult, _aggregate, _support_weight
 
 
 def _result(**overrides) -> QuestionResult:
@@ -70,3 +70,9 @@ def test_generation_or_embedding_metric_failure_blocks_comparison():
     assert summary.generation_success_rate == 0.0
     assert summary.metric_observation_rate == 0.0
     assert summary.comparable is False
+
+
+def test_legacy_string_false_is_not_counted_as_supported():
+    assert _support_weight({"supported": "false"}) == 0.0
+    assert _support_weight({"supported": "0"}) == 0.0
+    assert _support_weight({"supported": "true"}) == 1.0

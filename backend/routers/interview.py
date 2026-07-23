@@ -1,27 +1,35 @@
 """Interview routes — start, chat, end for drill / resume / JD-prep modes."""
 import asyncio
+import hashlib
 import json
-import uuid
+import logging
+import threading
+import weakref
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage
 
 from backend.models import (
     StartInterviewRequest, ChatRequest, EndDrillRequest,
-    InterviewMode, InterviewPhase,
+    InterviewMode, InterviewPhase, ReferenceAnswerRequest,
 )
-from backend.config import settings
 from backend.indexer import load_topics
 from backend.memory import update_profile_after_interview, llm_update_profile
 from backend.storage.sessions import (
     create_session, append_message, save_review, save_drill_answers, get_session,
-    mark_session_synced,
+    mark_session_synced, try_claim_session_sync, release_session_sync_claim,
+    abort_session_sync_claim, session_sync_targets,
+    mark_session_sync_step, session_sync_steps, session_sync_step_result,
+    try_claim_session_evaluation, release_session_evaluation_claim,
+    try_claim_resume_turn, commit_resume_turn, release_resume_turn_claim,
+    renew_resume_turn_claim, RESUME_TURN_CLAIM_TTL_SECONDS,
+    new_session_id,
 )
 from backend.graphs.resume_interview import compile_resume_interview
-from backend.graphs.topic_drill import generate_drill_questions, evaluate_drill_answers, stream_evaluate_drill_answers
-from backend.graphs.job_prep import evaluate_job_prep_answers, stream_evaluate_job_prep_answers
-from backend.graphs.review import generate_review, stream_generate_review
+from backend.graphs.topic_drill import generate_drill_questions, stream_evaluate_drill_answers
+from backend.graphs.job_prep import stream_evaluate_job_prep_answers
+from backend.graphs.review import stream_generate_review
 from backend.formatters import format_drill_review, format_job_prep_review
 from backend.live_store import (
     graphs, drill_sessions, job_prep_sessions,
@@ -32,7 +40,407 @@ from backend.utils.sse_helpers import sse_event, streaming_response
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger("uvicorn")
 
+# A resume turn normally finishes well inside this lease, but graph execution
+# can include several slow model calls. Keep renewing until the locally
+# confirmed lease is close to expiry; transient SQLite contention must not
+# permanently disable the heartbeat after one failed renewal.
+_RESUME_TURN_CLAIM_TTL_SECONDS = RESUME_TURN_CLAIM_TTL_SECONDS
+_RESUME_TURN_HEARTBEAT_SECONDS = 30.0
+_RESUME_TURN_HEARTBEAT_RENEWAL_GUARD_SECONDS = 30.0
+_RESUME_TURN_HEARTBEAT_MIN_RETRY_SECONDS = 0.01
+
+_resume_session_locks: "weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
+_resume_session_locks_guard = threading.Lock()
+
+
+def _get_resume_session_lock(user_id: str, session_id: str) -> asyncio.Lock:
+    key = (user_id, session_id)
+    with _resume_session_locks_guard:
+        lock = _resume_session_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _resume_session_locks[key] = lock
+        return lock
+
+
+def _numeric_score(value):
+    from backend.rag_metrics import clamp_score_0_10
+    return clamp_score_0_10(value)
+
+
+def _has_valid_side_effect_score(scores: list) -> bool:
+    return any(
+        isinstance(s, dict) and _numeric_score(s.get("score")) is not None and not s.get("skipped")
+        for s in (scores or [])
+    )
+
+
+def _normalize_scores(raw_scores, questions: list | None = None) -> list[dict]:
+    """Normalize model output before it reaches persistence or profile updates."""
+    question_map = {}
+    questions_by_text: dict[str, list[dict]] = {}
+    for question in questions or []:
+        if isinstance(question, dict) and question.get("id") is not None:
+            question_map[question.get("id")] = question
+            question_map[str(question.get("id"))] = question
+            text = question.get("question")
+            if isinstance(text, str) and text.strip():
+                questions_by_text.setdefault(text.strip(), []).append(question)
+    normalized_by_question: dict[str, dict] = {}
+    unmatched = []
+    for index, raw in enumerate(raw_scores or []):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        score = _numeric_score(item.get("score"))
+        item["score"] = score
+        qid = item.get("question_id")
+        try:
+            question = question_map.get(qid)
+        except TypeError:
+            # A malformed model response may emit an object/list as the id.
+            # Keep the usable score rows instead of failing the whole report.
+            question = None
+        if question is None:
+            question = question_map.get(str(qid))
+        if question is None:
+            raw_text = item.get("question")
+            text = raw_text.strip() if isinstance(raw_text, str) else ""
+            text_matches = questions_by_text.get(text, []) if text else []
+            if len(text_matches) == 1:
+                question = text_matches[0]
+            elif not text and qid is None and index < len(questions or []):
+                # Legacy model rows sometimes have neither an id nor question
+                # text. Positional recovery is safe only in that case; a
+                # present-but-ambiguous text must never be guessed by index.
+                fallback_question = (questions or [])[index]
+                if isinstance(fallback_question, dict):
+                    question = fallback_question
+        if question:
+            item.setdefault("difficulty", question.get("difficulty", 3))
+        try:
+            raw_difficulty = item.get("difficulty", 3)
+            difficulty = 3 if isinstance(raw_difficulty, bool) else int(raw_difficulty)
+        except (TypeError, ValueError):
+            difficulty = 3
+        item["difficulty"] = max(1, min(5, difficulty))
+        if question is not None:
+            canonical_id = question.get("id")
+            item["question_id"] = canonical_id
+            normalized_by_question.setdefault(str(canonical_id), item)
+        else:
+            unmatched.append(item)
+
+    if not questions:
+        return [*normalized_by_question.values(), *unmatched]
+
+    normalized = []
+    for question in questions:
+        if not isinstance(question, dict) or question.get("id") is None:
+            continue
+        canonical_id = question["id"]
+        normalized.append(normalized_by_question.get(str(canonical_id), {
+            "question_id": canonical_id,
+            "score": None,
+            "difficulty": max(1, min(5, int(question.get("difficulty", 3) or 3))),
+        }))
+    normalized.extend(unmatched)
+    return normalized
+
+
+def _normalize_overall(raw_overall) -> dict:
+    overall = dict(raw_overall) if isinstance(raw_overall, dict) else {}
+    if "avg_score" in overall:
+        overall["avg_score"] = _numeric_score(overall.get("avg_score"))
+    return overall
+
+
+def _normalize_answers(value) -> list[dict]:
+    """Normalize legacy dict answers for callers/tests that bypass Pydantic."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        value = [
+            {"question_id": qid, "answer": (a.get("answer", "") if isinstance(a, dict) else a)}
+            for qid, a in value.items()
+        ]
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        qid = item.get("question_id", item.get("id"))
+        if qid is None:
+            continue
+        answer = item.get("answer", "")
+        result.append({**item, "question_id": qid, "answer": "" if answer is None else str(answer)})
+    return result
+
+
+async def _release_eval_claim_after(stream, session_id: str, user_id: str,
+                                    claim_token: str):
+    """Wrap an SSE generator so disconnects cannot leave an eval claim forever."""
+    try:
+        async for item in stream:
+            yield item
+    finally:
+        await asyncio.to_thread(
+            release_session_evaluation_claim, session_id,
+            user_id=user_id, claim_token=claim_token,
+        )
+
+
+async def _finish_despite_cancellation(coro):
+    """Wait for a shielded durable write before releasing its generation claim."""
+    task = asyncio.create_task(coro)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # asyncio.shield keeps the task alive but normally returns cancellation
+        # immediately. Waiting here keeps the evaluation claim held until the
+        # durable review/profile/knowledge write actually reaches a terminal state.
+        try:
+            await task
+        finally:
+            raise
+
+
+class _SyncClaimLost(RuntimeError):
+    pass
+
+
+async def _evaluation_generation_is_current(
+    session_id: str,
+    user_id: str,
+    evaluation_token: str,
+) -> bool:
+    """Check ownership immediately before externally visible completion."""
+    latest = await asyncio.to_thread(get_session, session_id, user_id=user_id)
+    meta = (latest or {}).get("meta", {}) or {}
+    return bool(
+        latest
+        and isinstance(meta, dict)
+        and evaluation_token
+        and meta.get("evaluation_claim_token") == evaluation_token
+    )
+
+
+async def _mark_sync_step(session_id: str, step: str, user_id: str,
+                          claim_token: str, result: dict | None = None) -> None:
+    marked = await asyncio.to_thread(
+        mark_session_sync_step, session_id, step,
+        user_id=user_id, claim_token=claim_token, result=result,
+    )
+    if not marked:
+        raise _SyncClaimLost(f"sync claim lost while marking {step}")
+
+
+def _sync_operation_id(session_id: str, step: str) -> str:
+    """Stable target-level idempotency key for one session side-effect."""
+    return f"session-sync:{session_id}:{step}"
+
+
+def _sr_operation_id(
+    session_id: str,
+    score_row: dict,
+    questions: list,
+    index: int,
+) -> str | None:
+    """Canonical SR identity independent of score ordering and scalar ID type."""
+    question = questions[index] if index < len(questions) else None
+    question_id = score_row.get("question_id")
+    if question_id is None and isinstance(question, dict):
+        question_id = question.get("id")
+
+    if question_id is not None:
+        if isinstance(question_id, float) and question_id.is_integer():
+            question_id = int(question_id)
+        if isinstance(question_id, (str, int)) and not isinstance(question_id, bool):
+            identity = f"id:{str(question_id).strip()}"
+        else:
+            identity = "id:" + json.dumps(
+                question_id, ensure_ascii=False, sort_keys=True, default=str,
+            )
+    else:
+        question_text = score_row.get("question")
+        if not question_text and isinstance(question, dict):
+            question_text = question.get("question")
+        if not isinstance(question_text, str) or not question_text.strip():
+            return None
+        identity = f"question:{question_text.strip()}"
+
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return _sync_operation_id(session_id, f"sr:{digest}")
+
+
+async def _confirm_profile_operations(session_id: str, user_id: str) -> None:
+    from backend.memory import confirm_profile_session_operations
+    try:
+        await asyncio.to_thread(
+            confirm_profile_session_operations, user_id, session_id,
+        )
+    except Exception as exc:
+        # The session marker is authoritative. A failed GC confirmation only
+        # retains extra recovery records and must not turn success into failure.
+        import logging
+        logging.getLogger("uvicorn").warning(
+            "Could not confirm profile operation journal for %s: %s",
+            session_id,
+            exc,
+        )
+
+
+async def _skip_deleted_topic_steps(
+    session_id: str,
+    target_topic: str,
+    steps: set[str],
+    user_id: str,
+    claim_token: str,
+) -> bool:
+    """Record removed topics as intentionally skipped during recovery."""
+    topics = await asyncio.to_thread(load_topics, user_id)
+    # An empty registry can also mean a legacy/test installation without a
+    # topics.json file; leave that case to the existing writer's error handling.
+    # When a non-empty registry no longer contains the frozen key, it is a real
+    # deletion and must not recreate a topic during recovery.
+    if not isinstance(topics, dict) or not topics or target_topic in topics:
+        return False
+    for step in (
+        f"knowledge_extract:{target_topic}",
+        f"high_freq:{target_topic}",
+    ):
+        if step not in steps:
+            await _mark_sync_step(
+                session_id,
+                step,
+                user_id,
+                claim_token,
+                result={"status": "skipped", "reason": "topic_deleted"},
+            )
+            steps.add(step)
+    return True
+
+
+async def _apply_drill_side_effects(session_id: str, topic: str, questions: list,
+                                    answers: list, scores: list, overall: dict,
+                                    user_id: str, claim_token: str) -> bool:
+    """Apply drill side-effects with durable per-step idempotency."""
+    steps = await asyncio.to_thread(session_sync_steps, session_id, user_id=user_id)
+    if "sr" not in steps:
+        from backend.spaced_repetition import update_weak_point_sr
+        applied_operations: set[str] = set()
+        for index, score_row in enumerate(scores):
+            weak_point = score_row.get("weak_point")
+            score = _numeric_score(score_row.get("score"))
+            if weak_point and score is not None:
+                operation_id = _sr_operation_id(
+                    session_id, score_row, questions, index,
+                )
+                if not operation_id or operation_id in applied_operations:
+                    continue
+                applied_operations.add(operation_id)
+                update_weak_point_sr(
+                    topic, weak_point, score, user_id,
+                    difficulty=score_row.get("difficulty", 3),
+                    operation_id=operation_id,
+                )
+        await _mark_sync_step(session_id, "sr", user_id, claim_token)
+
+    if "profile" not in steps:
+        await _update_drill_profile(
+            topic, overall, scores, len(questions), user_id,
+            operation_id=_sync_operation_id(session_id, "profile"),
+        )
+        await _mark_sync_step(session_id, "profile", user_id, claim_token)
+
+    for target_topic in [topic]:
+        extract_step = f"knowledge_extract:{target_topic}"
+        freq_step = f"high_freq:{target_topic}"
+        if await _skip_deleted_topic_steps(
+            session_id, target_topic, steps, user_id, claim_token,
+        ):
+            continue
+        if extract_step not in steps:
+            from backend.knowledge_evolution import extract_and_writeback
+            result = await extract_and_writeback(
+                target_topic, questions, answers, scores, user_id,
+                operation_id=_sync_operation_id(session_id, extract_step),
+            )
+            if result is False:
+                raise RuntimeError(f"knowledge extraction failed for {target_topic}")
+            await _mark_sync_step(session_id, extract_step, user_id, claim_token)
+        if freq_step not in steps:
+            from backend.knowledge_evolution import collect_high_freq
+            result = await collect_high_freq(
+                target_topic, questions, scores, user_id,
+                operation_id=_sync_operation_id(session_id, freq_step),
+            )
+            if result is False:
+                raise RuntimeError(f"high-frequency collection failed for {target_topic}")
+            await _mark_sync_step(session_id, freq_step, user_id, claim_token)
+
+    synced = await asyncio.to_thread(
+        mark_session_synced, session_id,
+        user_id=user_id, claim_token=claim_token,
+    )
+    if synced:
+        await _confirm_profile_operations(session_id, user_id)
+    return synced
+
+
+async def _apply_job_prep_side_effects(session_id: str, questions: list,
+                                       answers: list, scores: list, overall: dict,
+                                       meta: dict, user_id: str,
+                                       claim_token: str,
+                                       target_topics: list[str] | None = None) -> bool:
+    steps = await asyncio.to_thread(session_sync_steps, session_id, user_id=user_id)
+    if "profile" not in steps:
+        await _update_job_prep_profile(
+            overall, scores, len(questions), meta, user_id,
+            operation_id=_sync_operation_id(session_id, "profile"),
+        )
+        await _mark_sync_step(session_id, "profile", user_id, claim_token)
+
+    from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+    for target_topic in (
+        target_topics if target_topics is not None
+        else _match_jd_to_topics(meta, user_id)
+    ):
+        extract_step = f"knowledge_extract:{target_topic}"
+        freq_step = f"high_freq:{target_topic}"
+        if await _skip_deleted_topic_steps(
+            session_id, target_topic, steps, user_id, claim_token,
+        ):
+            continue
+        if extract_step not in steps:
+            result = await extract_and_writeback(
+                target_topic, questions, answers, scores, user_id,
+                operation_id=_sync_operation_id(session_id, extract_step),
+            )
+            if result is False:
+                raise RuntimeError(f"knowledge extraction failed for {target_topic}")
+            await _mark_sync_step(session_id, extract_step, user_id, claim_token)
+        if freq_step not in steps:
+            result = await collect_high_freq(
+                target_topic, questions, scores, user_id,
+                operation_id=_sync_operation_id(session_id, freq_step),
+            )
+            if result is False:
+                raise RuntimeError(f"high-frequency collection failed for {target_topic}")
+            await _mark_sync_step(session_id, freq_step, user_id, claim_token)
+
+    synced = await asyncio.to_thread(
+        mark_session_synced, session_id,
+        user_id=user_id, claim_token=claim_token,
+    )
+    if synced:
+        await _confirm_profile_operations(session_id, user_id)
+    return synced
 
 def _answers_from_transcript(questions: list, transcript: list) -> list:
     """Rebuild ``[{question_id, answer}]`` from a persisted drill transcript.
@@ -42,6 +450,7 @@ def _answers_from_transcript(questions: list, transcript: list) -> list:
     recovers the originally-submitted answers when re-evaluating a session whose
     live entry is gone (completed eval, restart, TTL eviction).
     """
+    id_to_answer: dict[str, str] = {}
     text_to_answer: dict[str, str] = {}
     msgs = transcript or []
     i = 0
@@ -50,13 +459,47 @@ def _answers_from_transcript(questions: list, transcript: list) -> list:
         if m.get("role") == "assistant":
             ans = ""
             if i + 1 < len(msgs) and msgs[i + 1].get("role") == "user":
-                ans = msgs[i + 1].get("content", "") or ""
+                raw = msgs[i + 1].get("content", "")
+                ans = "" if raw is None else str(raw)
                 i += 1
-            text_to_answer[m.get("content", "")] = ans
+            question_id = m.get("question_id")
+            if question_id is not None:
+                id_to_answer[str(question_id)] = ans
+            else:
+                # Compatibility with transcripts written before question IDs
+                # were persisted. New transcripts never rely on question text,
+                # which may be duplicated within a session.
+                text_to_answer[m.get("content", "")] = ans
         i += 1
     return [
-        {"question_id": q["id"], "answer": text_to_answer.get(q.get("question", ""), "")}
+        {
+            "question_id": q["id"],
+            "answer": id_to_answer.get(
+                str(q["id"]), text_to_answer.get(q.get("question", ""), ""),
+            ),
+        }
         for q in questions
+    ]
+
+
+def _canonicalize_answers(questions: list, answers: list) -> list[dict]:
+    """Return exactly one answer per question, in immutable question order."""
+    answer_map: dict[str, str] = {}
+    for answer in answers or []:
+        if not isinstance(answer, dict):
+            continue
+        question_id = answer.get("question_id", answer.get("id"))
+        if question_id is None:
+            continue
+        value = answer.get("answer", "")
+        answer_map[str(question_id)] = "" if value is None else str(value)
+    return [
+        {
+            "question_id": question["id"],
+            "answer": answer_map.get(str(question["id"]), ""),
+        }
+        for question in questions
+        if isinstance(question, dict) and question.get("id") is not None
     ]
 
 
@@ -67,10 +510,12 @@ def _resolve_answers(body, existing: dict | None, questions: list) -> list:
     answers may be gone or the restored progress stale, so the transcript is the
     authoritative record. Whichever has more non-empty answers wins.
     """
-    body_answers = list(body.answers) if (body and body.answers) else []
+    body_answers = _canonicalize_answers(
+        questions, _normalize_answers(body.answers if body else None),
+    )
     body_filled = sum(1 for a in body_answers if str(a.get("answer", "")).strip())
     transcript_answers = _answers_from_transcript(questions, (existing or {}).get("transcript", []))
-    transcript_filled = sum(1 for a in transcript_answers if a["answer"].strip())
+    transcript_filled = sum(1 for a in transcript_answers if str(a.get("answer", "")).strip())
     if transcript_filled > body_filled:
         return transcript_answers
     return body_answers if body_answers else transcript_answers
@@ -102,10 +547,160 @@ def _get_resume_graph(session_id: str, user_id: str) -> dict | None:
     return entry
 
 
+def _invoke_resume_turn(graph, config: dict, message: str):
+    """Run one checkpointed graph turn and preserve whether input was accepted."""
+    graph.update_state(config, {"messages": [HumanMessage(content=message)]})
+    try:
+        return graph.invoke(None, config), None
+    except Exception as exc:
+        return None, exc
+
+
+async def _resume_turn_heartbeat(
+    session_id: str,
+    user_id: str,
+    claim_token: str,
+    stop: asyncio.Event,
+) -> None:
+    """Keep a long-running graph turn fenced against evaluation takeover.
+
+    A failed database call is not itself proof that another worker reclaimed the
+    turn. Retry while the last confirmed lease still has time left, but stop as
+    soon as the storage operation explicitly reports that the token is no
+    longer current. ``CancelledError`` is intentionally allowed to propagate.
+    """
+    loop = asyncio.get_running_loop()
+    confirmed_until = loop.time() + _RESUME_TURN_CLAIM_TTL_SECONDS
+    while True:
+        remaining = confirmed_until - loop.time()
+        if remaining <= _RESUME_TURN_HEARTBEAT_RENEWAL_GUARD_SECONDS:
+            logger.warning(
+                "Could not confirm resume turn lease before expiry for %s",
+                session_id,
+            )
+            return
+        retry_in = min(
+            max(
+                _RESUME_TURN_HEARTBEAT_MIN_RETRY_SECONDS,
+                _RESUME_TURN_HEARTBEAT_SECONDS,
+            ),
+            max(
+                _RESUME_TURN_HEARTBEAT_MIN_RETRY_SECONDS,
+                remaining - _RESUME_TURN_HEARTBEAT_RENEWAL_GUARD_SECONDS,
+            ),
+        )
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=retry_in)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            renewed = await asyncio.to_thread(
+                renew_resume_turn_claim,
+                session_id,
+                user_id=user_id,
+                claim_token=claim_token,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # SQLite can be briefly busy while another claim transaction commits.
+            # Keep the old lease authoritative and retry until its bounded guard
+            # window; a single transient error must not abandon a long turn.
+            logger.warning(
+                "Could not renew resume turn lease for %s: %s", session_id, exc,
+            )
+            if loop.time() >= confirmed_until - _RESUME_TURN_HEARTBEAT_RENEWAL_GUARD_SECONDS:
+                logger.warning(
+                    "Could not confirm resume turn lease before expiry for %s",
+                    session_id,
+                )
+                return
+            continue
+        if not renewed:
+            # False is the storage-level fencing signal (token mismatch,
+            # completed session, or an already reclaimed lease), unlike an
+            # exception which may be transient infrastructure failure.
+            return
+        confirmed_until = loop.time() + _RESUME_TURN_CLAIM_TTL_SECONDS
+
+
+async def _commit_resume_turn(entry: dict, session_id: str, message: str,
+                              user_id: str) -> tuple[dict, str]:
+    """Serialize a resume turn through graph completion and transcript commit."""
+    async with _get_resume_session_lock(user_id, session_id):
+        turn_token = await asyncio.to_thread(
+            try_claim_resume_turn, session_id, user_id=user_id,
+        )
+        if not turn_token:
+            raise RuntimeError("Resume session is being evaluated or is already complete")
+
+        committed = False
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            _resume_turn_heartbeat(
+                session_id, user_id, turn_token, heartbeat_stop,
+            )
+        )
+        try:
+            result, invoke_error = await asyncio.to_thread(
+                _invoke_resume_turn, entry["graph"], entry["config"], message,
+            )
+            if invoke_error is not None:
+                turn_messages = [{"role": "user", "content": message}]
+            else:
+                ai_message = ""
+                for msg in reversed(result.get("messages", [])):
+                    if isinstance(msg, AIMessage):
+                        ai_message = msg.content
+                        break
+                turn_messages = [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": ai_message},
+                ]
+
+            persisted = await asyncio.to_thread(
+                commit_resume_turn,
+                session_id,
+                turn_messages,
+                user_id=user_id,
+                claim_token=turn_token,
+            )
+            if not persisted:
+                raise RuntimeError("Resume transcript claim was lost") from invoke_error
+            committed = True
+            if invoke_error is not None:
+                raise invoke_error
+            return result, ai_message
+        finally:
+            heartbeat_stop.set()
+            try:
+                await heartbeat_task
+            except Exception:
+                pass
+            if not committed:
+                await asyncio.to_thread(
+                    release_resume_turn_claim,
+                    session_id,
+                    user_id=user_id,
+                    claim_token=turn_token,
+                )
+
+
+async def _run_resume_turn(entry: dict, session_id: str, message: str,
+                           user_id: str) -> tuple[dict, str]:
+    """Finish a checkpointed turn even when its awaiting request is cancelled."""
+    return await _finish_despite_cancellation(
+        _commit_resume_turn(entry, session_id, message, user_id),
+    )
+
+
 @router.get("/interview/rag-metrics")
 async def get_rag_metrics(
-    topic: str = None, stage: str = None,
-    limit: int = 50, offset: int = 0,
+    topic: str | None = Query(default=None, max_length=200),
+    stage: str | None = Query(default=None, max_length=100),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     user_id: str = Depends(get_current_user),
 ):
     from backend.storage.rag_metrics_store import get_rag_metrics_history
@@ -126,7 +721,7 @@ async def get_session_rag_metrics(
 
 @router.post("/interview/start")
 async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get_current_user)):
-    session_id = str(uuid.uuid4())[:8]
+    session_id = new_session_id()
 
     if req.mode == InterviewMode.TOPIC_DRILL:
         topics = await asyncio.to_thread(load_topics, user_id)
@@ -229,30 +824,47 @@ async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
     if entry.get("user_id") != user_id:
         raise HTTPException(403, "Access denied.")
 
-    graph = entry["graph"]
-    config = entry["config"]
-
-    from backend.utils.sse_helpers import stream_blocking_sse, streaming_response, sse_event
-
-    graph.update_state(config, {"messages": [HumanMessage(content=req.message)]})
+    from backend.utils.sse_helpers import streaming_response, sse_event
 
     async def _gen():
-        result = None
-        async for kind, value in stream_blocking_sse(
-            graph.invoke, None, config,
-            progress_msg="面试官正在思考",
-        ):
-            if kind == "sse":
-                yield value
-            else:
-                result = value
+        turn_task = asyncio.create_task(
+            _run_resume_turn(entry, req.session_id, req.message, user_id),
+        )
+        try:
+            yield sse_event({"type": "progress", "message": "面试官正在思考..."})
+            while not turn_task.done():
+                done, _ = await asyncio.wait({turn_task}, timeout=5.0)
+                if not done:
+                    yield sse_event({"type": "ping"})
 
-        append_message(req.session_id, "user", req.message, user_id=user_id)
-
-        # stream_blocking_sse yields no ("result", ...) tuple when the graph step
-        # errors (it emits an error event and returns). Bail out instead of
-        # dereferencing an unbound `result` and crashing the generator.
-        if result is None:
+            result, ai_message = turn_task.result()
+        except (asyncio.CancelledError, GeneratorExit):
+            # Closing an SSE response does not stop a running sync graph call.
+            # Keep the lock and wait for the checkpoint + transcript commit so
+            # the next request cannot observe or extend half of this turn.
+            try:
+                await asyncio.shield(turn_task)
+            except asyncio.CancelledError:
+                try:
+                    await turn_task
+                except Exception as exc:
+                    import logging
+                    logging.getLogger("uvicorn").error(
+                        "Resume turn failed after client disconnect: %s", exc,
+                    )
+            except Exception as exc:
+                import logging
+                logging.getLogger("uvicorn").error(
+                    "Resume turn failed after client disconnect: %s", exc,
+                )
+            raise
+        except Exception as exc:
+            import logging
+            logging.getLogger("uvicorn").error("Resume chat failed: %s", exc)
+            yield sse_event({
+                "type": "error",
+                "message": "面试回复生成失败，请重试。",
+            })
             yield sse_event({"type": "done"})
             return
 
@@ -263,13 +875,6 @@ async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
             if phase in (InterviewPhase.END.value, "end"):
                 is_finished = True
 
-        ai_message = ""
-        for msg in reversed(result.get("messages", [])):
-            if isinstance(msg, AIMessage):
-                ai_message = msg.content
-                break
-
-        append_message(req.session_id, "assistant", ai_message, user_id=user_id)
         yield sse_event({"type": "complete", "data": {
             "session_id": req.session_id, "message": ai_message, "is_finished": is_finished,
         }})
@@ -295,9 +900,8 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
     # re-evaluating a previously-failed session correctly (re)applies profile /
     # SR / knowledge updates instead of silently skipping them.
     existing = await asyncio.to_thread(get_session, session_id, user_id=user_id)
-    already_scored = bool(existing) and any(
-        isinstance(s.get("score"), (int, float)) and not s.get("skipped")
-        for s in (existing.get("scores") or [])
+    already_synced = bool(existing) and bool(
+        (existing.get("meta") or {}).get("synced_at")
     )
 
     # -- Drill mode --
@@ -313,7 +917,38 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         topic = entry["topic"]
         questions = entry["questions"]
         answers = _resolve_answers(body, existing, questions)
-        save_drill_answers(session_id, answers, user_id=user_id)
+        evaluation_token = await asyncio.to_thread(
+            try_claim_session_evaluation, session_id, user_id=user_id,
+        )
+        if not evaluation_token:
+            latest = await asyncio.to_thread(
+                get_session, session_id, user_id=user_id,
+            )
+            latest_meta = (latest or {}).get("meta", {}) or {}
+            if not latest_meta.get("synced_at") and (
+                latest_meta.get("sync_pending_at")
+                or latest_meta.get("sync_steps")
+            ):
+                raise HTTPException(
+                    409,
+                    "Previous evaluation side-effects are pending; sync them "
+                    "before re-evaluating this session.",
+                )
+            raise HTTPException(409, "Evaluation is already in progress for this session.")
+        try:
+            if not save_drill_answers(
+                session_id, answers, user_id=user_id,
+                evaluation_token=evaluation_token,
+            ):
+                raise _SyncClaimLost(
+                    "evaluation generation changed before answers were saved"
+                )
+        except Exception:
+            await asyncio.to_thread(
+                release_session_evaluation_claim, session_id,
+                user_id=user_id, claim_token=evaluation_token,
+            )
+            raise
 
         async def _stream_drill():
             eval_result = {}
@@ -362,12 +997,8 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                         except (json.JSONDecodeError, KeyError):
                             pass
 
-            scores = eval_result.get("scores", [])
-            overall = eval_result.get("overall", {})
-
-            q_diff = {q["id"]: q.get("difficulty", 3) for q in questions}
-            for s in scores:
-                s.setdefault("difficulty", q_diff.get(s.get("question_id"), 3))
+            scores = _normalize_scores(eval_result.get("scores", []), questions)
+            overall = _normalize_overall(eval_result.get("overall", {}))
 
             # Clamp LLM-emitted RAG scores to 0-10 (or drop) before they feed
             # the metrics, per-question badges, and persisted detail — a model
@@ -379,16 +1010,31 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                 if "answer_relevance_score" in s:
                     s["answer_relevance_score"] = clamp_score_0_10(s.get("answer_relevance_score"))
 
-            # Emit + persist RAG generation quality metrics (extracted from LLM eval).
+            # Extract RAG generation quality metrics from the evaluation. The
+            # durable row is written only after save_review succeeds below, so
+            # an expired evaluation claim cannot leave a late metrics record.
             # An answer_eval row is written for EVERY session with ≥1 answered
             # question, so it always shows up in the dashboard — even when the model
             # omitted faithfulness/relevance scores (gen_metrics is None → those
             # columns persist as NULL, instead of the whole row silently vanishing).
+            answered_scores = []
+            gen_metrics = None
+            metric_detail = {}
+            metric_writer = None
             try:
                 from backend.rag_metrics import extract_generation_metrics
                 from backend.storage.rag_metrics_store import save_rag_metrics
+                metric_writer = save_rag_metrics
                 answered_scores = [s for s in scores if not s.get("skipped")]
                 gen_metrics = extract_generation_metrics(scores)
+                metric_detail = {
+                    "per_question": [
+                        {"qid": s.get("question_id"),
+                         "f": s.get("faithfulness_score"),
+                         "ar": s.get("answer_relevance_score")}
+                        for s in answered_scores
+                    ]
+                }
                 if gen_metrics:
                     yield sse_event({
                         "type": "rag_eval_metrics",
@@ -406,22 +1052,6 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                             ],
                         },
                     })
-                if answered_scores:
-                    save_rag_metrics(
-                        session_id, user_id, topic, "answer_eval",
-                        faithfulness=(gen_metrics.faithfulness if gen_metrics else None),
-                        answer_relevance=(gen_metrics.answer_relevance if gen_metrics else None),
-                        answer_correctness=(gen_metrics.answer_correctness if gen_metrics else None),
-                        chunk_count=len(answered_scores),
-                        detail={
-                            "per_question": [
-                                {"qid": s.get("question_id"),
-                                 "f": s.get("faithfulness_score"),
-                                 "ar": s.get("answer_relevance_score")}
-                                for s in answered_scores
-                            ]
-                        },
-                    )
             except Exception as exc:
                 import logging
                 logging.getLogger("uvicorn").warning("RAG eval metrics failed: %s", exc)
@@ -432,40 +1062,106 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             async def _persist_drill():
                 try:
                     review_ = format_drill_review(questions, answers, scores, overall)
-                    save_review(session_id, review_, scores, overall.get("new_weak_points", []), overall, user_id=user_id)
+                    if not save_review(
+                        session_id, review_, scores,
+                        overall.get("new_weak_points", []), overall,
+                        user_id=user_id, evaluation_token=evaluation_token,
+                    ):
+                        raise _SyncClaimLost("evaluation generation changed before drill persistence")
 
-                    # SR / profile / knowledge are applied once per session. On a
-                    # re-evaluation of an already-scored session, skip them so the
-                    # stats aren't double-counted (the report itself is refreshed).
-                    if not already_scored:
-                        from backend.spaced_repetition import update_weak_point_sr
-                        for s in scores:
-                            wp = s.get("weak_point")
-                            sc = s.get("score")
-                            if wp and isinstance(sc, (int, float)):
-                                update_weak_point_sr(topic, wp, sc, user_id, difficulty=s.get("difficulty", 3))
-
-                        await _update_drill_profile(topic, overall, scores, len(questions), user_id)
-                    del_live(drill_sessions, session_id, user_id)
-
-                    if not already_scored:
+                    if metric_writer is not None and answered_scores:
                         try:
-                            from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
-                            await extract_and_writeback(topic, questions, answers, scores, user_id)
-                            await collect_high_freq(topic, questions, scores, user_id)
-                        except Exception as e:
+                            metric_saved = metric_writer(
+                                session_id, user_id, topic, "answer_eval",
+                                faithfulness=(gen_metrics.faithfulness if gen_metrics else None),
+                                answer_relevance=(gen_metrics.answer_relevance if gen_metrics else None),
+                                answer_correctness=(gen_metrics.answer_correctness if gen_metrics else None),
+                                chunk_count=len(answered_scores),
+                                detail=metric_detail,
+                                evaluation_token=evaluation_token,
+                            )
+                            if not metric_saved:
+                                raise _SyncClaimLost(
+                                    "evaluation generation changed before RAG metrics persistence"
+                                )
+                        except _SyncClaimLost:
+                            raise
+                        except Exception as exc:
                             import logging
-                            logging.getLogger("uvicorn").warning(f"Knowledge evolution failed: {e}")
-                        # Stamp the idempotency marker so the "同步" fallback shows
-                        # this session as already synced and never re-applies stats.
-                        await asyncio.to_thread(mark_session_synced, session_id, user_id=user_id)
+                            logging.getLogger("uvicorn").warning(
+                                "RAG eval metrics persistence failed: %s", exc,
+                            )
+
+                    claim_token = None
+                    if not already_synced and _has_valid_side_effect_score(scores):
+                        claim_token = await asyncio.to_thread(
+                            try_claim_session_sync, session_id, user_id=user_id,
+                            evaluation_token=evaluation_token,
+                        )
+
+                    if claim_token:
+                        try:
+                            synced = await _apply_drill_side_effects(
+                                session_id, topic, questions, answers, scores,
+                                overall, user_id, claim_token,
+                            )
+                        except Exception as exc:
+                            await asyncio.to_thread(
+                                release_session_sync_claim, session_id,
+                                user_id=user_id, claim_token=claim_token,
+                            )
+                            raise RuntimeError(
+                                f"drill side-effects remain pending: {exc}"
+                            ) from exc
+                        if not synced:
+                            raise _SyncClaimLost(
+                                f"drill sync claim lost: {session_id}"
+                            )
+                    elif not already_synced and _has_valid_side_effect_score(scores):
+                        latest = await asyncio.to_thread(
+                            get_session, session_id, user_id=user_id,
+                        )
+                        latest_meta = ((latest or {}).get("meta") or {})
+                        if not latest_meta.get("synced_at"):
+                            raise _SyncClaimLost(
+                                "could not claim drill side-effects for this evaluation"
+                            )
+                        if latest_meta.get("evaluation_claim_token") != evaluation_token:
+                            raise _SyncClaimLost(
+                                "drill evaluation generation was superseded by the sync winner"
+                            )
+                    if not await _evaluation_generation_is_current(
+                        session_id, user_id, evaluation_token,
+                    ):
+                        raise _SyncClaimLost(
+                            "drill evaluation generation changed before completion"
+                        )
+                    del_live(drill_sessions, session_id, user_id)
                     return review_
                 except Exception as e:
                     import logging
                     logging.getLogger("uvicorn").error(f"Drill result persistence failed: {e}")
-                    return format_drill_review(questions, answers, scores, overall)
+                    raise
 
-            review = await asyncio.shield(_persist_drill())
+            try:
+                review = await _finish_despite_cancellation(_persist_drill())
+            except Exception:
+                yield sse_event({
+                    "type": "error",
+                    "message": "Evaluation finished, but the result could not be saved. Please retry.",
+                })
+                yield sse_event({"type": "done"})
+                return
+
+            if not await _evaluation_generation_is_current(
+                session_id, user_id, evaluation_token,
+            ):
+                yield sse_event({
+                    "type": "error",
+                    "message": "A newer evaluation replaced this result. Please reload.",
+                })
+                yield sse_event({"type": "done"})
+                return
 
             result = {
                 "session_id": session_id,
@@ -477,7 +1173,9 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             yield sse_event({"type": "complete", "data": result})
             yield sse_event({"type": "done"})
 
-        return streaming_response(_stream_drill())
+        return streaming_response(_release_eval_claim_after(
+            _stream_drill(), session_id, user_id, evaluation_token,
+        ))
 
     # -- JD prep mode --
     entry = get_live(job_prep_sessions, session_id, "job_prep", user_id)
@@ -492,7 +1190,38 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         preview = entry["preview"]
         meta = entry["meta"]
         answers = _resolve_answers(body, existing, questions)
-        save_drill_answers(session_id, answers, user_id=user_id)
+        evaluation_token = await asyncio.to_thread(
+            try_claim_session_evaluation, session_id, user_id=user_id,
+        )
+        if not evaluation_token:
+            latest = await asyncio.to_thread(
+                get_session, session_id, user_id=user_id,
+            )
+            latest_meta = (latest or {}).get("meta", {}) or {}
+            if not latest_meta.get("synced_at") and (
+                latest_meta.get("sync_pending_at")
+                or latest_meta.get("sync_steps")
+            ):
+                raise HTTPException(
+                    409,
+                    "Previous evaluation side-effects are pending; sync them "
+                    "before re-evaluating this session.",
+                )
+            raise HTTPException(409, "Evaluation is already in progress for this session.")
+        try:
+            if not save_drill_answers(
+                session_id, answers, user_id=user_id,
+                evaluation_token=evaluation_token,
+            ):
+                raise _SyncClaimLost(
+                    "evaluation generation changed before answers were saved"
+                )
+        except Exception:
+            await asyncio.to_thread(
+                release_session_evaluation_claim, session_id,
+                user_id=user_id, claim_token=evaluation_token,
+            )
+            raise
 
         async def _stream_job_prep():
             eval_result = {}
@@ -506,43 +1235,104 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                     except (json.JSONDecodeError, KeyError):
                         pass
 
-            scores = eval_result.get("scores", [])
-            overall = eval_result.get("overall", {})
-
-            q_diff = {q["id"]: q.get("difficulty", 3) for q in questions}
-            for s in scores:
-                s.setdefault("difficulty", q_diff.get(s.get("question_id"), 3))
+            scores = _normalize_scores(eval_result.get("scores", []), questions)
+            overall = _normalize_overall(eval_result.get("overall", {}))
 
             # Shielded persistence — see _persist_drill. Survives a client disconnect.
             async def _persist_job_prep():
                 try:
                     review_ = format_job_prep_review(questions, answers, scores, overall, meta)
-                    save_review(session_id, review_, scores, overall.get("new_weak_points", []), overall, user_id=user_id)
+                    if not save_review(
+                        session_id, review_, scores,
+                        overall.get("new_weak_points", []), overall,
+                        user_id=user_id, evaluation_token=evaluation_token,
+                    ):
+                        raise _SyncClaimLost("evaluation generation changed before JD persistence")
 
-                    # Skip profile/knowledge side-effects on re-eval (see _persist_drill).
-                    if not already_scored:
-                        await _update_job_prep_profile(overall, scores, len(questions), meta, user_id)
-                    del_live(job_prep_sessions, session_id, user_id)
+                    claim_token = None
+                    jd_target_topics = None
+                    if not already_synced and _has_valid_side_effect_score(scores):
+                        jd_target_topics = await asyncio.to_thread(
+                            _match_jd_to_topics, meta, user_id,
+                        )
+                        claim_token = await asyncio.to_thread(
+                            try_claim_session_sync, session_id, user_id=user_id,
+                            evaluation_token=evaluation_token,
+                            target_group="knowledge",
+                            target_topics=jd_target_topics,
+                        )
 
-                    if not already_scored:
+                    if claim_token:
+                        frozen_jd_targets = await asyncio.to_thread(
+                            session_sync_targets,
+                            session_id,
+                            "knowledge",
+                            user_id=user_id,
+                            claim_token=claim_token,
+                        )
                         try:
-                            from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
-                            jd_topics = _match_jd_to_topics(meta, user_id)
-                            for t in jd_topics:
-                                await extract_and_writeback(t, questions, answers, scores, user_id)
-                                await collect_high_freq(t, questions, scores, user_id)
-                        except Exception as e:
-                            import logging
-                            logging.getLogger("uvicorn").warning(f"JD prep knowledge evolution failed: {e}")
-                        # Idempotency marker for the "同步" fallback (see _persist_drill).
-                        await asyncio.to_thread(mark_session_synced, session_id, user_id=user_id)
+                            synced = await _apply_job_prep_side_effects(
+                                session_id, questions, answers, scores, overall,
+                                meta, user_id, claim_token,
+                                target_topics=frozen_jd_targets,
+                            )
+                        except Exception as exc:
+                            await asyncio.to_thread(
+                                release_session_sync_claim, session_id,
+                                user_id=user_id, claim_token=claim_token,
+                            )
+                            raise RuntimeError(
+                                f"JD prep side-effects remain pending: {exc}"
+                            ) from exc
+                        if not synced:
+                            raise _SyncClaimLost(
+                                f"JD prep sync claim lost: {session_id}"
+                            )
+                    elif not already_synced and _has_valid_side_effect_score(scores):
+                        latest = await asyncio.to_thread(
+                            get_session, session_id, user_id=user_id,
+                        )
+                        latest_meta = ((latest or {}).get("meta") or {})
+                        if not latest_meta.get("synced_at"):
+                            raise _SyncClaimLost(
+                                "could not claim JD prep side-effects for this evaluation"
+                            )
+                        if latest_meta.get("evaluation_claim_token") != evaluation_token:
+                            raise _SyncClaimLost(
+                                "JD prep evaluation generation was superseded by the sync winner"
+                            )
+                    if not await _evaluation_generation_is_current(
+                        session_id, user_id, evaluation_token,
+                    ):
+                        raise _SyncClaimLost(
+                            "JD prep evaluation generation changed before completion"
+                        )
+                    del_live(job_prep_sessions, session_id, user_id)
                     return review_
                 except Exception as e:
                     import logging
                     logging.getLogger("uvicorn").error(f"JD prep persistence failed: {e}")
-                    return format_job_prep_review(questions, answers, scores, overall, meta)
+                    raise
 
-            review = await asyncio.shield(_persist_job_prep())
+            try:
+                review = await _finish_despite_cancellation(_persist_job_prep())
+            except Exception:
+                yield sse_event({
+                    "type": "error",
+                    "message": "Evaluation finished, but the result could not be saved. Please retry.",
+                })
+                yield sse_event({"type": "done"})
+                return
+
+            if not await _evaluation_generation_is_current(
+                session_id, user_id, evaluation_token,
+            ):
+                yield sse_event({
+                    "type": "error",
+                    "message": "A newer evaluation replaced this result. Please reload.",
+                })
+                yield sse_event({"type": "done"})
+                return
 
             result = {
                 "session_id": session_id,
@@ -557,7 +1347,9 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
             yield sse_event({"type": "complete", "data": result})
             yield sse_event({"type": "done"})
 
-        return streaming_response(_stream_job_prep())
+        return streaming_response(_release_eval_claim_after(
+            _stream_job_prep(), session_id, user_id, evaluation_token,
+        ))
 
     # -- Resume mode --
     entry = _get_resume_graph(session_id, user_id)
@@ -569,14 +1361,20 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
     graph = entry["graph"]
     config = entry["config"]
 
-    state = graph.get_state(config)
-    messages = state.values.get("messages", [])
-    scores = state.values.get("scores", [])
-    weak_points = state.values.get("weak_points", [])
-    eval_history = state.values.get("eval_history", [])
-    topic_name = state.values.get("topic_name", entry.get("topic"))
+    evaluation_token = await asyncio.to_thread(
+        try_claim_session_evaluation, session_id, user_id=user_id,
+    )
+    if not evaluation_token:
+        raise HTTPException(409, "Evaluation is already in progress for this session.")
 
-    async def _stream_resume():
+    async def _stream_resume_unlocked():
+        state = graph.get_state(config)
+        messages = state.values.get("messages", [])
+        scores = _normalize_scores(state.values.get("scores", []))
+        weak_points = state.values.get("weak_points", [])
+        eval_history = state.values.get("eval_history", [])
+        topic_name = state.values.get("topic_name", entry.get("topic"))
+
         yield sse_event({"type": "eval_start", "total": len(messages)})
 
         review_text = ""
@@ -600,44 +1398,186 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         # Shielded persistence — see _persist_drill. The profile extraction (an LLM call)
         # plus review/knowledge writeback complete even if the client disconnects mid-review.
         async def _persist_resume():
+            claim_token = None
             try:
-                extraction_ = await update_profile_after_interview(
-                    mode=entry["mode"].value,
-                    topic=entry.get("topic"),
-                    messages=messages,
-                    user_id=user_id,
-                    scores=scores,
+                already_synced = bool(existing and (existing.get("meta") or {}).get("synced_at"))
+                resume_target_topics = await asyncio.to_thread(
+                    _match_resume_to_topics, messages, user_id,
                 )
+                if not already_synced:
+                    claim_token = await asyncio.to_thread(
+                        try_claim_session_sync, session_id, user_id=user_id,
+                        evaluation_token=evaluation_token,
+                        target_group="knowledge",
+                        target_topics=resume_target_topics,
+                    )
+                    if not claim_token:
+                        raise _SyncClaimLost(
+                            "resume side-effects are already claimed by another worker"
+                        )
+                frozen_resume_targets = []
+                if claim_token:
+                    frozen_resume_targets = await asyncio.to_thread(
+                        session_sync_targets,
+                        session_id,
+                        "knowledge",
+                        user_id=user_id,
+                        claim_token=claim_token,
+                    )
 
-                resume_overall = {}
-                if extraction_.get("dimension_scores"):
-                    resume_overall["dimension_scores"] = extraction_["dimension_scores"]
-                if extraction_.get("avg_score"):
-                    resume_overall["avg_score"] = extraction_["avg_score"]
-                save_review(session_id, review_text, scores, weak_points, overall=resume_overall, user_id=user_id)
+                extraction_ = {}
+                resume_overall = (existing or {}).get("overall", {}) or {}
+                steps = await asyncio.to_thread(
+                    session_sync_steps, session_id, user_id=user_id,
+                )
+                profile_pending = bool(claim_token and "profile" not in steps)
+                if profile_pending:
+                    extraction_ = await update_profile_after_interview(
+                        mode=entry["mode"].value,
+                        topic=entry.get("topic"),
+                        messages=messages,
+                        user_id=user_id,
+                        scores=scores,
+                        operation_id=_sync_operation_id(session_id, "profile"),
+                    )
 
-                del_live(graphs, session_id, user_id)
+                    resume_overall = {}
+                    if extraction_.get("dimension_scores") is not None:
+                        resume_overall["dimension_scores"] = extraction_["dimension_scores"]
+                    if extraction_.get("avg_score") is not None:
+                        resume_overall["avg_score"] = extraction_["avg_score"]
 
-                try:
+                    # The profile mutation already happened. Persist both its
+                    # completion marker and reusable extraction before review,
+                    # so a review write failure cannot apply the profile twice.
+                    await _mark_sync_step(
+                        session_id, "profile", user_id, claim_token,
+                        result={
+                            "extraction": extraction_,
+                            "overall": resume_overall,
+                        },
+                    )
+                elif "profile" in steps:
+                    profile_result = await asyncio.to_thread(
+                        session_sync_step_result, session_id, "profile",
+                        user_id=user_id,
+                    )
+                    if profile_result:
+                        stored_extraction = profile_result.get("extraction")
+                        stored_overall = profile_result.get("overall")
+                        if isinstance(stored_extraction, dict):
+                            extraction_ = stored_extraction
+                        if isinstance(stored_overall, dict):
+                            resume_overall = stored_overall
+
+                # Always persist the generated review. Only the profile / knowledge
+                # side-effects are claim-gated; on duplicate calls we preserve the
+                # previous overall metrics instead of wiping them with an empty extraction.
+                if not save_review(
+                    session_id, review_text, scores, weak_points,
+                    overall=resume_overall, user_id=user_id,
+                    evaluation_token=evaluation_token,
+                ):
+                    raise _SyncClaimLost("evaluation generation changed before resume persistence")
+
+                if claim_token:
                     from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
-                    resume_topics = _match_resume_to_topics(messages, user_id)
+                    resume_topics = frozen_resume_targets
                     if resume_topics and eval_history:
-                        resume_qs = [{"question": e.get("question", "")} for e in eval_history if e.get("question")]
-                        resume_scores = [{"score": e.get("score", 5), "assessment": e.get("assessment", "")} for e in eval_history]
-                        resume_answers = [e.get("answer", "") for e in eval_history]
-                        for t in resume_topics:
-                            await extract_and_writeback(t, resume_qs, resume_answers, resume_scores, user_id)
-                            await collect_high_freq(t, resume_qs, resume_scores, user_id)
-                except Exception as e:
-                    import logging
-                    logging.getLogger("uvicorn").warning(f"Resume knowledge evolution failed: {e}")
+                        rows = [e for e in eval_history if e.get("question")]
+                        resume_qs = [{"question": e.get("question", "")} for e in rows]
+                        resume_scores = [
+                            {"score": e.get("score"), "assessment": e.get("assessment", "")}
+                            for e in rows
+                        ]
+                        resume_answers = [e.get("answer", "") for e in rows]
+                        for target_topic in resume_topics:
+                            extract_step = f"knowledge_extract:{target_topic}"
+                            freq_step = f"high_freq:{target_topic}"
+                            if await _skip_deleted_topic_steps(
+                                session_id,
+                                target_topic,
+                                steps,
+                                user_id,
+                                claim_token,
+                            ):
+                                continue
+                            if extract_step not in steps:
+                                ok = await extract_and_writeback(
+                                    target_topic, resume_qs, resume_answers,
+                                    resume_scores, user_id,
+                                    operation_id=_sync_operation_id(
+                                        session_id, extract_step,
+                                    ),
+                                )
+                                if ok is False:
+                                    raise RuntimeError(
+                                        f"knowledge extraction failed for {target_topic}"
+                                    )
+                                await _mark_sync_step(
+                                    session_id, extract_step, user_id, claim_token,
+                                )
+                            if freq_step not in steps:
+                                ok = await collect_high_freq(
+                                    target_topic, resume_qs, resume_scores, user_id,
+                                    operation_id=_sync_operation_id(
+                                        session_id, freq_step,
+                                    ),
+                                )
+                                if ok is False:
+                                    raise RuntimeError(
+                                        f"high-frequency collection failed for {target_topic}"
+                                    )
+                                await _mark_sync_step(
+                                    session_id, freq_step, user_id, claim_token,
+                                )
+                    marked = await asyncio.to_thread(
+                        mark_session_synced, session_id,
+                        user_id=user_id, claim_token=claim_token,
+                    )
+                    if not marked:
+                        raise _SyncClaimLost("resume sync claim lost before completion")
+                    await _confirm_profile_operations(session_id, user_id)
+
+                # Keep the checkpoint/live-session recoverable until every
+                # target side-effect and the terminal sync marker are durable.
+                if not await _evaluation_generation_is_current(
+                    session_id, user_id, evaluation_token,
+                ):
+                    raise _SyncClaimLost(
+                        "resume evaluation generation changed before completion"
+                    )
+                del_live(graphs, session_id, user_id)
                 return extraction_
             except Exception as e:
                 import logging
                 logging.getLogger("uvicorn").error(f"Resume persistence failed: {e}")
-                return {}
+                if claim_token:
+                    await asyncio.to_thread(
+                        release_session_sync_claim, session_id,
+                        user_id=user_id, claim_token=claim_token,
+                    )
+                raise
 
-        extraction = await asyncio.shield(_persist_resume())
+        try:
+            extraction = await _finish_despite_cancellation(_persist_resume())
+        except Exception:
+            yield sse_event({
+                "type": "error",
+                "message": "Review finished, but the result could not be saved. Please retry.",
+            })
+            yield sse_event({"type": "done"})
+            return
+
+        if not await _evaluation_generation_is_current(
+            session_id, user_id, evaluation_token,
+        ):
+            yield sse_event({
+                "type": "error",
+                "message": "A newer evaluation replaced this result. Please reload.",
+            })
+            yield sse_event({"type": "done"})
+            return
 
         result = {
             "session_id": session_id,
@@ -654,7 +1594,14 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         yield sse_event({"type": "complete", "data": result})
         yield sse_event({"type": "done"})
 
-    return streaming_response(_stream_resume())
+    async def _stream_resume():
+        async with _get_resume_session_lock(user_id, session_id):
+            async for item in _stream_resume_unlocked():
+                yield item
+
+    return streaming_response(_release_eval_claim_after(
+        _stream_resume(), session_id, user_id, evaluation_token,
+    ))
 
 
 @router.post("/interview/sync/{session_id}")
@@ -680,63 +1627,123 @@ async def sync_session_side_effects(session_id: str, user_id: str = Depends(get_
     if (session.get("meta") or {}).get("synced_at"):
         return {"status": "already_synced", "synced_at": session["meta"]["synced_at"]}
 
-    scores = session.get("scores") or []
-    has_valid = any(
-        isinstance(s.get("score"), (int, float)) and not s.get("skipped") for s in scores
-    )
+    scores = _normalize_scores(session.get("scores") or [], session.get("questions") or [])
+    has_valid = _has_valid_side_effect_score(scores)
     if not has_valid:
         raise HTTPException(400, "该会话没有有效评分，请先重新评估再同步。")
 
+    jd_target_candidates = None
+    if mode == "jd_prep":
+        jd_target_candidates = await asyncio.to_thread(
+            _match_jd_to_topics, session.get("meta", {}) or {}, user_id,
+        )
+    claimed = await asyncio.to_thread(
+        try_claim_session_sync,
+        session_id,
+        user_id=user_id,
+        target_group="knowledge" if mode == "jd_prep" else None,
+        target_topics=jd_target_candidates,
+    )
+    if not claimed:
+        latest = await asyncio.to_thread(get_session, session_id, user_id=user_id)
+        meta = (latest or {}).get("meta", {}) or {}
+        if meta.get("synced_at"):
+            return {"status": "already_synced", "synced_at": meta["synced_at"]}
+        return {"status": "sync_in_progress", "claimed_at": meta.get("sync_claimed_at")}
+
+    # The pre-check above is only advisory. A stale evaluation worker may have
+    # committed a newer review/scores payload immediately before this claim
+    # atomically fenced it, so every side-effect input must come from a fresh
+    # post-claim snapshot.
+    session = await asyncio.to_thread(get_session, session_id, user_id=user_id)
+    if not session:
+        await asyncio.to_thread(
+            release_session_sync_claim, session_id,
+            user_id=user_id, claim_token=claimed,
+        )
+        raise HTTPException(404, "Session not found.")
+    fresh_meta = session.get("meta", {}) or {}
+    if fresh_meta.get("synced_at"):
+        return {
+            "status": "already_synced",
+            "synced_at": fresh_meta["synced_at"],
+        }
+    if fresh_meta.get("sync_claim_token") != claimed:
+        return {
+            "status": "sync_in_progress",
+            "claimed_at": fresh_meta.get("sync_claimed_at"),
+        }
+    mode = session.get("mode")
+    if mode not in ("topic_drill", "jd_prep"):
+        await asyncio.to_thread(
+            abort_session_sync_claim, session_id,
+            user_id=user_id, claim_token=claimed,
+        )
+        raise HTTPException(400, "仅训练 / JD 备面会话支持同步到画像。")
+
     questions = session.get("questions") or []
-    overall = session.get("overall") or {}
+    scores = _normalize_scores(session.get("scores") or [], questions)
+    if not _has_valid_side_effect_score(scores):
+        await asyncio.to_thread(
+            abort_session_sync_claim, session_id,
+            user_id=user_id, claim_token=claimed,
+        )
+        raise HTTPException(400, "该会话没有有效评分，请先重新评估再同步。")
+    overall = _normalize_overall(session.get("overall") or {})
     answers = _answers_from_transcript(questions, session.get("transcript", []))
 
-    from backend.knowledge_evolution import extract_and_writeback, collect_high_freq
+    try:
+        if mode == "topic_drill":
+            synced = await _apply_drill_side_effects(
+                session_id, session.get("topic"), questions, answers, scores,
+                overall, user_id, claimed,
+            )
+        else:
+            frozen_jd_targets = await asyncio.to_thread(
+                session_sync_targets,
+                session_id,
+                "knowledge",
+                user_id=user_id,
+                claim_token=claimed,
+            )
+            synced = await _apply_job_prep_side_effects(
+                session_id, questions, answers, scores, overall,
+                session.get("meta", {}) or {}, user_id, claimed,
+                target_topics=frozen_jd_targets,
+            )
+    except Exception as exc:
+        await asyncio.to_thread(
+            release_session_sync_claim, session_id,
+            user_id=user_id, claim_token=claimed,
+        )
+        raise HTTPException(503, f"同步未完成，可安全重试：{exc}") from exc
 
+    latest = await asyncio.to_thread(get_session, session_id, user_id=user_id)
+    synced_at = ((latest or {}).get("meta") or {}).get("synced_at")
+    if not synced or not synced_at:
+        return {"status": "sync_in_progress"}
     if mode == "topic_drill":
-        topic = session.get("topic")
-        from backend.spaced_repetition import update_weak_point_sr
-        for s in scores:
-            wp = s.get("weak_point")
-            sc = s.get("score")
-            if wp and isinstance(sc, (int, float)):
-                update_weak_point_sr(topic, wp, sc, user_id, difficulty=s.get("difficulty", 3))
-        await _update_drill_profile(topic, overall, scores, len(questions), user_id)
-        try:
-            await extract_and_writeback(topic, questions, answers, scores, user_id)
-            await collect_high_freq(topic, questions, scores, user_id)
-        except Exception as e:
-            import logging
-            logging.getLogger("uvicorn").warning(f"Sync knowledge evolution failed: {e}")
-    else:  # jd_prep
-        meta = session.get("meta", {}) or {}
-        await _update_job_prep_profile(overall, scores, len(questions), meta, user_id)
-        try:
-            for t in _match_jd_to_topics(meta, user_id):
-                await extract_and_writeback(t, questions, answers, scores, user_id)
-                await collect_high_freq(t, questions, scores, user_id)
-        except Exception as e:
-            import logging
-            logging.getLogger("uvicorn").warning(f"Sync JD prep knowledge evolution failed: {e}")
-
-    await asyncio.to_thread(mark_session_synced, session_id, user_id=user_id)
-    return {"status": "synced"}
+        del_live(drill_sessions, session_id, user_id)
+    else:
+        del_live(job_prep_sessions, session_id, user_id)
+    return {"status": "synced", "synced_at": synced_at}
 
 
 @router.post("/interview/reference-answer")
-async def generate_reference_answer(body: dict, user_id: str = Depends(get_current_user)):
-    topic = body.get("topic", "").strip()
-    question = body.get("question", "").strip()
-    session_id = body.get("session_id")
-    question_id = body.get("question_id")
-    force = body.get("force", False)
-    mode = body.get("mode", "full")
-    if not topic or not question:
-        raise HTTPException(400, "topic and question are required")
+async def generate_reference_answer(
+    body: ReferenceAnswerRequest,
+    user_id: str = Depends(get_current_user),
+):
+    topic = body.topic
+    question = body.question
+    session_id = body.session_id
+    question_id = body.question_id
+    force = body.force
+    mode = body.mode
 
     from backend.storage.sessions import get_reference_answer, save_reference_answer
 
-    cache_key_suffix = f"_hint" if mode == "hint" else ""
+    cache_key_suffix = "_hint" if mode == "hint" else ""
     cache_qid = f"{question_id}{cache_key_suffix}" if question_id else None
 
     if session_id and cache_qid and not force:
@@ -745,7 +1752,6 @@ async def generate_reference_answer(body: dict, user_id: str = Depends(get_curre
             return {"reference_answer": cached, "cached": True, "mode": mode}
 
     from backend.indexer import safe_retrieve_topic_context
-    from backend.llm_provider import get_langchain_llm
     from backend.prompts.interviewer import REFERENCE_ANSWER_PROMPT, HINT_PROMPT
 
     topics = load_topics(user_id)
@@ -821,13 +1827,15 @@ def _match_jd_to_topics(meta: dict, user_id: str) -> list[str]:
 # ── Profile update helpers ──
 
 async def _update_drill_profile(topic: str, overall: dict, scores: list,
-                                total_questions: int, user_id: str):
+                                total_questions: int, user_id: str,
+                                operation_id: str | None = None):
     valid = []
     for s in scores:
-        try:
-            valid.append((float(s["score"]), float(s.get("difficulty", 3))))
-        except (TypeError, ValueError, KeyError):
-            pass
+        if s.get("skipped"):
+            continue
+        score = _numeric_score(s.get("score"))
+        if score is not None:
+            valid.append((score, float(s.get("difficulty", 3))))
     mastery = overall.get("topic_mastery", {})
     coverage = len(valid) / total_questions if total_questions else 0
     session_weight = coverage * 0.4
@@ -847,19 +1855,22 @@ async def _update_drill_profile(topic: str, overall: dict, scores: list,
         thinking_patterns=overall.get("thinking_patterns"),
         session_summary=overall.get("summary", ""),
         avg_score=overall.get("avg_score"),
-        answer_count=len(scores),
+        answer_count=len(valid),
         session_weight=session_weight,
+        operation_id=operation_id,
     )
 
 
 async def _update_job_prep_profile(overall: dict, scores: list, total_questions: int,
-                                   meta: dict, user_id: str):
+                                   meta: dict, user_id: str,
+                                   operation_id: str | None = None):
     valid = []
     for s in scores:
-        try:
-            valid.append(float(s["score"]))
-        except (TypeError, ValueError, KeyError):
-            pass
+        if s.get("skipped"):
+            continue
+        score = _numeric_score(s.get("score"))
+        if score is not None:
+            valid.append(score)
 
     topic = meta.get("position") or "JD 备面"
     coverage = len(valid) / total_questions if total_questions else 0
@@ -882,4 +1893,5 @@ async def _update_job_prep_profile(overall: dict, scores: list, total_questions:
         answer_count=len(valid),
         session_weight=session_weight,
         dimension_scores=overall.get("dimension_scores"),
+        operation_id=operation_id,
     )

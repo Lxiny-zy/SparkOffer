@@ -1,20 +1,36 @@
 """Profile, topics, and history routes."""
+import logging
+import os
 import re
+import shutil
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
+from pydantic import BaseModel, Field
 
 from backend.config import settings
-from backend.indexer import load_topics, save_topics, invalidate_topic_index
+from backend.indexer import (
+    index_mutation_lock, invalidate_topic_index, load_topics,
+    topics_transaction,
+)
+from backend.utils.files import atomic_write_text
 from backend.memory import get_profile, _load_profile, profile_transaction
 from backend.storage.sessions import (
     get_session, list_sessions, list_sessions_by_topic,
     delete_session, list_distinct_topics, save_drill_progress,
 )
 from backend.auth import get_current_user
+from backend.models import DrillProgressRequest
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger("uvicorn")
+
+
+class TopicCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    icon: str = Field(default="", max_length=100)
+    key: str = Field(default="", max_length=100)
 
 
 # ── Topics ──
@@ -25,47 +41,92 @@ def get_topics(user_id: str = Depends(get_current_user)):
 
 
 @router.post("/topics")
-def create_topic(body: dict, user_id: str = Depends(get_current_user)):
-    name = body.get("name", "").strip()
-    icon = body.get("icon", "").strip()
+def create_topic(body: TopicCreateRequest, user_id: str = Depends(get_current_user)):
+    if isinstance(body, BaseModel):
+        raw_name, raw_icon, raw_key = body.name, body.icon, body.key
+    elif isinstance(body, dict):
+        # Preserve direct unit-call compatibility; FastAPI always supplies the
+        # validated model above.
+        raw_name = body.get("name", "")
+        raw_icon = body.get("icon", "")
+        raw_key = body.get("key", "")
+    else:
+        raise HTTPException(422, "request body must be an object")
+    if not isinstance(raw_name, str) or not isinstance(raw_icon, str) or not isinstance(raw_key, str):
+        raise HTTPException(422, "name, icon, and key must be strings")
+    if len(raw_name) > 200 or len(raw_icon) > 100 or len(raw_key) > 100:
+        raise HTTPException(422, "name, icon, or key is too long")
+    name = raw_name.strip()
+    icon = raw_icon.strip()
     if not name:
         raise HTTPException(400, "name is required")
 
-    key = body.get("key", "").strip()
+    key = raw_key.strip()
     if not key:
         key = uuid.uuid4().hex[:8]
     key = re.sub(r'[^a-zA-Z0-9_-]', '', key)
     if not key:
         key = uuid.uuid4().hex[:8]
 
-    topics = load_topics(user_id)
-    if key in topics:
-        raise HTTPException(409, f"Topic '{key}' already exists")
-
     dir_name = key
-    topics[key] = {"name": name, "icon": icon, "dir": dir_name}
-    save_topics(topics, user_id)
-
     topic_dir = settings.user_knowledge_path(user_id) / dir_name
-    topic_dir.mkdir(parents=True, exist_ok=True)
-    readme = topic_dir / "README.md"
-    if not readme.exists():
-        readme.write_text(f"# {name}\n", encoding="utf-8")
+    created_dir = False
+    try:
+        with topics_transaction(user_id) as topics:
+            if key in topics:
+                raise HTTPException(409, f"Topic '{key}' already exists")
+            if not topic_dir.exists():
+                topic_dir.mkdir(parents=True, exist_ok=False)
+                created_dir = True
+            readme = topic_dir / "README.md"
+            if not readme.exists():
+                atomic_write_text(readme, f"# {name}\n")
+            topics[key] = {"name": name, "icon": icon, "dir": dir_name}
+    except Exception:
+        if created_dir and topic_dir.exists():
+            shutil.rmtree(topic_dir, ignore_errors=True)
+        raise
 
     return {"ok": True, "key": key}
 
 
 @router.delete("/topics/{key}")
 def delete_topic(key: str, user_id: str = Depends(get_current_user)):
-    topics = load_topics(user_id)
-    if key not in topics:
-        raise HTTPException(404, f"Topic '{key}' not found")
-    del topics[key]
-    save_topics(topics, user_id)
-    # Full invalidation: the topic is gone, so drop its Qdrant collection (server
-    # deploys) / local persist dir / manifest — not just the in-memory cache entry,
-    # which previously left orphaned kb_{user}_{topic} collections behind.
-    invalidate_topic_index(key, user_id)
+    knowledge_root = settings.user_knowledge_path(user_id).resolve()
+    tombstone = knowledge_root / f".topic-delete-{uuid.uuid4().hex}"
+    topic_dir = None
+    moved = False
+    with index_mutation_lock(key, user_id):
+        try:
+            with topics_transaction(user_id) as topics:
+                if key not in topics:
+                    raise HTTPException(404, f"Topic '{key}' not found")
+                topic_info = topics[key]
+                topic_dir = (knowledge_root / topic_info["dir"]).resolve()
+                if topic_dir == knowledge_root or knowledge_root not in topic_dir.parents:
+                    raise HTTPException(400, "Invalid topic directory")
+                if topic_dir.exists():
+                    os.replace(topic_dir, tombstone)
+                    moved = True
+                # Drop persisted state while the source can still be restored
+                # if invalidation or topics.json persistence fails.
+                invalidate_topic_index(key, user_id, strict=True)
+                del topics[key]
+        except Exception:
+            if (
+                moved
+                and topic_dir is not None
+                and tombstone.exists()
+                and not topic_dir.exists()
+            ):
+                os.replace(tombstone, topic_dir)
+            raise
+
+    if tombstone.exists():
+        try:
+            shutil.rmtree(tombstone)
+        except OSError as exc:
+            logger.warning("Unable to remove deleted topic staging dir %s: %s", tombstone, exc)
     return {"ok": True}
 
 
@@ -195,7 +256,6 @@ def get_topic_history(topic: str, user_id: str = Depends(get_current_user)):
 @router.post("/profile/topic/{topic}/retrospective")
 def generate_retrospective(topic: str, user_id: str = Depends(get_current_user)):
     from backend.prompts.interviewer import TOPIC_RETROSPECTIVE_PROMPT
-    from backend.llm_provider import get_langchain_llm
     from langchain_core.messages import SystemMessage, HumanMessage
 
     sessions = list_sessions_by_topic(topic, user_id=user_id)
@@ -254,7 +314,8 @@ def generate_retrospective(topic: str, user_id: str = Depends(get_current_user))
             score_lines.append(line)
 
         history_lines.append(
-            f"### {date} (答题 {len(valid_scores)}/10, 平均 {avg or '无'}/10)\n"
+            f"### {date} (答题 {len(valid_scores)}/10, 平均 "
+            f"{avg if avg is not None else '无'}/10)\n"
             f"{summary_part}\n"
             + ("\n".join(score_lines) + "\n" if score_lines else "")
         )
@@ -313,9 +374,11 @@ def get_review(session_id: str, user_id: str = Depends(get_current_user)):
 
 @router.get("/interview/history")
 def get_history(
-    limit: int = 20, offset: int = 0,
-    mode: str = None, topic: str = None,
-    status: str = "completed",
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    mode: str | None = Query(default=None, max_length=100),
+    topic: str | None = Query(default=None, max_length=200),
+    status: str = Query(default="completed", pattern="^(completed|in_progress|all)$"),
     user_id: str = Depends(get_current_user),
 ):
     result = list_sessions(
@@ -368,7 +431,7 @@ async def get_interview_session(session_id: str, user_id: str = Depends(get_curr
 
 @router.post("/interview/session/{session_id}/progress")
 async def save_session_progress(
-    session_id: str, body: dict,
+    session_id: str, body: DrillProgressRequest,
     user_id: str = Depends(get_current_user),
 ):
     """Persist mid-drill progress (current_index, partial_answers, hints) to meta.progress."""
@@ -376,9 +439,9 @@ async def save_session_progress(
     ok = await asyncio.to_thread(
         save_drill_progress,
         session_id,
-        int(body.get("current_index", 0)),
-        body.get("partial_answers", {}) or {},
-        body.get("hints", {}) or {},
+        body.current_index,
+        body.partial_answers,
+        body.hints,
         user_id=user_id,
     )
     if not ok:

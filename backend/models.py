@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, TypedDict
-from pydantic import BaseModel, Field
+from typing import Annotated, Any, Literal, TypedDict
+from pydantic import BaseModel, Field, field_validator
 from langgraph.graph import add_messages
 
 
@@ -57,13 +57,13 @@ class TopicDrillState(TypedDict, total=False):
 
 class StartInterviewRequest(BaseModel):
     mode: InterviewMode
-    topic: str | None = None
+    topic: str | None = Field(default=None, max_length=200)
 
 
 class JobPrepPreviewRequest(BaseModel):
-    jd_text: str
-    company: str | None = None
-    position: str | None = None
+    jd_text: str = Field(max_length=200_000)
+    company: str | None = Field(default=None, max_length=200)
+    position: str | None = Field(default=None, max_length=200)
     use_resume: bool = True
 
 
@@ -72,57 +72,120 @@ class JobPrepStartRequest(JobPrepPreviewRequest):
 
 
 class ChatRequest(BaseModel):
-    session_id: str
-    message: str
+    session_id: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=1, max_length=100_000)
+
+
+class ReferenceAnswerRequest(BaseModel):
+    topic: str = Field(min_length=1, max_length=200)
+    question: str = Field(min_length=1, max_length=100_000)
+    session_id: str | None = Field(default=None, max_length=200)
+    question_id: str | int | None = None
+    force: bool = False
+    mode: Literal["full", "hint"] = "full"
+
+    @field_validator("topic", "question")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("session_id")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class DrillProgressRequest(BaseModel):
+    current_index: int = Field(default=0, ge=0, le=100_000)
+    partial_answers: dict[str, str] = Field(default_factory=dict)
+    hints: dict[str, Any] = Field(default_factory=dict)
 
 
 class EndDrillRequest(BaseModel):
     answers: list[dict] = Field(default_factory=list)  # [{question_id: int, answer: str}]
 
+    @field_validator("answers", mode="before")
+    @classmethod
+    def normalize_answers(cls, value):
+        """Accept both the UI list form and legacy question-id keyed maps."""
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            normalized = []
+            for question_id, answer in value.items():
+                if isinstance(answer, dict):
+                    answer = answer.get("answer", "")
+                normalized.append({"question_id": question_id, "answer": "" if answer is None else str(answer)})
+            return normalized
+        if not isinstance(value, list):
+            raise ValueError("answers must be a list or question-id map")
+        normalized = []
+        for item in value:
+            if not isinstance(item, dict):
+                raise ValueError("each answer must be an object")
+            question_id = item.get("question_id", item.get("id"))
+            if question_id is None:
+                raise ValueError("each answer requires question_id")
+            answer = item.get("answer", "")
+            normalized.append({
+                **item,
+                "question_id": question_id,
+                "answer": "" if answer is None else str(answer),
+            })
+        return normalized
+
 
 # ── Auth Models ──
 
 class RegisterRequest(BaseModel):
-    email: str
-    password: str
-    name: str = ""
-    invite_code: str = ""
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=72)
+    name: str = Field(default="", max_length=50)
+    invite_code: str = Field(default="", max_length=512)
 
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=1, max_length=320)
+    # Preserve the generic invalid-credentials response for legacy passwords
+    # beyond bcrypt's limit while still bounding hostile request bodies.
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class UpdateProfileRequest(BaseModel):
-    name: str | None = None
-    email: str | None = None
+    name: str | None = Field(default=None, max_length=50)
+    email: str | None = Field(default=None, max_length=320)
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str
+    current_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=1, max_length=72)
 
 
 # ── Algorithm Solver Models ──
 
 class AlgorithmSolveRequest(BaseModel):
-    problem_text: str
-    language: str = "python"
-    source_url: str = ""
+    problem_text: str = Field(min_length=1, max_length=200_000)
+    language: str = Field(default="python", min_length=1, max_length=64)
+    source_url: str = Field(default="", max_length=2048)
 
 
 class AlgorithmChatRequest(BaseModel):
-    session_id: str
-    message: str
+    session_id: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=1, max_length=100_000)
 
 
 class AlgorithmSaveRequest(BaseModel):
-    session_id: str
-    title: str
-    difficulty: str = ""
+    session_id: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=500)
+    difficulty: str = Field(default="", max_length=100)
     tags: list[str] = Field(default_factory=list)
-    note: str = ""
+    note: str = Field(default="", max_length=1_000_000)
 
 
 # ── AI Config Models ──
@@ -164,9 +227,11 @@ class TestEmbeddingRequest(BaseModel):
 class LLMChannelConfig(BaseModel):
     id: str = ""
     name: str = "Default"
-    api_base: str
-    keys: list[str]
-    model: str
+    # Empty values are allowed for disabled channels so the settings UI can
+    # keep an incomplete draft without making it runtime-active.
+    api_base: str = ""
+    keys: list[str] = Field(default_factory=list)
+    model: str = ""
     temperature: float = 0.7
     reasoning_effort: str = ""
     max_tokens: int = 32768  # 单次输出上限（OpenAI max_completion_tokens），非上下文窗口；推理模型含思考 token 故抬高

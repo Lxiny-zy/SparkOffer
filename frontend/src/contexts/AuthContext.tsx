@@ -12,74 +12,110 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+function readStoredToken(): string | null {
+  try {
+    return localStorage.getItem("token");
+  } catch {
+    return null;
+  }
+}
+
+function readStoredUser(): User | null {
+  try {
+    const stored = localStorage.getItem("user");
+    if (!stored) return null;
+    const parsed: unknown = JSON.parse(stored);
+    return parsed && typeof parsed === "object" ? parsed as User : null;
+  } catch {
+    return null;
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem("token"));
-  const [loading, setLoading] = useState(true);
+  const [token, setToken] = useState<string | null>(readStoredToken);
+  const [user, setUser] = useState<User | null>(() => token ? readStoredUser() : null);
+  const [loading, setLoading] = useState(() => Boolean(token));
 
-  useEffect(() => {
-    if (token) {
-      // 5秒超时：防止后端繁忙时 loading 永远不结束导致黑屏
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
-
-      fetch("/api/auth/me", {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal,
-      })
-        .then(async (res) => {
-          clearTimeout(timer);
-          if (res.ok) {
-            // 以服务端为准刷新用户信息（含 is_owner），避免 localStorage 里的旧数据
-            const fresh = await res.json();
-            localStorage.setItem("user", JSON.stringify(fresh));
-            setUser(fresh);
-            return;
-          }
-
-          if (res.status === 401) {
-            logout();
-            return;
-          }
-
-          // 5xx 或其他错误：保留本地会话，不登出
-          const stored = localStorage.getItem("user");
-          if (stored) setUser(JSON.parse(stored));
-          console.warn("Auth bootstrap: backend temporarily unavailable, keeping local session:", res.status);
-        })
-        .catch((err) => {
-          clearTimeout(timer);
-          // AbortError（超时）或网络错误：保留本地会话
-          const stored = localStorage.getItem("user");
-          if (stored) setUser(JSON.parse(stored));
-          if (err.name === "AbortError") {
-            console.warn("Auth bootstrap timed out (5s), keeping local session");
-          } else {
-            console.warn("Auth bootstrap request failed, keeping local session:", err);
-          }
-        })
-        .finally(() => setLoading(false));
-    } else {
-      setLoading(false);
+  const logout = useCallback(() => {
+    try {
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
+    } catch {
+      // In-memory state must still be cleared if storage is unavailable.
     }
+    setToken(null);
+    setUser(null);
+    setLoading(false);
   }, []);
 
+  useEffect(() => {
+    if (!token) return;
+
+    let active = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 5000);
+    const restoreLocalUser = () => {
+      const stored = readStoredUser();
+      if (active && stored) setUser(stored);
+    };
+
+    fetch("/api/auth/me", {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        window.clearTimeout(timer);
+        if (!active) return;
+        if (res.ok) {
+          const fresh: User = await res.json();
+          if (!active) return;
+          try { localStorage.setItem("user", JSON.stringify(fresh)); } catch { /* storage unavailable */ }
+          setUser(fresh);
+          return;
+        }
+
+        if (res.status === 401) {
+          logout();
+          return;
+        }
+
+        restoreLocalUser();
+        console.warn("Auth bootstrap: backend temporarily unavailable, keeping local session:", res.status);
+      })
+      .catch((err: unknown) => {
+        if (!active) return;
+        window.clearTimeout(timer);
+        restoreLocalUser();
+        if (err instanceof DOMException && err.name === "AbortError") {
+          console.warn("Auth bootstrap timed out (5s), keeping local session");
+        } else {
+          console.warn("Auth bootstrap request failed, keeping local session:", err);
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [logout, token]);
+
   const login = useCallback((tokenStr: string, userData: User) => {
-    localStorage.setItem("token", tokenStr);
-    localStorage.setItem("user", JSON.stringify(userData));
+    try {
+      localStorage.setItem("token", tokenStr);
+      localStorage.setItem("user", JSON.stringify(userData));
+    } catch {
+      // In-memory authentication still works when storage is unavailable.
+    }
     setToken(tokenStr);
     setUser(userData);
   }, []);
 
-  const logout = useCallback(() => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    setToken(null);
-    setUser(null);
-  }, []);
-
   const updateUser = useCallback((userData: User) => {
-    localStorage.setItem("user", JSON.stringify(userData));
+    try { localStorage.setItem("user", JSON.stringify(userData)); } catch { /* storage unavailable */ }
     setUser(userData);
   }, []);
 

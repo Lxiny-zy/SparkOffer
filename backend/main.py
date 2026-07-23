@@ -19,33 +19,19 @@ logger = logging.getLogger("uvicorn")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
+    security_issues = settings.validate_security_settings()
+    for issue in security_issues:
+        logger.warning("Insecure development setting: %s", issue)
+
     from backend.llm_provider import get_embedding
     from backend.indexer import _init_llama_settings
     from backend.storage.database import init_all_tables
     from backend.ai_config import init_config, get_effective
     from backend.storage.live_sessions import cleanup_expired_sessions
     from backend.auth import ensure_default_user
-    from backend.config import settings
 
     init_config()
     init_all_tables()
-
-    # Security check: warn if JWT secret is the default value
-    if settings.jwt_secret == "change-me-in-production":
-        logger.warning(
-            "⚠️  JWT_SECRET is using the default value! "
-            "Set JWT_SECRET in .env for production deployments. "
-            "Anyone can forge authentication tokens with the default secret."
-        )
-
-    # Security check: warn if the default account password is unchanged
-    if settings.default_password == "legend":
-        logger.warning(
-            "⚠️  DEFAULT_PASSWORD is using the default value 'legend'! "
-            "The default account (%s) is loginable — set DEFAULT_PASSWORD in .env "
-            "for any non-local deployment.",
-            settings.default_email,
-        )
 
     emb_backend = get_effective("embedding", "backend") or settings.embedding_backend_mode()
     emb_model = get_effective("embedding", "api_model") or settings.active_embedding_target()
@@ -61,7 +47,7 @@ async def lifespan(app: FastAPI):
     cache = init_cache(settings.redis_url)
     logger.info("Cache backend: %s", cache.health()["backend"])
 
-    from backend.channel_manager import has_channels, get_all_channels
+    from backend.channel_manager import get_all_channels
     for sec in ("llm", "embedding"):
         chs = get_all_channels(sec)
         if chs:
@@ -87,8 +73,15 @@ async def lifespan(app: FastAPI):
 
     # Graceful shutdown: cancel warmup if still running, then stop the task queue
     warmup_task = getattr(app.state, "warmup_task", None)
-    if warmup_task is not None and not warmup_task.done():
-        warmup_task.cancel()
+    if warmup_task is not None:
+        if not warmup_task.done():
+            warmup_task.cancel()
+        try:
+            await warmup_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("Knowledge-index warmup ended with an error: %s", exc)
 
     from backend.embedding_tasks import get_task_queue as _get_tq
     await _get_tq().stop()
@@ -96,7 +89,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SparkOffer", version="0.3.0", lifespan=lifespan)
 
-_cors_origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()] or ["*"]
+_cors_origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,

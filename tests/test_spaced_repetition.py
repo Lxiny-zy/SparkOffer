@@ -11,8 +11,9 @@ see the inline comments for the arithmetic.
 """
 from datetime import date, timedelta
 
-import pytest
 
+from backend import memory
+from backend.routers import interview
 from backend.spaced_repetition import (
     sm2_update,
     update_weak_point_sr,
@@ -133,15 +134,108 @@ def test_topic_filter_skips_other_topics(monkeypatch):
     assert saved == []  # nothing matched → no write
 
 
-# ── update_weak_point_sr: graduation (reps ≥ 3 AND score ≥ 7) ─────────────────
+# ── update_weak_point_sr: graduation after 3 consecutive high scores ─────────
+
+def test_operation_id_prevents_reapplying_sr_update(monkeypatch):
+    prof = _profile_with([{"point": "gil", "topic": "python"}])
+    _patch_profile(monkeypatch, prof)
+
+    first = update_weak_point_sr(
+        "python", "gil", 8.0, "u", difficulty=3,
+        operation_id="session-sync:s1:sr:0:1",
+    )
+    second = update_weak_point_sr(
+        "python", "gil", 8.0, "u", difficulty=3,
+        operation_id="session-sync:s1:sr:0:1",
+    )
+
+    assert first is True
+    assert second is False
+    assert prof["weak_points"][0]["attempts"] == 1
+    assert prof["weak_points"][0]["sr"]["repetitions"] == 1
+    assert list(prof["_applied_operations"]) == ["session-sync:s1:sr:0:1"]
+
+
+def test_reordered_scores_with_numeric_string_ids_do_not_reapply_sr(monkeypatch):
+    prof = _profile_with([
+        {"point": "alpha", "topic": "python"},
+        {"point": "beta", "topic": "python"},
+    ])
+    _patch_profile(monkeypatch, prof)
+    questions = [
+        {"id": 1, "question": "first"},
+        {"id": 2, "question": "second"},
+    ]
+    first_scores = [
+        {"question_id": 1, "weak_point": "alpha", "score": 8.0},
+        {"question_id": 2, "weak_point": "beta", "score": 8.0},
+    ]
+    retry_scores = [
+        {"question_id": "2", "weak_point": "beta", "score": 8.0},
+        {"question_id": "1", "weak_point": "alpha", "score": 8.0},
+    ]
+    operation_ids = []
+
+    for score_rows in (first_scores, retry_scores):
+        pass_ids = []
+        for index, row in enumerate(score_rows):
+            operation_id = interview._sr_operation_id(
+                "reordered", row, questions, index,
+            )
+            pass_ids.append(operation_id)
+            update_weak_point_sr(
+                "python",
+                row["weak_point"],
+                row["score"],
+                "u",
+                operation_id=operation_id,
+            )
+        operation_ids.append(set(pass_ids))
+
+    assert operation_ids[0] == operation_ids[1]
+    assert [wp["attempts"] for wp in prof["weak_points"]] == [1, 1]
+    assert [wp["sr"]["repetitions"] for wp in prof["weak_points"]] == [1, 1]
+    assert set(prof["_applied_operations"]) == operation_ids[0]
+
+
+def test_unconfirmed_sr_operations_survive_journal_soft_limit(monkeypatch):
+    prof = _profile_with([])
+    prof["_applied_operations"] = {
+        "old-confirmed": {
+            "applied_at": "2000-01-01T00:00:00",
+            "confirmed_at": "2000-01-01T00:00:00",
+        },
+    }
+    _patch_profile(monkeypatch, prof)
+    pending_ids = {
+        f"session-sync:pending-{index}:sr"
+        for index in range(memory._PROFILE_OPERATIONS_LIMIT + 1)
+    }
+
+    for operation_id in pending_ids:
+        update_weak_point_sr(
+            "python", "missing", 8.0, "u", operation_id=operation_id,
+        )
+
+    operations = prof["_applied_operations"]
+    assert "old-confirmed" not in operations
+    assert set(operations) == pending_ids
+    assert len(operations) > memory._PROFILE_OPERATIONS_LIMIT
+
 
 def test_graduation_after_third_pass_with_high_score(monkeypatch):
     prof = _profile_with([{
         "point": "gil", "topic": "python",
-        "sr": {"repetitions": 2, "interval_days": 3, "ease_factor": 2.5},
+        "sr": {
+            "repetitions": 2,
+            "interval_days": 3,
+            "ease_factor": 2.5,
+            "consecutive_high": 2,
+            "last_score": 8.0,
+        },
     }])
     _patch_profile(monkeypatch, prof)
-    update_weak_point_sr("python", "gil", 8.0, "u", difficulty=3)  # reps 2→3, score 8≥7
+    update_weak_point_sr("python", "gil", 8.0, "u", difficulty=3)
     wp = prof["weak_points"][0]
     assert wp.get("improved") is True
     assert any("已掌握" in sp["point"] for sp in prof["strong_points"])

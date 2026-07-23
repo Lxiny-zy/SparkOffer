@@ -59,8 +59,8 @@ def _build_review_messages(
             eval_lines.append(f"- [{phase}] {score}/10 — {brief}")
         scored = [e["score"] for e in eval_history if isinstance(e.get("score"), (int, float))]
         avg = round(sum(scored) / len(scored), 1) if scored else None
-        extra += f"\n## 面试过程评分记录\n" + "\n".join(eval_lines) + "\n"
-        if avg:
+        extra += "\n## 面试过程评分记录\n" + "\n".join(eval_lines) + "\n"
+        if avg is not None:
             extra += f"\n平均分: {avg}/10\n"
 
     prompt = REVIEW_SYSTEM.format(

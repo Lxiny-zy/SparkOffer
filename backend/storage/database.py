@@ -248,6 +248,36 @@ def init_all_tables():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_qa_sessions_user ON qa_sessions(user_id, updated_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_qa_messages_session ON qa_messages(session_id, id ASC)")
 
+    # Durable idempotency records for user-confirmed QA knowledge ingestion.
+    # A browser may abandon the HTTP request while the LLM/writeback continues;
+    # keeping the completed response here prevents a later retry from applying
+    # the same card a second time, including across worker or process restarts.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS qa_ingest_requests (
+            user_id         TEXT NOT NULL,
+            session_id      TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            content_hash    TEXT NOT NULL,
+            idempotency_marker TEXT NOT NULL,
+            claim_token     TEXT NOT NULL,
+            status          TEXT NOT NULL CHECK (status IN ('pending', 'complete')),
+            topic_key       TEXT,
+            normalized_content TEXT,
+            response_json   TEXT,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            PRIMARY KEY (user_id, session_id, idempotency_key)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_qa_ingest_updated "
+        "ON qa_ingest_requests(updated_at)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_ingest_marker "
+        "ON qa_ingest_requests(user_id, idempotency_marker)"
+    )
+
     # ── rag_metrics ──
     conn.execute("""
         CREATE TABLE IF NOT EXISTS rag_metrics (
@@ -281,6 +311,39 @@ def init_all_tables():
         except sqlite3.OperationalError:
             conn.execute(f"ALTER TABLE rag_metrics ADD COLUMN {col} REAL")
 
+    # The logical key is (user, session, stage), but older schemas allowed
+    # duplicate rows. Keep the newest observation before adding the unique
+    # index so startup migration is safe on existing databases. ``created_at``
+    # is the primary recency signal; id breaks ties deterministically.
+    dedupe_cursor = conn.execute(
+        """
+        DELETE FROM rag_metrics
+        WHERE EXISTS (
+            SELECT 1
+            FROM rag_metrics AS newer
+            WHERE newer.user_id = rag_metrics.user_id
+              AND newer.session_id = rag_metrics.session_id
+              AND newer.stage = rag_metrics.stage
+              AND (
+                  COALESCE(newer.created_at, '') > COALESCE(rag_metrics.created_at, '')
+                  OR (
+                      COALESCE(newer.created_at, '') = COALESCE(rag_metrics.created_at, '')
+                      AND newer.id > rag_metrics.id
+                  )
+              )
+        )
+        """
+    )
+    if dedupe_cursor.rowcount:
+        logger.warning(
+            "Removed %d duplicate RAG metrics row(s) before adding uniqueness",
+            dedupe_cursor.rowcount,
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_metrics_user_session_stage "
+        "ON rag_metrics(user_id, session_id, stage)"
+    )
+
     # ── rag_eval_runs ──
     # 离线 RAGAS 基准评测结果（每次评测一行）。与 rag_metrics（线上免费健康度仪表，
     # 按 session/stage 记录）刻意分表：本表是 run 级、带 gold 标注的基准指标
@@ -303,6 +366,7 @@ def init_all_tables():
             dataset_hash        TEXT DEFAULT '',
             corpus_hash         TEXT DEFAULT '',
             seed                INTEGER,
+            claim_token         TEXT,
             hit_at_k            REAL,
             hit_at_k_strict     REAL,
             mrr                 REAL,
@@ -337,6 +401,7 @@ def init_all_tables():
         "dataset_hash": "TEXT DEFAULT ''",
         "corpus_hash": "TEXT DEFAULT ''",
         "seed": "INTEGER",
+        "claim_token": "TEXT",
         "ndcg_at_k": "REAL",
         "success_rate": "REAL",
         "latency_p50_ms": "REAL",
@@ -351,6 +416,69 @@ def init_all_tables():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_rag_eval_comparable "
         "ON rag_eval_runs(user_id, topic, eval_kind, retrieval_mode, created_at DESC)"
+    )
+    # One durable job has exactly one terminal run. Older versions had no
+    # uniqueness guard, so preserve any duplicate history under an explicitly
+    # legacy job id while keeping the newest row addressable by the original id.
+    duplicate_runs = conn.execute(
+        "SELECT id, user_id, job_id FROM rag_eval_runs AS candidate "
+        "WHERE EXISTS (SELECT 1 FROM rag_eval_runs AS newer "
+        "WHERE newer.user_id = candidate.user_id "
+        "AND newer.job_id = candidate.job_id AND newer.id > candidate.id) "
+        "ORDER BY id"
+    ).fetchall()
+    if duplicate_runs:
+        occupied_run_ids = {
+            (str(row["user_id"]), str(row["job_id"]))
+            for row in conn.execute("SELECT user_id, job_id FROM rag_eval_runs")
+        }
+        for row in duplicate_runs:
+            user_id = str(row["user_id"])
+            original_job_id = str(row["job_id"])
+            migrated_job_id = f"{original_job_id}:legacy-duplicate:{row['id']}"
+            while (user_id, migrated_job_id) in occupied_run_ids:
+                migrated_job_id += ":migrated"
+            conn.execute(
+                "UPDATE rag_eval_runs SET job_id = ? WHERE id = ?",
+                (migrated_job_id, row["id"]),
+            )
+            occupied_run_ids.add((user_id, migrated_job_id))
+        logger.warning(
+            "Migrated %d duplicate RAG eval job ids before adding uniqueness",
+            len(duplicate_runs),
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_eval_runs_user_job "
+        "ON rag_eval_runs(user_id, job_id)"
+    )
+
+    # Durable start-request identity for RAG evaluations. The benchmark task is
+    # still process-local, but this mapping lets an HTTP retry recover the same
+    # job id after the original response is lost or the process restarts.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rag_eval_start_requests (
+            user_id          TEXT NOT NULL,
+            idempotency_key  TEXT NOT NULL,
+            request_hash     TEXT NOT NULL,
+            job_id           TEXT NOT NULL,
+            response_json    TEXT NOT NULL DEFAULT '{}',
+            claim_token      TEXT NOT NULL,
+            lease_expires_at TEXT NOT NULL,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            PRIMARY KEY (user_id, idempotency_key)
+        )
+    """)
+    try:
+        conn.execute("SELECT response_json FROM rag_eval_start_requests LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute(
+            "ALTER TABLE rag_eval_start_requests "
+            "ADD COLUMN response_json TEXT NOT NULL DEFAULT '{}'"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rag_eval_start_job "
+        "ON rag_eval_start_requests(user_id, job_id)"
     )
 
     # ── knowledge_cards ──

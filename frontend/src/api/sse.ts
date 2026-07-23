@@ -32,10 +32,20 @@ export async function withSSETimeout<T>(
   externalSignal?: AbortSignal,
 ): Promise<T> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  const onExternalAbort = () => controller.abort();
+  let abortReason: "timeout" | "external" | null = null;
+  const timeoutId = setTimeout(() => {
+    // The first abort source owns the error classification. An external
+    // cancellation that arrives after the hard timeout must not turn a real
+    // timeout into an AbortError (or vice versa).
+    if (abortReason === null) abortReason = "timeout";
+    controller.abort();
+  }, timeoutMs);
+  const onExternalAbort = () => {
+    if (abortReason === null) abortReason = "external";
+    controller.abort();
+  };
   if (externalSignal) {
-    if (externalSignal.aborted) controller.abort();
+    if (externalSignal.aborted) onExternalAbort();
     else externalSignal.addEventListener("abort", onExternalAbort);
   }
   try {
@@ -43,7 +53,7 @@ export async function withSSETimeout<T>(
   } catch (error: any) {
     // A caller-initiated abort isn't a timeout — re-throw as-is so callers
     // can recognize it by `name === "AbortError"`.
-    if (externalSignal?.aborted) throw error;
+    if (abortReason === "external") throw error;
     throw _timeoutError(error, timeoutMs);
   } finally {
     clearTimeout(timeoutId);
@@ -62,17 +72,27 @@ export async function* withSSETimeoutGen<T>(
   externalSignal?: AbortSignal,
 ): AsyncGenerator<T> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let abortReason: "timeout" | "external" | null = null;
+  const timeoutId = setTimeout(() => {
+    if (abortReason === null) abortReason = "timeout";
+    controller.abort();
+  }, timeoutMs);
   // Let a caller-supplied signal (e.g. component unmount) also abort the fetch
   // so the stream/connection is released immediately rather than on next chunk.
-  const onExternalAbort = () => controller.abort();
+  const onExternalAbort = () => {
+    if (abortReason === null) abortReason = "external";
+    controller.abort();
+  };
   if (externalSignal) {
-    if (externalSignal.aborted) controller.abort();
+    if (externalSignal.aborted) onExternalAbort();
     else externalSignal.addEventListener("abort", onExternalAbort);
   }
   try {
     yield* fn(controller.signal);
   } catch (error: any) {
+    // Preserve caller cancellation so consumers can distinguish it from the
+    // hard request timeout. The first abort source wins if both race.
+    if (abortReason === "external") throw error;
     throw _timeoutError(error, timeoutMs);
   } finally {
     clearTimeout(timeoutId);

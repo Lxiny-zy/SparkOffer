@@ -5,27 +5,42 @@
 - 两阶段提取（Mem0）：Extract → Update，不无脑追加
 - 向量召回（embedding）：语义搜索历史洞察
 """
+import asyncio
 import copy
+import hashlib
 import json
 import logging
+import math
 import os
 import re
 import tempfile
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 
 from backend.config import settings
 from backend.llm_provider import get_langchain_llm
+from backend.utils.files import (
+    atomic_write_text,
+    exclusive_file_lock,
+    file_mutation_lock_path,
+)
 
 logger = logging.getLogger("uvicorn")
 
 # Per-user file locks to prevent concurrent read-modify-write races on profile.json
 _profile_locks: dict[str, threading.Lock] = {}
 _profile_locks_lock = threading.Lock()
+
+# Operation records live in the profile so a session retry can fence a
+# side-effect even after the session-level marker write was interrupted.
+# Keep the map bounded: it is a recovery journal, not an unbounded audit log.
+_PROFILE_OPERATIONS_KEY = "_applied_operations"
+_PROFILE_OPERATIONS_LIMIT = 512
+_PROFILE_OPERATION_PRUNE_GRACE = timedelta(days=1)
 
 
 def _get_profile_lock(user_id: str) -> threading.Lock:
@@ -213,7 +228,8 @@ def _save_profile(profile: dict, user_id: str):
     """
     lock = _get_profile_lock(user_id)
     with lock:
-        _save_profile_unlocked(profile, user_id)
+        with exclusive_file_lock(file_mutation_lock_path(_profile_path(user_id))):
+            _save_profile_unlocked(profile, user_id)
 
 
 class ProfileTransactionAbort(Exception):
@@ -232,42 +248,463 @@ def profile_transaction(user_id: str):
     """
     lock = _get_profile_lock(user_id)
     with lock:
-        profile = _load_profile_unlocked(user_id)
+        with exclusive_file_lock(file_mutation_lock_path(_profile_path(user_id))):
+            profile = _load_profile_unlocked(user_id)
+            try:
+                yield profile
+            except ProfileTransactionAbort:
+                return
+            _save_profile_unlocked(profile, user_id)
+
+
+def _get_applied_operation(profile: dict, operation_id: str | None) -> dict | None:
+    """Return one durable operation record, if it has already been applied."""
+    if not operation_id:
+        return None
+    operations = profile.get(_PROFILE_OPERATIONS_KEY)
+    if not isinstance(operations, dict):
+        return None
+    record = operations.get(operation_id)
+    return record if isinstance(record, dict) else None
+
+
+def _record_applied_operation(
+    profile: dict,
+    operation_id: str | None,
+    *,
+    result: dict | None = None,
+) -> None:
+    """Record a completed operation while the profile transaction is locked."""
+    if not operation_id:
+        return
+    operations = profile.setdefault(_PROFILE_OPERATIONS_KEY, {})
+    if not isinstance(operations, dict):
+        operations = {}
+        profile[_PROFILE_OPERATIONS_KEY] = operations
+    # Re-inserting moves a retried record to the newest end of the bounded map.
+    operations.pop(operation_id, None)
+    record = {"applied_at": datetime.now().isoformat()}
+    if result is not None:
+        record["result"] = copy.deepcopy(result)
+    operations[operation_id] = record
+    _prune_confirmed_operations(operations)
+
+
+def _prune_confirmed_operations(operations: dict) -> None:
+    """Bound old confirmed records without ever evicting recovery markers."""
+    if len(operations) <= _PROFILE_OPERATIONS_LIMIT:
+        return
+    cutoff = datetime.now() - _PROFILE_OPERATION_PRUNE_GRACE
+    for operation_id, record in list(operations.items()):
+        if len(operations) <= _PROFILE_OPERATIONS_LIMIT:
+            break
+        if not isinstance(record, dict):
+            continue
+        confirmed_at = record.get("confirmed_at")
+        if not isinstance(confirmed_at, str):
+            continue
         try:
-            yield profile
-        except ProfileTransactionAbort:
-            return
-        _save_profile_unlocked(profile, user_id)
+            confirmed_time = datetime.fromisoformat(confirmed_at)
+        except ValueError:
+            continue
+        if confirmed_time <= cutoff:
+            operations.pop(operation_id, None)
 
 
-def _save_insight(mode: str, topic: str, summary: str, raw_extraction: dict, user_id: str):
-    """Append daily insight file (OpenClaw-style daily log)."""
+def confirm_profile_session_operations(user_id: str, session_id: str) -> int:
+    """Mark target records GC-eligible only after the session is fully synced."""
+    prefix = f"session-sync:{session_id}:"
+    confirmed = 0
+    now = datetime.now().isoformat()
+    with profile_transaction(user_id) as profile:
+        operations = profile.get(_PROFILE_OPERATIONS_KEY)
+        if not isinstance(operations, dict):
+            raise ProfileTransactionAbort
+        for operation_id, record in operations.items():
+            if operation_id.startswith(prefix) and isinstance(record, dict):
+                if "confirmed_at" not in record:
+                    record["confirmed_at"] = now
+                    confirmed += 1
+        before_prune = len(operations)
+        _prune_confirmed_operations(operations)
+        if not confirmed and len(operations) == before_prune:
+            raise ProfileTransactionAbort
+    return confirmed
+
+
+def _profile_operation_result(user_id: str, operation_id: str | None) -> dict | None:
+    """Read a stored operation result without exposing the journal publicly."""
+    if not operation_id:
+        return None
+    record = _get_applied_operation(_load_profile(user_id), operation_id)
+    if not record or "result" not in record:
+        return None
+    result = record.get("result")
+    # A legacy malformed result still belongs to the journal winner. Treat it
+    # as an empty extraction instead of falling back to a race loser's payload.
+    return copy.deepcopy(result) if isinstance(result, dict) else {}
+
+
+def _finite_number(value):
+    """Return a JSON-safe finite number, or ``None`` for malformed input."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return value if math.isfinite(value) else None
+        except OverflowError:
+            return None
+    if isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+    return None
+
+
+def _clean_text(value) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _clean_string_list(value) -> list[str]:
+    """Normalize a string list while retaining useful scalar LLM output."""
+    values = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    return [item.strip() for item in values if isinstance(item, str) and item.strip()]
+
+
+def _normalize_points(value, topic: str | None = None) -> list:
+    """Keep valid point fields and discard malformed JSON elements."""
+    if isinstance(value, (str, dict)):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        return []
+
+    normalized = []
+    for item in values:
+        if isinstance(item, str):
+            point = _clean_text(item)
+            if point:
+                normalized.append(point)
+            continue
+        if not isinstance(item, dict):
+            continue
+        point = _clean_text(item.get("point"))
+        if not point:
+            continue
+        clean = copy.deepcopy(item)
+        clean["point"] = point
+        if "topic" in clean:
+            clean_topic = _clean_text(clean.get("topic"))
+            if clean_topic:
+                clean["topic"] = clean_topic
+            elif topic:
+                clean["topic"] = topic
+            else:
+                clean.pop("topic", None)
+        normalized.append(clean)
+    return normalized
+
+
+def _normalize_mastery(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+
+    def clean_entry(entry):
+        if not isinstance(entry, dict):
+            return None
+        clean = copy.deepcopy(entry)
+        for key in ("score", "level"):
+            if key in clean:
+                number = _finite_number(clean[key])
+                if number is None:
+                    clean.pop(key, None)
+                else:
+                    clean[key] = number
+        if "notes" in clean:
+            notes = _clean_text(clean["notes"])
+            if notes:
+                clean["notes"] = notes
+            else:
+                clean.pop("notes", None)
+        return clean
+
+    # Backward-compatible single-topic shape: {score, notes}.
+    if any(key in value for key in ("score", "level", "notes")):
+        entry = clean_entry(value)
+        return entry or {}
+
+    result = {}
+    for key, entry in value.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        clean = clean_entry(entry)
+        if clean is not None:
+            result[key] = clean
+    return result
+
+
+def _normalize_observations(value, *, fields: tuple[str, ...]) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    result = copy.deepcopy(value)
+    for field in fields:
+        if field not in result:
+            continue
+        if field.endswith("_update") or field == "style_update":
+            text = _clean_text(result[field])
+            if text:
+                result[field] = text
+            else:
+                result.pop(field, None)
+        else:
+            result[field] = _clean_string_list(result[field])
+    return result
+
+
+def _normalize_dimension_scores(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key, score in value.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        number = _finite_number(score)
+        if number is not None:
+            result[key] = number
+    return result
+
+
+def _normalize_extraction(value, topic: str | None = None) -> dict:
+    """Sanitize extraction fields before profile markers or artifact writes."""
+    source = value if isinstance(value, dict) else {}
+    result = copy.deepcopy(source)
+    if "session_summary" in source:
+        result["session_summary"] = _clean_text(source.get("session_summary"))
+    if "weak_points" in source:
+        result["weak_points"] = _normalize_points(source.get("weak_points"), topic)
+    if "strong_points" in source:
+        result["strong_points"] = _normalize_points(source.get("strong_points"), topic)
+    if "topic_mastery" in source:
+        result["topic_mastery"] = _normalize_mastery(source.get("topic_mastery"))
+    if "communication_observations" in source:
+        result["communication_observations"] = _normalize_observations(
+            source.get("communication_observations"),
+            fields=("style_update", "new_habits", "new_suggestions"),
+        )
+    if "communication" in source:
+        result["communication"] = _normalize_observations(
+            source.get("communication"),
+            fields=("style_update", "new_habits", "new_suggestions"),
+        )
+    if "thinking_patterns" in source:
+        result["thinking_patterns"] = _normalize_observations(
+            source.get("thinking_patterns"),
+            fields=("new_strengths", "new_gaps"),
+        )
+    if "dimension_scores" in source:
+        result["dimension_scores"] = _normalize_dimension_scores(source.get("dimension_scores"))
+    if "avg_score" in source:
+        result["avg_score"] = _finite_number(source.get("avg_score"))
+    return result
+
+
+def _normalized_operation_result(
+    value,
+    *,
+    topic: str | None,
+    session_summary: str,
+    weak_points: list,
+    strong_points: list,
+    topic_mastery: dict,
+    communication: dict,
+    thinking_patterns: dict | None,
+    avg_score,
+    dimension_scores: dict | None,
+):
+    """Normalize a cached extraction while preserving absent optional fields."""
+    if value is None and not any((session_summary, weak_points, strong_points,
+                                 topic_mastery, communication, thinking_patterns,
+                                 avg_score is not None, dimension_scores)):
+        return None
+    source = value if isinstance(value, dict) else {}
+    result = _normalize_extraction(source, topic)
+    candidates = {
+        "session_summary": session_summary,
+        "weak_points": weak_points,
+        "strong_points": strong_points,
+        "topic_mastery": topic_mastery,
+        "communication_observations": communication,
+        "thinking_patterns": thinking_patterns or {},
+        "avg_score": avg_score,
+        "dimension_scores": dimension_scores or {},
+    }
+    for key, candidate in candidates.items():
+        if key in source or candidate not in ("", [], {}, None):
+            result[key] = copy.deepcopy(candidate)
+    return result
+
+
+def _point_text(point) -> str:
+    if isinstance(point, str):
+        return _clean_text(point)
+    if isinstance(point, dict):
+        return _clean_text(point.get("point"))
+    return ""
+
+
+def _point_topic(point, fallback: str | None = None) -> str:
+    if isinstance(point, dict):
+        topic = _clean_text(point.get("topic"))
+        if topic:
+            return topic
+    return fallback or ""
+
+
+def _operation_artifact_payload(
+    user_id: str,
+    operation_id: str | None,
+    topic: str | None,
+    *,
+    fallback_summary: str,
+    fallback_weak_points: list,
+    fallback_strong_points: list,
+) -> tuple[str, list, list]:
+    """Prefer the journal winner's extraction over a concurrent caller's data."""
+    winner = _profile_operation_result(user_id, operation_id)
+    if winner is None:
+        return fallback_summary, fallback_weak_points, fallback_strong_points
+    extraction = _normalize_extraction(winner, topic)
+    return (
+        extraction.get("session_summary", ""),
+        extraction.get("weak_points", []),
+        extraction.get("strong_points", []),
+    )
+
+
+def _save_insight(mode: str, topic: str | None, summary: str, raw_extraction: dict,
+                  user_id: str, operation_id: str | None = None) -> bool:
+    """Append one crash-atomic, operation-idempotent daily insight."""
     ins_dir = _insights_dir(user_id)
     ins_dir.mkdir(parents=True, exist_ok=True)
-    today = datetime.now().strftime("%Y-%m-%d")
-    path = ins_dir / f"{today}.md"
+    topic = _clean_text(topic) or None
+    summary = _clean_text(summary)
+    extraction = _normalize_extraction(raw_extraction, topic)
+    weak_points = extraction.get("weak_points", [])
+    strong_points = extraction.get("strong_points", [])
+    marker = ""
+    if operation_id:
+        digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+        marker = f"<!-- profile-operation:{digest} -->\n"
 
-    time_str = datetime.now().strftime("%H:%M")
-    entry = f"\n## {time_str} | {mode} | {topic or '综合'}\n\n{summary}\n"
+    # Every daily file participates in one operation journal. A retry can run
+    # after midnight, so both marker lookup and append must share a directory
+    # lock rather than independent per-day locks.
+    with exclusive_file_lock(file_mutation_lock_path(ins_dir)):
+        if marker:
+            for insight_path in ins_dir.glob("*.md"):
+                if not insight_path.is_file():
+                    continue
+                existing = insight_path.read_text(encoding="utf-8", errors="replace")
+                if marker in existing:
+                    return False
 
-    if raw_extraction.get("weak_points"):
-        entry += "\n**薄弱点:**\n"
-        for wp in raw_extraction["weak_points"]:
-            entry += f"- {wp['point']} ({wp.get('topic', '')})\n"
+        now = datetime.now()
+        path = ins_dir / f"{now:%Y-%m-%d}.md"
+        existing = (
+            path.read_text(encoding="utf-8", errors="replace")
+            if path.exists()
+            else ""
+        )
+        entry = f"\n{marker}## {now:%H:%M} | {mode} | {topic or '综合'}\n\n{summary}\n"
 
-    if raw_extraction.get("strong_points"):
-        entry += "\n**亮点:**\n"
-        for sp in raw_extraction["strong_points"]:
-            entry += f"- {sp['point']} ({sp.get('topic', '')})\n"
+        rendered_weak = [
+            (_point_text(point), _point_topic(point, topic))
+            for point in weak_points
+            if _point_text(point)
+        ]
+        if rendered_weak:
+            entry += "\n**薄弱点:**\n"
+            for point, point_topic in rendered_weak:
+                entry += f"- {point} ({point_topic})\n"
 
-    entry += "\n---\n"
+        rendered_strong = [
+            (_point_text(point), _point_topic(point, topic))
+            for point in strong_points
+            if _point_text(point)
+        ]
+        if rendered_strong:
+            entry += "\n**亮点:**\n"
+            for point, point_topic in rendered_strong:
+                entry += f"- {point} ({point_topic})\n"
 
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(entry)
+        entry += "\n---\n"
+        atomic_write_text(path, existing + entry)
+    return True
+
+
+async def _ensure_profile_artifacts(
+    *,
+    mode: str,
+    topic: str | None,
+    session_summary: str,
+    weak_points: list[dict],
+    strong_points: list[dict],
+    user_id: str,
+    operation_id: str | None,
+) -> None:
+    """Finish derived profile artifacts before the session step is committed."""
+    topic = _clean_text(topic) or None
+    session_summary = _clean_text(session_summary)
+    weak_points = _normalize_points(weak_points, topic)
+    strong_points = _normalize_points(strong_points, topic)
+    await asyncio.to_thread(
+        _save_insight,
+        mode,
+        topic,
+        session_summary,
+        {"weak_points": weak_points, "strong_points": strong_points},
+        user_id,
+        operation_id,
+    )
+
+    if operation_id:
+        # A stable session id makes retries upserts in both vector backends.
+        # Await completion so a process exit cannot strand a queued-only write
+        # after the session has already been marked synchronized.
+        from backend.vector_memory import index_session_memory
+        await index_session_memory(
+            session_id=operation_id,
+            topic=topic,
+            summary=session_summary,
+            weak_points=weak_points,
+            strong_points=strong_points,
+            insight_text=session_summary,
+            user_id=user_id,
+            require_complete=True,
+        )
+        return
+
+    from backend.embedding_tasks import schedule_session_memory_index
+    schedule_session_memory_index(
+        session_id=None,
+        topic=topic,
+        summary=session_summary,
+        weak_points=weak_points,
+        strong_points=strong_points,
+        insight_text=session_summary,
+        user_id=user_id,
+    )
 
 
 def get_profile(user_id: str) -> dict:
-    return _load_profile(user_id)
+    profile = _load_profile(user_id)
+    # The operation journal is an internal recovery detail and should not be
+    # rendered by profile APIs or included in assistant context.
+    profile.pop(_PROFILE_OPERATIONS_KEY, None)
+    return profile
 
 
 def get_topic_context_for_drill(topic: str, user_id: str) -> dict:
@@ -743,14 +1180,68 @@ async def llm_update_profile(
     answer_count: int = 0,
     session_weight: float = 0.7,
     dimension_scores: dict | None = None,
-):
+    operation_id: str | None = None,
+    operation_result: dict | None = None,
+) -> bool:
     """Mem0-style profile update: LLM decides ADD/UPDATE/NOOP for each fact."""
     from backend.prompts.interviewer import PROFILE_UPDATE_PROMPT
+
+    topic = _clean_text(topic) or None
+    session_summary = _clean_text(session_summary)
+    new_weak_points = _normalize_points(new_weak_points, topic)
+    new_strong_points = _normalize_points(new_strong_points, topic)
+    topic_mastery = _normalize_mastery(topic_mastery)
+    communication = _normalize_observations(
+        communication,
+        fields=("style_update", "new_habits", "new_suggestions"),
+    )
+    thinking_patterns = _normalize_observations(
+        thinking_patterns,
+        fields=("new_strengths", "new_gaps"),
+    )
+    avg_score = _finite_number(avg_score)
+    dimension_scores = _normalize_dimension_scores(dimension_scores)
+    session_weight = _finite_number(session_weight)
+    if session_weight is None:
+        session_weight = 0.7
+    else:
+        session_weight = min(1.0, max(0.0, session_weight))
+    operation_result = _normalized_operation_result(
+        operation_result,
+        topic=topic,
+        session_summary=session_summary,
+        weak_points=new_weak_points,
+        strong_points=new_strong_points,
+        topic_mastery=topic_mastery,
+        communication=communication,
+        thinking_patterns=thinking_patterns,
+        avg_score=avg_score,
+        dimension_scores=dimension_scores,
+    )
 
     # Snapshot for prompt formatting + index remapping. The LLM call below can
     # take tens of seconds; the profile is re-read fresh inside the transaction
     # so concurrent realtime updates landing meanwhile aren't overwritten.
     snapshot = _load_profile(user_id)
+    if _get_applied_operation(snapshot, operation_id) is not None:
+        artifact_summary, artifact_weak, artifact_strong = _operation_artifact_payload(
+            user_id,
+            operation_id,
+            topic,
+            fallback_summary=session_summary,
+            fallback_weak_points=new_weak_points,
+            fallback_strong_points=new_strong_points,
+        )
+        await _ensure_profile_artifacts(
+            mode=mode,
+            topic=topic,
+            session_summary=artifact_summary,
+            weak_points=artifact_weak,
+            strong_points=artifact_strong,
+            user_id=user_id,
+            operation_id=operation_id,
+        )
+        return False
     now = datetime.now().isoformat()
 
     # ── LLM-based update for weak/strong points (slow part — OUTSIDE the lock) ──
@@ -808,7 +1299,12 @@ async def llm_update_profile(
             )
 
     # ── Apply everything to a FRESH profile under the lock (fast, no awaits) ──
+    applied = False
     with profile_transaction(user_id) as profile:
+        # Another worker may finish while this one waits on the LLM. This check
+        # and the marker write are protected by the same profile transaction.
+        if _get_applied_operation(profile, operation_id) is not None:
+            raise ProfileTransactionAbort
         if ops is not None:
             _apply_memory_ops(profile, ops, topic, now, index_points=snapshot_points)
         elif resolved_fallback is not None:
@@ -824,22 +1320,41 @@ async def llm_update_profile(
         _update_communication(profile, communication)
         _update_thinking_patterns(profile, thinking_patterns)
         _update_stats(profile, mode, topic, avg_score, now, answer_count, dimension_scores)
+        _record_applied_operation(
+            profile, operation_id, result=operation_result,
+        )
+        applied = True
 
-    _save_insight(mode=mode, topic=topic, summary=session_summary, raw_extraction={
-        "weak_points": new_weak_points,
-        "strong_points": new_strong_points,
-    }, user_id=user_id)
+    if not applied:
+        artifact_summary, artifact_weak, artifact_strong = _operation_artifact_payload(
+            user_id,
+            operation_id,
+            topic,
+            fallback_summary=session_summary,
+            fallback_weak_points=new_weak_points,
+            fallback_strong_points=new_strong_points,
+        )
+        await _ensure_profile_artifacts(
+            mode=mode,
+            topic=topic,
+            session_summary=artifact_summary,
+            weak_points=artifact_weak,
+            strong_points=artifact_strong,
+            user_id=user_id,
+            operation_id=operation_id,
+        )
+        return False
 
-    # Index into vector memory for future semantic retrieval (background, non-blocking)
-    from backend.embedding_tasks import schedule_session_memory_index
-    schedule_session_memory_index(
-        session_id=None, topic=topic,
-        summary=session_summary,
+    await _ensure_profile_artifacts(
+        mode=mode,
+        topic=topic,
+        session_summary=session_summary,
         weak_points=new_weak_points,
         strong_points=new_strong_points,
-        insight_text=session_summary,
         user_id=user_id,
+        operation_id=operation_id,
     )
+    return True
 
 
 async def update_profile_after_interview(
@@ -848,9 +1363,26 @@ async def update_profile_after_interview(
     messages: list,
     user_id: str,
     scores: list[dict] | None = None,
+    operation_id: str | None = None,
 ) -> dict:
     """Mem0-style two-stage pipeline: Extract → Update."""
     profile = _load_profile(user_id)
+    operation = _get_applied_operation(profile, operation_id)
+    if operation is not None:
+        # Re-read through the journal helper so this branch and the
+        # llm_update_profile race-loser branches share winner semantics.
+        result = _profile_operation_result(user_id, operation_id)
+        extraction = _normalize_extraction(result, topic)
+        await _ensure_profile_artifacts(
+            mode=mode,
+            topic=topic,
+            session_summary=extraction.get("session_summary", ""),
+            weak_points=extraction.get("weak_points", []),
+            strong_points=extraction.get("strong_points", []),
+            user_id=user_id,
+            operation_id=operation_id,
+        )
+        return extraction
     llm = get_langchain_llm()
 
     # ── Stage 1: Extract insights ──
@@ -877,9 +1409,11 @@ async def update_profile_after_interview(
     _fixed_extract = EXTRACT_PROMPT.format(
         current_profile="", mode=mode, topic=topic or "综合", transcript="", scores=score_text or "无",
     )
+    profile_context = copy.deepcopy(profile)
+    profile_context.pop(_PROFILE_OPERATIONS_KEY, None)
     _ex_packed = ContextBudget(max(1000, resolve_input_budget() - count_tokens(_fixed_extract))).pack([
         Section("transcript", "\n".join(transcript_lines), priority=1, min_tokens=300),
-        Section("profile", json.dumps(profile, ensure_ascii=False), priority=2, min_tokens=200),
+        Section("profile", json.dumps(profile_context, ensure_ascii=False), priority=2, min_tokens=200),
     ])
     extract_msg = EXTRACT_PROMPT.format(
         current_profile=_ex_packed.get("profile"),
@@ -904,8 +1438,13 @@ async def update_profile_after_interview(
     except (json.JSONDecodeError, ValueError):
         extraction = {"session_summary": "提取失败", "weak_points": [], "strong_points": []}
 
+    # An LLM can return syntactically valid JSON with malformed field shapes.
+    # Normalize before llm_update_profile writes its durable operation marker,
+    # so every cached retry remains safe to replay into insight/vector artifacts.
+    extraction = _normalize_extraction(extraction, topic)
+
     # ── Stage 2: LLM-based Update (Mem0 style) ──
-    await llm_update_profile(
+    applied = await llm_update_profile(
         mode=mode,
         topic=topic,
         new_weak_points=extraction.get("weak_points", []),
@@ -917,6 +1456,13 @@ async def update_profile_after_interview(
         session_summary=extraction.get("session_summary", ""),
         avg_score=extraction.get("avg_score"),
         dimension_scores=extraction.get("dimension_scores"),
+        operation_id=operation_id,
+        operation_result=extraction,
     )
+
+    if not applied and operation_id:
+        stored_result = _profile_operation_result(user_id, operation_id)
+        if stored_result is not None:
+            return _normalize_extraction(stored_result, topic)
 
     return extraction

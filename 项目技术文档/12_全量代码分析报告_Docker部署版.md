@@ -1,9 +1,19 @@
 # SparkOffer 全量代码分析与审查报告（Docker 部署版）
 
-> 审查基线：commit `c2684270fdb5` 加本报告所述未提交 RAG 评测实现，审查日期：2026-07-21
+> 审查基线：当前工作树基于 commit `0a129ed76ea51f78c8285408363f2a9d088d4355`，最终复核日期：2026-07-23
 > 代码规模：后端约 18,886 行 Python；前端约 16,387 行 TS/TSX/CSS；FastAPI 路由 100 个
 > 目标：从源码解释项目职责、实现思路、关键数据流和 Docker 真实运行方式，并给出可复核的缺陷与改进建议。
 > 说明：路径后的行号均指本次审查基线，后续修改代码后可能漂移。
+
+---
+
+## 2026-07-23 修复交付补遗
+
+本报告后文保留了初次审查时的风险描述，用于说明问题成因；这些描述不再等同于当前实现状态。本轮已完成系统性修复，主要包括生产认证与 Docker 默认值、可信代理与限流、SQLite/文件/Qdrant 用户迁移、面试评测/同步原子 claim、Assistant/QA/Algorithm/Resume 会话串行化、Knowledge/Resume 上传事务、Topic/索引写锁与命名空间隔离、embedding 队列停止语义、渠道配置契约，以及前端请求代次、对象 URL 生命周期和 RAG 轮询恢复。
+
+最终本地验证已完成：后端 `343 passed, 1 warning`，compileall、Ruff、`backend.main` 导入、前端 TypeScript/ESLint/build、`npm audit`、Compose 配置展开与 Git diff 检查均通过。真实 Docker 镜像启动、Nginx 语法和外部模型/Qdrant 联调仍属于环境集成验证，不应由静态检查结果替代。
+
+详细问题成因见 `14_全项目高风险模块代码审查记录.md`；最终修复范围、迁移说明、验证命令和部署清单见 `15_全项目代码审查与修复交付总结.md`。本报告第 15～23 章保留部分初审快照，若与文档 15 冲突，以文档 15 的最终状态为准。
 
 ---
 
@@ -31,24 +41,25 @@ SparkOffer 是一个面向技术面试训练的多形态 AI 系统。它并非�
 
 | 检查 | 结果 | 解释 |
 |---|---|---|
-| `pytest -q` | **71 passed, 1 failed, 1 warning** | 唯一失败是 SM-2“第三次通过即毕业”的旧测试语义与当前连续高分语义冲突，见 15.5；新增 RAG 定向测试均通过 |
-| `python -m compileall -q backend scripts` | 通过 | Python 语法/字节码编译基线通过 |
+| `python -m pytest tests -q` | 通过：343 passed, 1 warning | warning 为 Starlette `python_multipart` PendingDeprecationWarning |
+| `python -m compileall -q backend tests` | 通过 | Python 语法/字节码编译基线通过 |
+| `python -m ruff check backend tests` | 通过 | Python 静态检查无遗留问题 |
 | `npm run build` | 通过 | Vite 生产构建成功，约 4,143 modules |
-| `npx tsc --noEmit` | 通过 | 但 `strict=false`，只能说明当前宽松类型配置可编译 |
-| `npm run lint` | 命令通过但结论无效 | ESLint 仅匹配 JS/JSX，未扫描实际 TS/TSX 业务代码，见 `frontend/eslint.config.js:7-28` |
-| `docker compose config --quiet` | 通过 | Compose 合并和语法有效，共 4 个服务 |
+| `npm run typecheck` | 通过 | 当前 TypeScript 配置下无类型错误；`strict=false` 仍是后续强化项 |
+| `npm run lint -- --no-cache` | 通过 | ESLint 已覆盖 TS/TSX，并启用 React Hooks 等规则 |
+| `npm audit --audit-level=moderate` | 通过 | 0 vulnerabilities |
+| `docker compose config --quiet` | 通过 | 使用临时 `QDRANT_API_KEY` 占位值完成 Compose 合并和语法验证，共 4 个服务 |
 | 真实镜像 build / 容器探活 | 未执行 | 当前 Docker daemon 未运行，不能确认镜像内 `curl`、实际启动耗时和服务连通性 |
-| 独立 `codex review` | 未完成 | 当前模型通道对 `codex_exec` 返回 403；不代表代码失败 |
 
-本轮在审查基础上按需求新增并加固了 RAG 评测业务源码、Dashboard、Docker 数据集回退和测试；其他既有业务问题只记录、不擅自扩展修复范围。报告包含对当前本地数据库的只读安全核验，但不会复述任何真实 API key、JWT secret 或其他密钥。
+本轮不仅加固了 RAG 评测业务源码和 Dashboard，也已修复审查中确认的高风险业务问题并新增回归测试。报告不会复述任何真实 API key、JWT secret 或其他密钥。
 
 ### 0.2 最重要的结论
 
 1. **Docker 与裸 `uvicorn` 的核心差异是向量后端。** 本地未配置时 `Settings.vector_backend_mode()` 推断为 NumPy；Compose 会将空值覆盖为 `qdrant`，知识库和长期记忆的存储、迁移、备份、失败模式都随之变化（`backend/config.py:102-113`，`docker-compose.yml:34-42`）。
-2. **当前实例不应直接上线。** 当前 owner 账号仍可用公开模板默认口令验证，而 backend `9001` 和无鉴权 Qdrant `6333/6334` 均发布到所有网卡；这不是泛化建议，而是已核验的当前部署阻断项。
-3. **系统整体是单进程友好、横向扩展不安全。** SQLite 和文件是真相源，但限流器、live store、索引缓存、后台任务队列、任务状态及多数锁都在进程内；直接增加 Uvicorn workers 或 backend replicas 会产生状态丢失、重复副作用和轮询 404。
+2. **已关闭默认公网暴露并阻断生产弱配置。** Compose 不再默认发布 Qdrant/backend，生产模式要求安全 JWT、默认密码、Qdrant key 和明确 CORS；开发模式仍可显式选择本机便捷配置。
+3. **单实例一致性已加固，但横向扩展仍需外部协调。** 当前原子 DB claim、文件事务和进程内锁能覆盖单 backend 实例；若增加 Uvicorn workers 或 replicas，后台队列、live store、索引锁和任务状态仍应迁移到共享协调层。
 4. **主业务闭环完整。** 专项训练已形成 `prepare -> retrieve -> generate -> validate -> finalize -> evaluate -> profile/SR/knowledge writeback`，并具备 SSE 进度、RAG 指标和失败后的手工同步入口。
-5. **存在若干可确定复现的契约缺陷。** 例如助手读取历史/收藏的返回键错误、设置页三个 ChannelManager 相互覆盖旧快照、知识库快速切 topic 可能跨领域误写，这些不是风格问题，而是行为错误。
+5. **已修复本轮可确定复现的契约缺陷。** Assistant 返回键、ChannelManager 旧快照覆盖、Knowledge 跨 Topic 响应、改密字段、输入边界和轮询历史恢复均已有实现修复与定向验证。
 
 ---
 
@@ -58,7 +69,10 @@ SparkOffer 是一个面向技术面试训练的多形态 AI 系统。它并非�
 
 ```text
 浏览器
-  │ http://HOST:9000（生产应由 HTTPS 入口代理）
+  │ HTTPS :443
+  ▼
+宿主 TLS 入口（Nginx/Caddy/负载均衡器）
+  │ http://127.0.0.1:9000
   ▼
 frontend 容器：nginx:alpine，容器端口 80
   ├─ /assets/*  -> Vite 哈希静态资源，一年缓存
@@ -74,10 +88,9 @@ backend 容器：FastAPI + Uvicorn，容器端口 8000
   ├─ Qdrant：http://qdrant:6333
   └─ 外部 LLM / Embedding / Reranker API
 
-宿主机当前还直接发布：
-  9001 -> backend:8000
-  6333 -> qdrant:6333
-  6334 -> qdrant:6334
+宿主机默认只在回环地址发布 frontend 9000；backend、Qdrant、Redis 不发布宿主端口。
+Qdrant/Redis 仅加入 internal data 网络；backend 的父级 data bind mount 中，
+这两个服务的持久化子目录由只读 tmpfs 遮蔽，不能绕过服务 API 直接读写。
 ```
 
 证据：`docker-compose.yml:2-74`、`frontend/nginx.conf:1-37`、`frontend/src/api/client.ts:1`。
@@ -126,9 +139,9 @@ backend 容器：FastAPI + Uvicorn，容器端口 8000
 | 服务 | 镜像/构建 | 端口与持久化 | 启动条件/降级 |
 |---|---|---|---|
 | Redis | `redis:7-alpine` | `./data/redis:/data`；256 MB；`allkeys-lru`；60 秒至少一次变更时 RDB | 有 `redis-cli ping` healthcheck；代码连接失败可退内存 LRU，但 Compose 启动阶段把它当硬依赖 |
-| Qdrant | `qdrant/qdrant:latest` | 发布 6333/6334；`./data/qdrant:/qdrant/storage` | 无 healthcheck，只要求容器 started；未给 Qdrant 服务配置 API key |
-| Backend | `backend/Dockerfile` | `9001:8000`；整棵 `./data:/app/data`；2 GB limit | 等 Redis healthy、Qdrant started；`/docs` healthcheck |
-| Frontend | `frontend/Dockerfile` | `9000:80` | 等 backend healthy；静态首页 healthcheck 使用 `curl` |
+| Qdrant | `${QDRANT_IMAGE:-qdrant/qdrant:v1.12.0}` | 不发布宿主端口；`./data/qdrant:/qdrant/storage` | 服务端强制 API key；无 exec healthcheck，只要求容器 started |
+| Backend | `backend/Dockerfile` | 不发布宿主端口；`./data:/app/data`，Redis/Qdrant 子目录由只读 tmpfs 遮蔽；2 GB limit | 等 Redis healthy、Qdrant started；`/docs` healthcheck |
+| Frontend | `frontend/Dockerfile` | 默认 `127.0.0.1:9000:80`，仅供宿主 TLS 入口 | 等 backend healthy；静态首页 healthcheck 使用 Alpine 自带的 `wget` |
 
 精确位置：`docker-compose.yml`、`backend/Dockerfile`。backend 镜像安装 `requirements.txt` 并复制 `backend/`、`scripts/`；固定评测集单独复制到 `/app/backend/eval/data/rag_queries.json`，避免被运行时 `/app/data` bind mount 遮蔽。宿主 `data/eval/rag_queries.json` 存在时仍优先使用，实际文件 hash 进入 manifest。frontend 使用 Node 22 构建后复制到 Nginx（`frontend/Dockerfile:1-12`）。
 
@@ -154,7 +167,7 @@ AI 运行时层（仅 LLM / embedding / reranker / tuning）
 - `REDIS_URL` 被 Compose 固定为 `redis://redis:6379/0`，根 `.env` 中同名值不能覆盖；
 - `.env` 中 `VECTOR_BACKEND` 为空时，`${VECTOR_BACKEND:-qdrant}` 仍得到 `qdrant`；
 - `.env` 中 `QDRANT_URL` 为空时，容器得到 `http://qdrant:6333`；
-- `QDRANT_API_KEY` 默认空，只传给 backend client，不会为 Qdrant 服务开启鉴权；
+- `QDRANT_API_KEY` 在 Compose 插值时必填，并同时注入 Qdrant 服务端与 backend client；生产校验还要求至少 32 UTF-8 bytes；
 - `data/ai_config.json` 由设置页原子写入并位于挂载卷内，重建镜像后仍优先于 `.env` 的 LLM/embedding/reranker 配置。
 
 证据：`docker-compose.yml:34-42`、`backend/config.py:8-142`、`backend/ai_config.py:42-49,135-221,225-255`、`backend/llm_provider.py:247-270,469-502`。
@@ -163,13 +176,13 @@ AI 运行时层（仅 LLM / embedding / reranker / tuning）
 
 | 行为 | 裸 `uvicorn backend.main:app` | 当前 Docker Compose |
 |---|---|---|
-| HTTP 入口 | 通常 `localhost:8000` | 浏览器走 `:9000` Nginx；backend 另暴露 `:9001` |
+| HTTP 入口 | 通常 `localhost:8000` | 宿主 TLS 入口反代 `127.0.0.1:9000`；backend 不发布宿主端口 |
 | 前端代理 | Vite `/api -> localhost:8000` | Nginx `/api -> backend:8000` |
 | 向量后端 | `VECTOR_BACKEND`、`QDRANT_URL` 都空时 NumPy | 默认强制 Qdrant |
 | 长期记忆 | SQLite `memory_vectors` + NumPy 余弦 | Qdrant `sparkoffer_memory` collection |
 | 知识索引 | 用户 `.index_cache` 本地 SimpleVectorStore | `kb_<uid>_<topic>` Qdrant collection |
 | Redis | 空 URL 时内存 LRU | 始终启动并注入 Redis URL |
-| 上传上限 | 后端知识文件单文件 200 MB | 先被 Nginx 全 `/api` 32 MB 拦截 |
+| 上传上限 | 知识文件单个 200 MiB、批次 500 MiB；QA 图片 4×6 MiB | Nginx 仅对 `/api/knowledge/{topic}/upload` 放行 512 MiB 并流式转发，其余 `/api/` 为 40 MiB |
 | 时区 | 跟随本机 Asia/Shanghai | 容器通常 UTC，Compose 未设 `TZ` |
 | local embedding | 安装额外 requirements 后可用 | 镜像未安装 `requirements.local-embedding.txt`，模板配置不可直接工作 |
 | 多进程 | 默认单 Uvicorn 进程 | 仍是单进程；不能把 restart policy 误解为横向扩展 |
@@ -635,7 +648,7 @@ JD 流程位于 `backend/graphs/job_prep.py` 和 `backend/routers/job_prep.py`�
 - 单 topic/全部异步 rebuild、任务状态（`knowledge.py:292-373`）；
 - 文件数、chunk 数、索引时间等统计（`knowledge.py:374-465`）。
 
-编辑走 atomic write helper，随后 invalidate/rebuild。上传允许 Markdown/TXT/PDF，单文件后端上限 200 MB（`knowledge.py:16-22`）。Nginx 全 `/api` 只有 32 MB，所以 Docker 实际契约更小。
+编辑走 atomic write helper，随后 invalidate/rebuild。上传接口仅接收 UTF-8 Markdown，单文件后端上限 200 MiB、最多 20 个文件且批次上限 500 MiB。Nginx 仅为 `/api/knowledge/{topic}/upload` 配置 512 MiB 并关闭 request buffering，因此 Docker 代理层与后端批次契约一致，其他 Knowledge JSON 路由仍受 40 MiB 限制。
 
 Topic 本身由 `backend/routers/profile.py:22-72` 写用户 `topics.json`。新增时建立 knowledge/high_freq 目录并触发索引；删除当前只删配置与向量索引，不删源目录、高频文件或 cards，同 key 重建后旧内容可能重新出现。
 
@@ -897,7 +910,7 @@ Route `backend/routers/rag_eval.py` 负责启动、轮询、历史和详情。�
 - login/logout/updateProfile 同步 localStorage；
 - `authFetch` 统一注入 Bearer 并广播 401（`frontend/src/api/client.ts:26-45`）。
 
-这是实用的 SPA 策略，但 token 存 localStorage，任何 XSS 都可读取 7 天 bearer；Nginx 当前没有 CSP/HSTS/X-Content-Type-Options，公网 HTTP 更会直接暴露登录和 token。
+这是实用的 SPA 策略，但 token 存 localStorage，任何 XSS 都可读取 7 天 bearer。默认 Compose 已取消公网明文入口并要求宿主 TLS；CSP/HSTS/X-Content-Type-Options 等安全头仍需由宿主/应用 Nginx 完整配置。
 
 ### 13.3 关键页面状态流
 
@@ -928,7 +941,7 @@ Route `backend/routers/rag_eval.py` 负责启动、轮询、历史和详情。�
 
 #### Settings
 
-`Settings.tsx:126-347` 包括账号、三个 ChannelManager、tuning、owner-only audit/users。每个 `ChannelManager.tsx:60-187` 加载并缓存一份完整 channels 配置；保存自己 section 时又提交这份 allData。三个组件同时挂载，各自快照会过期：先保存 LLM，再保存 embedding，后者可能把 LLM 回滚到旧值。正确做法应是后端支持 section PATCH 或父组件维护单一版本化状态。
+`Settings.tsx:126-347` 包括账号、三个 ChannelManager、tuning、owner-only audit/users。ChannelManager 现通过 section-scoped `PUT /settings/ai/channels/{section}` 只提交当前渠道类型，后端按对应 Pydantic 模型校验并原子更新该 section，避免三个并列组件用旧快照互相覆盖。
 
 #### Q&A、RAG 与图表
 
@@ -936,7 +949,7 @@ Route `backend/routers/rag_eval.py` 负责启动、轮询、历史和详情。�
 - `RAGDashboard.tsx:89-710` 展示筛选、趋势、雷达、分布、session 明细，启动评测后每 1.5 秒轮询；
 - charts 目录实现 score trend、topic radar、dimension trend、26 周 heatmap、12 周频次、knowledge treemap；
 - `LearningHeatmap.tsx:26-65` 用本地零点 Date 后 `toISOString().slice(0,10)`，Asia/Shanghai 会转成前一天；
-- `DimensionTrendChart.tsx:22-35` 在条件 return 后调用 `useState`，违反 Hooks 调用顺序，数据形状变化时可能崩溃；当前 lint 没有扫描 TSX 因而未发现。
+- `DimensionTrendChart.tsx` 的 Hook 已移到所有条件返回之前，TS/TSX 已纳入 ESLint React Hooks 规则；数据形状变化不会再改变 Hook 调用顺序。
 
 ### 13.4 API 与类型层
 
@@ -1024,36 +1037,38 @@ TypeScript 配置 `strict=false, allowJs=true`（`frontend/tsconfig.json:2-25`�
 
 ## 15. 代码审查发现
 
-### 15.1 P0：部署阻断项
+### 15.1 P0：初审部署阻断项（历史记录）
 
-#### P0-1 当前 owner 默认口令仍有效，且管理面可从公网直达
+#### P0-1（配置路径已修复，存量凭据需运维核验）owner 默认口令与公网管理面
 
-**证据链：**
+**当前状态：** backend 已取消宿主端口，生产启动会拒绝公开/过短的 bootstrap 密码和 JWT secret。启动校验不会改写数据库中已有 owner 的 bcrypt hash，因此旧部署仍必须在应用内改密、确认旧口令失效，并在可能泄露时轮换 JWT secret。
+
+**初审证据链：**
 
 - 模板和代码默认口令是公开值（`.env.example:23-27`、`backend/config.py:40-47`）；
-- startup 只 warning，不拒绝启动（`backend/main.py:33-48`）；
-- 本次对当前 SQLite bcrypt hash 做了只读核验，默认 owner 仍可用模板口令验证；
-- Compose 将 backend `9001:8000` 发布到所有接口（`docker-compose.yml:30-31`）；
-- 部署文档还要求防火墙开放 9001（`DEPLOYMENT.md:68-79`）；
+- startup 当时只 warning，不拒绝启动（`backend/main.py:33-48`）；
+- 初审时对 SQLite bcrypt hash 做了只读核验，默认 owner 仍可用模板口令验证；
+- 初审 Compose 将 backend `9001:8000` 发布到所有接口；
+- 初审部署文档还要求防火墙开放 9001；
 - owner 的 channels API 返回包含 key 的完整 channel 对象（`backend/routers/settings_router.py:86-95`）。
 
 **影响：** 未授权者可登录 owner，读取/替换 AI provider keys、修改模型设置、读取审计/用户信息并调用全部业务接口。
 
-**立即处置：** 在应用内改 owner 密码；因旧凭证可能已签发 7 天 token，同时轮换 JWT secret 使旧 token 全部失效；只对外暴露 TLS frontend，取消公网 9001；检查 audit logs 和 provider 使用记录并轮换 provider key。报告不记录任何当前真实密钥。
+**初审处置建议（端口/TLS 已落实，存量凭据仍需核验）：** 在应用内改 owner 密码；因旧凭证可能已签发 7 天 token，同时轮换 JWT secret 使旧 token 全部失效；只对外暴露 TLS frontend；检查 audit logs 和 provider 使用记录并轮换 provider key。报告不记录任何当前真实密钥。
 
-#### P0-2 Qdrant 无服务端鉴权并直接发布 6333/6334
+#### P0-2（已修复）Qdrant 无服务端鉴权并直接发布 6333/6334
 
-**证据：** `docker-compose.yml:14-24` 发布两个端口，Qdrant service 没有认证环境；`QDRANT_API_KEY` 只是 backend client 环境。长期记忆 payload 含 user/session/content（`backend/vector_store/qdrant_store.py:154-165`），KB collection 含原文 chunks。
+**初审证据：** 当时的 `docker-compose.yml:14-24` 发布两个端口，Qdrant service 没有认证环境；`QDRANT_API_KEY` 只是 backend client 环境。长期记忆 payload 含 user/session/content（`backend/vector_store/qdrant_store.py:154-165`），KB collection 含原文 chunks。
 
 **影响：** 可枚举、读取、篡改或删除所有用户向量和知识内容；篡改还会污染后续模型上下文。
 
-**修复：** 删除 Qdrant `ports`，仅 Docker internal network 使用；确需外部运维时绑定 loopback，给 Qdrant 服务本身配置 API key/TLS/网关 ACL。不要把“client 设置了空 API key”理解为服务已鉴权。
+**当前处理：** 已删除 Qdrant `ports`，仅 Docker internal network 使用；Qdrant 服务端与 backend client 使用同一强 API key，生产空值/短 key 会 fail-fast。确需外部运维时仍应使用受控 loopback/TLS/网关 ACL。
 
-#### P0-3 生产指南默认明文 HTTP 传输 bearer
+#### P0-3（已修复）生产指南默认明文 HTTP 传输 bearer
 
-Nginx 只 listen 80（`frontend/nginx.conf:1-2`），指南主入口是 `http://...:9000`，HTTPS 仅作为末尾建议（`DEPLOYMENT.md:31,220-225`）。JWT 存 localStorage 并经 Authorization 发送（`frontend/src/contexts/AuthContext.tsx:17,67-79`、`api/client.ts:26-35`）。公网链路可截获账号和 token。
+**初审状态：** Nginx 只 listen 80，指南主入口是 `http://...:9000`，HTTPS 仅作为末尾建议。JWT 存 localStorage 并经 Authorization 发送（`frontend/src/contexts/AuthContext.tsx:17,67-79`、`api/client.ts:26-35`），公网明文链路可截获账号和 token。
 
-**修复：** 把外层 TLS 反代设为生产硬前置；9000 也只绑定 loopback/internal network；启用 HSTS、CSP、X-Content-Type-Options、Referrer-Policy 等安全头。
+**当前处理：** Compose 默认将 9000 绑定 loopback，部署指南把宿主 TLS 反代设为生产硬前置，并禁止防火墙开放 9000。CSP/HSTS/X-Content-Type-Options/Referrer-Policy 仍属于独立的前端安全头加固项。
 
 ### 15.2 P1：高优先级正确性与升级风险
 
@@ -1071,7 +1086,7 @@ Nginx 只 listen 80（`frontend/nginx.conf:1-2`），指南主入口是 `http://
 | P1-10 | 普通 rebuild 最终固定 `force_rebuild=True`（`embedding_tasks.py:526-548,601-612`） | 每次编辑全量 embedding，成本、延迟、空窗放大 | 把 force 参数贯穿任务；优先 manifest incremental；加调用测试 |
 | P1-11 | Qdrant force rebuild 先 delete collection，再重建/save manifest（`backend/indexer.py:564-602`） | 部署停止/线程中断可留下 partial collection；仅看 collection 存在会误判 ready | shadow collection 构建+点数校验+alias swap；完成标记 |
 | P1-12 | RAG eval、embedding task status、live/cache/locks 多为进程内 | 多 worker 轮询 404、重复副作用、任务重启丢失 | 当前保持单 worker；扩容前迁 Redis/DB/持久队列和分布式锁 |
-| P1-13 | 镜像 tag 和 Python 依赖未锁：Qdrant latest、基础镜像浮动、`requirements.txt` 全 `>=`、frontend `npm install` | fresh build 不可复现，依赖组合/数据格式可能突变 | lock/hash、`npm ci`、镜像 pin version+digest；升级单独做快照和回滚 |
+| P1-13 | Qdrant 已固定版本但未 pin digest；基础镜像仍浮动、`requirements.txt` 多为 `>=`、frontend 使用 `npm install` | fresh build 仍未完全可复现，依赖组合可能突变 | lock/hash、`npm ci`、镜像 pin digest；升级单独做快照和回滚 |
 | P1-14 | 备份指南只热备 `data/`；SQLite WAL、checkpoint、Qdrant/Redis 同时写 | 备份跨存储不一致或缺 WAL，无法恢复 | 维护窗口停写；两库 `.backup` + Qdrant snapshot + 文件源；恢复演练 |
 | P1-15 | Docker 允许选择 local embedding，但 backend 镜像不安装独立 requirements（`backend/Dockerfile:5-6`、`requirements.local-embedding.txt:1-4`） | 按模板切 local 直接 RuntimeError，2 GB 也可能 OOM | 明确 Docker 仅 API embedding，或提供 local/GPU build target 和资源规格 |
 | P1-16 | 密码只校验最小 6 字符，未限制 bcrypt 5.0 的 72 UTF-8 bytes 上限（`backend/models.py:85-104`、`backend/auth.py:32-37,95-126,215-223`） | 73 个 ASCII 或约 25 个中文字符在注册、登录/改密可抛 `ValueError` 返回 500 | 三条路径统一按 UTF-8 bytes 校验上限并返回 422；补多字节测试 |
@@ -1082,7 +1097,7 @@ Nginx 只 listen 80（`frontend/nginx.conf:1-2`），指南主入口是 `http://
 
 | ID | 发现 | 证据/建议 |
 |---|---|---|
-| P2-1 | Nginx 32 MB 与后端上传契约冲突 | 知识文件后端单个 200 MB；QA 4×6 MB 原图经 base64 约 32 MiB 再加 JSON 必超（`frontend/nginx.conf:20-28`、`backend/routers/knowledge.py:16-22`、`qa_arena.py:225-227`）。按 endpoint 分 location/cap；大文件应流式、配总请求/磁盘 quota |
+| 已修复 | Nginx 与后端上传契约 | 仅 `/api/knowledge/{topic}/upload` 使用 512 MiB 且关闭 request buffering；其余 API 为 40 MiB，覆盖 QA 4×6 MiB 图片的 base64 与 JSON 开销；后端另有文件数、单文件和批次总量上限 |
 | P2-2 | Fresh clone 缺 `data/topics.json` | `.gitignore:24` 忽略它，只有旧 `topics.example.json`；初始化只复制正式文件（`backend/auth.py:40-57`）。提交与当前三目录匹配的 seed 或启动时由目录生成 |
 | P2-3 | Knowledge upload 文件名去重有 TOCTOU，且直接写目标 | 并发可选同名互相覆盖，崩溃留半文件（`backend/routers/knowledge.py:43-57,195-213`）。使用独占创建/UUID temp + atomic replace |
 | P2-4 | Topic 删除不删目录/high_freq/cards | `backend/routers/profile.py:58-69`。明确软删或事务式清源文件、索引、cards，并提供二次确认/恢复策略 |
@@ -1117,36 +1132,22 @@ Nginx 只 listen 80（`frontend/nginx.conf:1-2`），指南主入口是 `http://
 |---|---|
 | Redis 可选语义矛盾 | 代码可退 LRU，但 Compose 等 Redis healthy 才启 backend。要么承认其部署必需并监控，要么取消 health-gated 硬依赖 |
 | Readiness 过浅 | backend 只测 `/docs`，frontend 只测静态首页，Qdrant 无 healthcheck。增加 `/health/live` 与 `/health/ready`，ready 检 DB 可写、Qdrant collection/embedding config；模型外部故障按产品策略降级 |
-| frontend healthcheck 的 `curl` 未验证 | `nginx:alpine` 具体镜像是否带 curl 需真实 build 确认；可改 `wget` 或镜像显式安装。当前 daemon 未运行，不能宣称已复现 |
-| backend root 运行、网络/卷隔离弱 | Dockerfile 无 USER；所有服务一张网；backend 挂整棵 data，可写 Redis/Qdrant 底层目录。改非 root、named volumes、public/internal 网络、cap_drop/read_only/tmpfs |
+| frontend healthcheck 命令 | 已改为 `nginx:alpine`/BusyBox 提供的 `wget -q -O /dev/null`；仍需在可用 Docker daemon 中执行真实容器探活 |
+| backend 仍以 root 运行 | 网络已拆为 proxy/internal data，backend 视图中的 Redis/Qdrant 子目录也已用只读 tmpfs 遮蔽；但 Dockerfile 仍无 `USER`，也未统一 `cap_drop/read_only`。后续改为非 root 并收紧 capability |
 | 资源和日志无上限 | 仅 backend 有 2 GB；无 CPU/PID、Qdrant/frontend limit，也无 Docker log rotation。加 limits/reservations、max-size/max-file、磁盘/OOM 告警 |
 | `.dockerignore` 不完整 | 根 build context 为 `.`，当前未排 `data/users`、`data/qdrant`、`data/redis`、`data/ai_config.json`、`checkpoints.db`；虽 Dockerfile 不 COPY，但会发送给 builder。补齐敏感 runtime path |
 | 固定评测集仍允许宿主覆盖 | bind-mount 遮蔽已通过镜像内 `/app/backend/eval/data/rag_queries.json` fallback 修复；但宿主 `/app/data/eval/rag_queries.json` 有意优先，运维误改会改变实验集。manifest 记录实际文件 hash，比较前必须核对 |
 | 明文 provider key | `data/ai_config.json` 保存完整 keys，UI API 原样返回；应限制文件/备份权限，API masking/一次性替换，生产接 secret store |
-| CORS 默认 `*` | Docker 是同源，设精确 HTTPS origin；当前 backend 直出还允许客户端伪造 `X-Real-IP` 绕过 IP 限流，因为 auth 信任该头（`backend/routers/auth.py:29-39`） |
+| CORS/代理生产校验 | 生产已拒绝 `*`、非回环 HTTP origin 和不安全密钥；backend 不直出，且仅消费可信网关/frontend 的代理链。仍需在更换 subnet/宿主入口后实测客户端 IP，并避免宽泛 `TRUSTED_PROXY_CIDRS` |
 | 前端安全头缺失 | Nginx 没 CSP/HSTS/XFO/nosniff；结合 localStorage token 和渠道 key 响应扩大 XSS 影响。外层/内层统一安全头并审计 Markdown 渲染 |
-| 前端 lint 实际未运行 | `frontend/eslint.config.js:10` 仅 `*.js,*.jsx`；把 TS/TSX parser/config 纳入，启 hooks 规则；修复 `DimensionTrendChart` 后作为 CI gate |
+| 前端 lint 覆盖 | 已将 TS/TSX parser、React Hooks 规则和业务源码纳入 ESLint；当前 lint 通过，后续应保持为 CI gate |
 | TypeScript 严格性低 | `strict=false`、API 大量 any。逐模块启 `noUncheckedIndexedAccess/strict`，用 OpenAPI 生成契约类型 |
 | `clear_data.sh` 名不副实 | 只删 SQLite memory_vectors/sessions 和 profile（`clear_data.sh:11-28`），不清 Docker Qdrant、checkpoint、QA、收藏、卡片、指标、审计、Redis；应改名 legacy partial reset 或实现带多重确认的全存储 reset |
-| 文档端口矛盾 | README Docker 后写访问 `localhost`，实际 9000；DEPLOYMENT 说 backend 无需暴露，却映射并要求放行 9001；Qdrant 已公开但防火墙章节不讨论。统一唯一生产拓扑 |
+| 文档端口口径 | DEPLOYMENT 已统一为宿主 TLS -> `127.0.0.1:9000`，并明确禁止开放 9000/9001/6333/6334/6379；其他 README/旧学习文档若仍有历史端口示例，应继续以 Compose 合并结果和 DEPLOYMENT 为准 |
 
-### 15.5 现有测试失败的准确解释
+### 15.5 SM-2 回归语义
 
-失败用例是 `tests/test_spaced_repetition.py:138-147`：fixture 只有 `repetitions=2`，没有 `consecutive_high/last_score`，随后 score=8，期望直接毕业。
-
-当前实现 `backend/spaced_repetition.py:140-162` 明确规定：
-
-- `repetitions` 是 score >= 6 的所有连续通过；
-- 毕业要求 score >= 7 的三次连续高分；
-- legacy 数据没有 `consecutive_high` 时，只能从已知 `last_score` 至多恢复 1 次，不能把历史普通通过全部算高分；
-- fixture 连 `last_score` 都没有，所以本次更新后 high streak=1，不毕业。
-
-这属于**测试与当前产品语义冲突**，不能简单断言实现错误。两个可选修复方向：
-
-1. 若坚持“连续三次高分”语义：更新测试 fixture，显式放 `consecutive_high=2` 或能证明的历史高分；这是与实现注释一致的推荐方向。
-2. 若产品要求“SM-2 三次通过且本次高分即毕业”：改实现用 repetitions，但会让两次 6 分 + 一次 7 分也毕业，弱化规则。
-
-本次仅记录，没有未经确认修改业务语义。
+原失败用例把普通通过次数 `repetitions` 当作连续高分次数，与实现中“连续三次 score >= 7 才毕业”的语义冲突。fixture 已补充可证明的 `consecutive_high` 状态，保留严格毕业规则；当前全量测试无失败。
 
 ---
 
@@ -1167,7 +1168,7 @@ Nginx 只 listen 80（`frontend/nginx.conf:1-2`），指南主入口是 `http://
 | `tests/test_rag_eval_store.py` | schema 兼容、legacy NULL、排序、detail 查询 | 大量历史数据和迁移回滚 |
 | `tests/test_reranker_cache.py` | cache schema/模型隔离、非法/重复 index | 真实外部 reranker 协议漂移 |
 
-当前全量为 71 passed、1 个既有 SM-2 语义测试失败。前端仍没有测试目录和 test script；RAG Dashboard 的刷新恢复、轮询竞态和详情展开目前只经过 TypeScript/build 静态验证，尚缺 component/Playwright 自动化。其他关键竞态、草稿、SSE、Channel 保存和 Nginx 上传边界也没有自动化保护。
+最终全量测试总数待交付前复跑确认。新增测试覆盖 API 畸形 JSON、生产安全配置、可信代理链、限流、用户/会话 ID 兼容、SQLite/文件/Qdrant 用户迁移、评测/同步 claim、Assistant/QA/Algorithm/Resume 并发、Knowledge/Resume 上传回滚、图谱缓存隔离、Topic 事务、索引 fingerprint/写锁、重建队列、熔断探针代次和渠道配置。前端仍缺少 component/Playwright 自动化；QA Arena、RAG Dashboard、Knowledge 请求代次和 Channel 保存目前以 TypeScript、ESLint、Vite build 及后端契约测试为主。
 
 ### 16.2 推荐测试金字塔
 
@@ -1176,7 +1177,7 @@ Nginx 只 listen 80（`frontend/nginx.conf:1-2`），指南主入口是 `http://
 3. **FastAPI integration：** 登录/owner/tenant、resume 原子上传、session restore/sync idempotency、错误 status 和 SSE event 序列。
 4. **Qdrant/Redis Testcontainers：** NumPy->Qdrant 迁移、collection rebuild 中断、embedding model version、Redis 故障降级。
 5. **前端 component：** fake timers 测 debounce/flush；延迟交错响应测 topic/filter；Channel 并发保存；SM-2 按钮 double click。
-6. **Playwright Docker E2E：** 登录、专项生成/刷新恢复/评估、知识 >32 MB 边界、QA 多图、SSE 经 Nginx、401 modal。
+6. **Playwright Docker E2E：** 登录、专项生成/刷新恢复/评估、知识 200/500 MiB 边界、QA 四图、SSE 经 Nginx、401 modal。
 7. **恢复演练：** SQLite/Qdrant snapshot 恢复后，核对用户数、session 数、collection count、一次检索和 checkpoint resume。
 
 ### 16.3 建议 CI 门禁
@@ -1196,15 +1197,15 @@ deployment:
 
 ## 17. Docker 上线与升级清单
 
-### 17.1 当前实例立即整改顺序
+### 17.1 当前实例上线验收顺序
 
-1. 暂停公网访问，移除 `9001/6333/6334` 发布，仅保留受 TLS 保护的 frontend 入口；
-2. 修改 owner 密码、轮换 JWT secret 使现存 token 失效，检查审计并轮换 provider keys；
+1. 确认 Compose 合并结果仅在 `127.0.0.1:9000` 暴露 frontend，backend/Qdrant/Redis 无宿主端口，并由宿主 TLS 入口提供唯一公网路径；
+2. 对旧实例在应用内修改 owner 密码并确认公开旧口令失效；可能泄露时轮换 JWT secret、provider keys 并检查审计；
 3. 给 `.env`、`data/ai_config.json`、备份目录设置最小权限；
 4. 创建与 python/java/agent 目录一致的 canonical `topics.json` seed，验证新用户冷启动；
-5. 修正 P1-1～P1-4 的数据竞态和助手错误，再允许真实用户写数据；
+5. 运行 P1-1～P1-4 对应的竞态、渠道保存和 Assistant 契约回归，再允许真实用户写数据；
 6. 明确当前是否从 NumPy 升级 Qdrant，若是则走迁移和 count 对账；
-7. pin 镜像、Python lock、`npm ci`，再构建候选版本。
+7. 在已固定 Qdrant 版本的基础上继续 pin 镜像 digest、Python lock 并改用 `npm ci`，再构建候选版本。
 
 ### 17.2 安全升级流程
 
@@ -1279,7 +1280,7 @@ deployment:
 | Docker 基础 | `10_部署与可选能力.md` |
 | 知识训练设计 | `11_知识训练场实施计划.md` |
 
-现有 01～11 文档适合按主题学习；本报告的新增价值是以当前 commit 重新核验全仓库，并把 **Docker 默认 Qdrant、配置覆盖、当前安全状态、真实缺陷和验证失败** 统一放进一个端到端视图。若现有文档与本报告/源码不一致，应以当前源码和 Compose 合并结果为准。
+现有 01～11 文档适合按主题学习；本报告的新增价值是以当前 commit 重新核验全仓库，并把 **Docker 默认 Qdrant、配置覆盖、当前安全状态、真实缺陷和验证边界** 统一放进一个端到端视图。若现有文档与本报告/源码不一致，应以当前源码和 Compose 合并结果为准。
 
 ---
 
@@ -1287,9 +1288,9 @@ deployment:
 
 SparkOffer 已经具备完整的个人面试训练产品骨架，技术亮点不是某个孤立框架，而是把 RAG、状态机、长期画像、间隔重复、知识演进、流式可观测和多渠道容错串成了可运行闭环。源码中大量降级、恢复和幂等意图说明项目已经越过 demo 阶段。
 
-但当前 Docker 配置仍是“单机开发/个人部署可用”，不是可直接暴露公网的生产基线。上线前必须先处理默认 owner、Qdrant/Backend 端口和 HTTPS 三个 P0，再修知识页与渠道设置的数据竞态、助手契约、向量迁移和可重复构建。扩展到多 worker/多副本不是改一个启动参数，而是一项涉及任务、锁、live state、限流、索引和副作用事务化的架构改造。
+当前 Docker 配置已经收回 backend/Qdrant/Redis 宿主端口，frontend 默认只绑定 loopback，并对生产密钥、HTTPS CORS、可信代理、数据网络和持久目录可见性做了 fail-fast/隔离加固。它仍要求外置 TLS 入口、真实容器 smoke、存量 owner 改密核验，以及 readiness、非 root、资源/日志上限和可重复构建强化；不能把 `docker compose up` 成功直接等同于完整生产验收。扩展到多 worker/多副本也不是改一个启动参数，而是一项涉及任务、锁、live state、限流、索引和副作用事务化的架构改造。
 
-本报告记录的是审查基线，不代表已修复上述问题；验证中的 1 个测试失败也被原样保留，以避免在没有产品决策时擅自改变“连续高分毕业”的业务语义。
+本报告后文保留初审问题作为成因记录，带“历史/已修复”标记的内容不代表当前实现仍有同一缺陷。最终全量测试与真实 Docker 启动结果待交付前复跑，不在此处猜测或冻结数字。
 
 ---
 
@@ -1795,7 +1796,7 @@ submit -> task-id 去重 -> bounded queue(100)
   -> 超过 20 条时把最旧部分折叠为 summary，保留最近 10 条
 ```
 
-图片每张解码后最多 6 MiB、每轮最多 4 张（`backend/qa_arena.py:225-275`）；请求正文还受 Docker Nginx 全局 32 MiB 限制，因此理论允许的 4×6 MiB base64 JSON 可能在进入后端前就被 413。摘要在新增约 10 条后增量刷新，普通单次 summary 预算 120,000 字符，map 阶段每块 48,000 字符、并发 4（`backend/qa_arena.py:350-402,700-770`）。
+图片每张解码后最多 6 MiB、每轮最多 4 张（`backend/qa_arena.py:225-275`）；Docker Nginx 的通用 API 请求体上限为 40 MiB，可覆盖四张图片的 base64 与 JSON 开销。摘要在新增约 10 条后增量刷新，普通单次 summary 预算 120,000 字符，map 阶段每块 48,000 字符、并发 4（`backend/qa_arena.py:350-402,700-770`）。
 
 这是“原始消息可审计、prompt 上下文可压缩”的双层设计。需要特别注意：同一 session 的两个 chat 请求会同时读取同一 history，再各自写 user/assistant，后端没有 per-session 锁或 turn sequence；前端 pending 只能改善体验，不能保证并发顺序。regenerate 删除最后 assistant 也可能与正在进行的 chat 竞态。
 
@@ -1873,14 +1874,14 @@ SSE helper 对字符串、content block、reasoning block 都做容错；reasoni
 
 | 服务/项 | Docker 默认 | 作用与边界 | 证据 |
 |---|---|---|---|
-| frontend | 宿主 `9000 -> 80` | 浏览器唯一推荐入口；Nginx `/api` 代理 backend | `docker-compose.yml:55-74`、`frontend/nginx.conf:1-37` |
-| backend | 宿主 `9001 -> 8000` | 当前直接暴露，生产应收回内网 | `docker-compose.yml:34-53` |
-| Qdrant | `6333/6334` 直接发布 | REST/gRPC 无服务端 API key 配置，含原文和用户向量 | `docker-compose.yml:14-31` |
+| frontend | 宿主 `127.0.0.1:9000 -> 80` | 仅供宿主 TLS 入口；Nginx `/api` 代理 backend，不应把 9000 公网放行 | `docker-compose.yml`、`frontend/nginx.conf` |
+| backend | 仅 `expose: 8000` | 只在 proxy 网络供 frontend 访问，不发布宿主端口 | `docker-compose.yml` |
+| Qdrant | 固定版本、仅 `expose: 6333/6334` | internal data 网络内使用强 API key，不发布宿主端口 | `docker-compose.yml` |
 | Redis | 256 MB、allkeys-lru | 缓存可淘汰；backend 启动却依赖 healthy | `docker-compose.yml:2-13` |
 | backend memory | 2 GiB limit | local embedding/大批量 rebuild 可能 OOM；没有 CPU/PID limit | `docker-compose.yml:49-53` |
 | vector backend | `qdrant` | Compose 环境覆盖空值；不是裸启动默认行为 | `docker-compose.yml:34-42`、`backend/config.py:102-113` |
 | backend health | `GET /docs` | 只证明 HTTP/应用能返回 docs，不证明 DB、Redis、Qdrant、provider ready | `docker-compose.yml:44-48` |
-| frontend health | `curl /` | `nginx:alpine` 是否自带 curl 要在真实 build 中验证 | `docker-compose.yml:66-70` |
+| frontend health | BusyBox `wget /` | 静态首页探活；真实镜像命令和 backend 端到端连通仍需容器 smoke | `docker-compose.yml` |
 
 Qdrant 只有 `service_started` 依赖，没有健康检查；backend 设计为连不上时空上下文并委派 rebuild，而不是容器启动失败。这是有意的“应用可启动、功能降级”，但 readiness 与 liveness 目前没有分开。
 
@@ -1889,7 +1890,7 @@ Qdrant 只有 `service_started` 依赖，没有健康检查；backend 设计为�
 | 参数 | 当前值 | 语义 |
 |---|---:|---|
 | JWT 有效期 | 7 天 | 无服务端 session；改密码不会撤销已发 token（`backend/auth.py:131-137`） |
-| 密码最短 | 6 字符 | 注册/改密检查；没有 UTF-8 字节上限 |
+| 密码最短 | bootstrap 生产 12 字符；注册/改密 6 字符 | bcrypt 输入统一限制 72 UTF-8 bytes；存量 owner 不会被 bootstrap 环境变量自动重置 |
 | 登录失败 | 每 `(IP,email)` 15 分钟 5 次 | 只计失败，成功后清账户 bucket |
 | 登录失败 | 每 IP 15 分钟 30 次 | 防 credential spraying |
 | 注册尝试 | 每 IP 1 小时 5 次 | 成功与失败都计数 |
@@ -1952,12 +1953,12 @@ Qdrant 只有 `service_started` 依赖，没有健康检查；backend 设计为�
 
 | 输入 | 后端限制 | 额外 Docker 限制 |
 |---|---:|---:|
-| knowledge 单文件流式上传 | 200 MiB | Nginx `client_max_body_size=32m` 先拦截 |
-| knowledge 正文保存 | 8 MiB 字符 | 同上 |
-| QA 用户文本 | 送入 prompt 时 6,000 字符/消息 | endpoint 裸 dict 未对原始存储文本设 max；JSON 仍受 32 MiB |
-| QA 图片 | 每张解码后 6 MiB，最多 4 张 | base64/JSON 开销使 4 张理论上可能先被 413 |
-| assistant 请求 | 当前裸 dict，缺统一 max length | 32 MiB |
-| JD 文本 | 代码有最小长度，缺最大值 | 32 MiB |
+| knowledge 单文件/批次流式上传 | 200 MiB / 500 MiB | 仅上传路由使用 Nginx 512 MiB 专用 location，且 `proxy_request_buffering off` |
+| knowledge 正文保存 | 8 MiB 字符 | 通用 JSON 路由为 40 MiB |
+| QA 用户文本 | 请求模型与送入 prompt 均有限制 | JSON 路由为 40 MiB |
+| QA 图片 | 每张解码后 6 MiB，最多 4 张 | 40 MiB 覆盖四张图片的 base64 与 JSON 开销 |
+| assistant 请求 | 请求模型限制消息长度 | 40 MiB |
+| JD 文本 | 请求模型限制文本长度 | 40 MiB |
 | assistant stored response | 16,000 字符 | 只是持久化截断，prompt cap 另算 |
 
 来源：`backend/routers/knowledge.py:16-40,176-218`、`backend/qa_arena.py:225-275,350-404`、`backend/routers/assistant.py:10-24`、`backend/routers/job_prep.py:22-45`、`frontend/nginx.conf:20-28`。后端限制是业务层，Nginx 限制是传输层；修改其中一个不会自动修改另一个。
@@ -2004,7 +2005,7 @@ Qdrant 只有 `service_started` 依赖，没有健康检查；backend 设计为�
 | `RELEVANCE_THRESHOLD=0.5` | 在线 metrics 未使用，coverage 另有 floor | 不要用它解释 relevance 计算 |
 | `difficulty anchors` mmap 注释 | 实际 JSON + `np.stack` 进程缓存 | 无 anchor 文件时默认 no-op |
 | Redis optional | 代码可退 LRU，Compose backend 依赖 Redis healthy | 运行时可选与编排启动必需并存 |
-| Docker `qdrant:latest` | 未 pin digest/version | fresh build 不可完全复现 |
+| Docker 镜像可复现性 | Qdrant 已 pin 版本但未 pin digest；其他基础镜像仍有浮动 tag | fresh build 仍不能做到逐字节可复现 |
 | `strict=false` + ESLint JS-only | tsc/build 通过不代表 TS 静态门禁完整 | CI 需单独加入 TS/TSX ESLint 和 strict 迁移 |
 
 这些不是“看起来不整洁”的文档问题，而是未来改配置时最容易产生错误假设的地方。任何把 10 改成可配置值的改动，都必须同时更新策略槽位、prompt、SSE 进度、前端百分比、validator 目标、RAG eval prompt 和测试夹具。
@@ -2028,7 +2029,7 @@ Qdrant 只有 `service_started` 依赖，没有健康检查；backend 设计为�
 | Qdrant memory 隔离 | 检索/删除带 payload `user_id` filter | `backend/vector_store/qdrant_store.py:127-136,178-204` | 应用通过该 adapter 访问时有效；Qdrant 端口公开仍可绕过 |
 | knowledge 文件名/path | basename、扩展名、topic/path 校验 | `backend/routers/knowledge.py:25-57,176-218` | 防正常 API 路径穿越 |
 | knowledge 正文崩溃原子性 | 临时文件完整写入后 `os.replace` | `backend/utils/files.py:15-39`、`backend/routers/knowledge.py:117-172` | 防半文件；不防两个编辑者 last-write-wins |
-| knowledge 大文件读取 | 1 MiB 分块、单文件 200 MiB、正文 8 MiB 字符 | `backend/routers/knowledge.py:16-40,176-218` | 后端层；Nginx 可能更早以 32 MiB 拒绝 |
+| knowledge 大文件读取 | 1 MiB 分块、单文件 200 MiB、正文 8 MiB 字符 | `backend/routers/knowledge.py:16-40,176-218` | multipart 上传走 512 MiB 专用路由；正文 JSON 保存走 40 MiB 通用路由 |
 | QA 图片 | 最多 4 张、每张 base64 解码后 6 MiB，坏 data URL 拒绝 | `backend/qa_arena.py:225-275` | 单轮后端处理；总 HTTP body 仍受 Nginx 限制 |
 | 在线 RAG mixed dimensions | metrics 检测 chunk/query 维度，无法测量时返回 None | `backend/rag_metrics.py:106-141` | 只保护 metrics；检索去重路径仍可能混维报错 |
 | generation metric score | numeric string 转换、bool 拒绝、0～10 clamp | `backend/rag_metrics.py:51-73,186-218` | 只保护 RAG generation metrics，不覆盖所有业务评分 |
@@ -2041,19 +2042,21 @@ Qdrant 只有 `service_started` 依赖，没有健康检查；backend 设计为�
 | SSE idle 检测 | idle heartbeat 不 cancel 正在进行的 `__anext__`；退出时 cancel/aclose | `backend/utils/sse_helpers.py:110-160` | 保护连接和资源释放；不保证后台事务完成 |
 | 流式 failover 边界 | first chunk 前可换 channel；first chunk 后不拼另一模型答案 | `backend/llm_provider.py:298-327` | 保证输出不跨模型拼接；中途失败仍会留下部分输出 |
 | drill 原始答案恢复 | 评估前先持久化 answers；live miss 可从 session 重建 | `backend/routers/interview.py:281-316`、`backend/routers/interview.py:79-103` | 单请求失败可恢复；并发 end 仍可能重复副作用 |
-| Resume 重启恢复 | LangGraph 使用独立 SQLite checkpoint，thread_id=session_id | `backend/graphs/resume_interview.py:277-295`、`backend/routers/interview.py:83-103` | 进程重启可恢复；同 thread 并发无锁 |
+| Resume 重启恢复 | LangGraph 使用独立 SQLite checkpoint，thread_id=session_id | `backend/graphs/resume_interview.py:277-295`、`backend/routers/interview.py` | 进程重启可恢复；同 thread 的 chat/end 在单实例内共用生命周期锁 |
 | 索引请求降级 | 缺索引/超时返回空上下文并调后台 rebuild | `backend/indexer.py:1096-1150` | 保持请求可用；不能保证本轮答案有知识依据 |
 | 索引单进程互斥 | cache 有 lock/TTL/LRU，同 user/topic build 有 lock | `backend/indexer.py:55-107,779-847` | 单进程有效；多 worker/副本不共享 |
 | profile 文件写事务 | per-user lock + 临时文件 replace | `backend/memory.py:149-205` | 同进程写入不互相覆盖；跨进程锁不成立 |
 | 最近上下文保留 | 按 token 预算丢最旧消息、最近消息保留 | `backend/context_assembler.py:221-307` | 普通窗口有效；超大 required/tail 可溢出 |
 
-### 23.2 只处理了一部分的边界
+### 23.2 初审时只处理了一部分的边界（历史快照）
+
+> 本表用于保留初审推理依据，其中多项已在后续修复中关闭；当前状态应对照文档 14 的修复映射和文档 15 的最终交付结论。
 
 | 边界 | 已处理部分 | 未覆盖部分/建议 | 证据 |
 |---|---|---|---|
-| auth 限流 | 滑窗、线程锁、账户和 IP 两级 bucket | 仅进程内；10,000 超限只删过期 key；直连 9001 可伪造 `X-Real-IP` | `backend/routers/auth.py:21-87`、`backend/rate_limit.py:15-62` |
+| auth 限流 | 滑窗、线程锁、账户/IP 两级有界 bucket；仅可信代理链可提供客户端 IP | 仍是进程内预算，多 worker/副本会各自计数；更换宿主入口或 subnet 后必须复核 `TRUSTED_PROXY_CIDRS` | `backend/routers/auth.py`、`backend/rate_limit.py`、`docker-compose.yml` |
 | JWT 有效性 | 验签、exp、sub 格式 | dependency 不查用户存在/token version；删号/迁移后的旧 JWT 可继续命中部分 API | `backend/auth.py:140-160` |
-| 请求体限制 | 后端各功能有单项限制 | Nginx 统一 32 MiB 与 knowledge 200 MiB、QA 4×6 MiB 契约冲突 | `frontend/nginx.conf:20-28`、`backend/routers/knowledge.py:16-22`、`backend/qa_arena.py:225-275` |
+| 请求体限制 | 后端各功能有单项限制；Nginx 为 Knowledge 上传精确放行 512 MiB，其他 API 为 40 MiB | 默认已无 backend 直连端口；未来新增上传路由或重新暴露 backend 时仍需同步维护代理层限制 | `frontend/nginx.conf`、`backend/routers/knowledge.py`、`backend/qa_arena.py` |
 | interview 幂等意图 | `already_scored`、`synced_at` 防顺序重放 | SELECT/check 与写 marker 非原子；需要 DB claim/status/version | `backend/routers/interview.py:281-316,429-468,660-723` |
 | 断线后的持久化 | 关键写入部分用 `asyncio.shield` | shield 只抗协程取消，不抗进程崩溃；`to_thread` 也不能强停 | `backend/routers/interview.py:429-468,516-545,600-640` |
 | drill/JD progress | live 同时落 SQLite，重启可重建 | progress 无 revision/CAS，旧 POST 后到可覆盖新值 | `backend/routers/profile.py:337-386`、`backend/storage/sessions.py:78-109` |
@@ -2068,13 +2071,15 @@ Qdrant 只有 `service_started` 依赖，没有健康检查；backend 设计为�
 | ContextBudget | 最小 channel window、最大 output reserve、optional 截断 | min 4,000/required/keep_last 可越预算；工具调用结构未完整计 token | `backend/context_assembler.py:96-140,221-307` |
 | embedding 缓存 | Redis TTL 和进程 LRU | key 未统一包含 model/version/dimension；切模型可能混维 | `backend/redis_cache.py:113-287`、`backend/graph.py:84-130` |
 | 时间处理 | JWT/部分 QA 使用 UTC-aware | profile/SR/live/session 混用 naive local 与 SQLite UTC，Docker/本地会偏移 | `backend/auth.py:131-137`、`backend/memory.py:184-188`、`backend/storage/live_sessions.py:8-43` |
-| Resume 阶段终止 | 每阶段规则 + 硬上限 10 | 不防同 session 并发回答；checkpoint 不是串行锁 | `backend/graphs/resume_interview.py:214-295` |
-| QA 上下文压缩 | 20 条后摘要，保留最近 10，增量刷新 | 同 session 并发 turn 会基于同一旧 history 生成，摘要 cursor 也可竞态 | `backend/qa_arena.py:400-480,650-695` |
+| Resume 阶段终止 | 每阶段规则 + 硬上限 10；chat/end 共用 session 生命周期锁 | 进程内锁不跨 worker/副本 | `backend/graphs/resume_interview.py`、`backend/routers/interview.py` |
+| QA 上下文压缩 | 20 条后摘要，保留最近 10，增量刷新；同 session turn 串行化 | 进程内锁不跨 worker/副本 | `backend/qa_arena.py` |
 | Qdrant rebuild | 有 force rebuild、manifest 和 task status | delete collection 后重建，中断可留下 partial；应 shadow+alias swap | `backend/indexer.py:564-602` |
 | Redis 可用性 | 运行时异常退内存 LRU | Compose 启动强依赖 Redis healthy；“可选”只适用于启动后的故障 | `backend/redis_cache.py:113-287`、`docker-compose.yml:34-45` |
 | backup 文档 | 提到 data 目录和迁移脚本 | SQLite WAL/checkpoint、Qdrant snapshot、文件源缺一致性维护窗口 | `DEPLOYMENT.md:180-225`、`docker-compose.yml:2-74` |
 
-### 23.3 尚未处理或存在确定缺陷的边界
+### 23.3 初审时尚未处理或存在确定缺陷的边界（历史快照）
+
+> 下表中的可确定代码缺陷已在本轮逐项修复并加入回归测试，不再代表当前已知缺陷。仍有效的内容仅限真实 Docker/provider 验收、横向扩展和浏览器自动化等架构边界，详见文档 15 第 7～8 节。
 
 | 严重度 | 边界/复现场景 | 当前后果 | 建议与证据 |
 |---|---|---|---|
@@ -2099,13 +2104,13 @@ Qdrant 只有 `service_started` 依赖，没有健康检查；backend 设计为�
 | 中 | ContextBudget 极小窗口 | `max(4000, ...)` 可直接超过真实剩余窗口 | budget 上限不得超过 `window-reserve-margin`，required 设置硬 cap；`backend/context_assembler.py:136-140,221-307` |
 | 中 | Graph cache 不含 embedding model/version | 切模型复用旧向量或混维；节点多时 O(N²) | key 加 model/schema，切换清 cache，限制节点/ANN 建边；`backend/graph.py:84-176` |
 | 低 | LearningHeatmap 用 UTC ISO 截日 | Asia/Shanghai 本地日期可能偏前一天 | 本地年月日格式化；`frontend/src/components/charts/LearningHeatmap.tsx:26-65` |
-| 低 | 前端 TS lint 未覆盖 | lint 命令成功但 TS/TSX 缺规则保护 | ESLint 配置纳入 TS parser/files；`frontend/eslint.config.js:7-28` |
+| 已修复 | 前端 TS lint 覆盖 | TS/TSX、React Hooks 与业务源码已纳入规则 | 保持 lint 为 CI gate；逐步收紧 TypeScript strict |
 
 ### 23.4 边界整改优先顺序
 
-1. **先修数据重复和跨租户/公网暴露风险**：并发 end/sync、QA/Resume session 锁、Settings/Knowledge 竞态、Qdrant/Backend 端口、默认 owner 和 TLS。
-2. **再修可确定的输入崩溃与错误契约**：bcrypt 72 bytes、Assistant 返回键、pagination、JD/profile strict schema。
-3. **随后提升作业和索引的一致性**：持久队列、原子 claim、shadow collection、任务恢复、跨存储备份演练。
-4. **最后校准指标与配置**：统一 10 题配置、固定集置信区间、mastery clamp、cache model version、TS lint/strict。
+1. **部署验收**：在真实 Docker daemon 上执行镜像 build、健康检查、Nginx SSE、Qdrant 鉴权和备份恢复演练。
+2. **横向扩展**：将进程内任务队列、live session、索引锁和轮询状态迁移到共享协调/持久队列后，再增加 workers 或 replicas。
+3. **前端自动化**：为 RAG 轮询恢复、Knowledge 快速切换、Channel 保存和会话重复提交补 component/Playwright 测试。
+4. **长期质量**：逐模块启用 TypeScript strict，扩展真实 Qdrant/provider 集成测试，并持续校准评测统计边界。
 
 边界处理的验收标准不应只是“接口不 500”。至少要同时验证：响应状态正确、权威数据未被旧请求覆盖、重复请求不重复副作用、进程重启后状态可解释、Docker 代理层与后端限制一致、指标在失败样本下不会静默变好。

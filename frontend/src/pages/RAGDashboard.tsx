@@ -1,5 +1,6 @@
-import { Fragment, useState, useEffect, useMemo, useRef } from "react";
+import { Fragment, useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../contexts/AuthContext";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, RadarChart, PolarGrid, PolarAngleAxis,
@@ -12,6 +13,7 @@ import {
   getRagEvalStatus,
   getRagEvalRun,
   listRagEvalRuns,
+  RagEvalHttpError,
   type RagEvalKind,
   type RagRetrievalMode,
   type RagEvalRun,
@@ -182,14 +184,236 @@ function evalMetricValue(summary: RagEvalSummary, key: keyof RagEvalSummary): nu
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-const ACTIVE_RAG_EVAL_KEY = "sparkoffer.active-rag-eval";
+const ACTIVE_RAG_EVAL_KEY_PREFIX = "sparkoffer.active-rag-eval";
+const EVAL_POLL_INITIAL_DELAY_MS = 1500;
+const EVAL_POLL_MAX_DELAY_MS = 15000;
+const EVAL_POLL_MAX_CONSECUTIVE_FAILURES = 5;
+
+interface RagEvalRequestSnapshot {
+  topic: string;
+  eval_kind: RagEvalKind;
+  retrieval_mode: RagRetrievalMode;
+  judge_mode: "standard" | "full";
+  n_questions: number;
+}
+
+interface ActiveRagEval extends RagEvalRequestSnapshot {
+  user_id: string;
+  job_id: string;
+  state?: "active";
+  owner_token?: string;
+}
+
+interface PendingRagEval extends RagEvalRequestSnapshot {
+  user_id: string;
+  state: "starting";
+  owner_token: string;
+  created_at: number;
+}
+
+interface RagEvalStorageScope {
+  userId: string;
+  key: string;
+}
+
+/** Keep local evaluation state private to an authenticated account. */
+function createRagEvalStorageScope(userId: string | null | undefined): RagEvalStorageScope | null {
+  if (typeof userId !== "string" || !userId.trim()) return null;
+  let encodedUserId: string;
+  try {
+    encodedUserId = encodeURIComponent(userId);
+  } catch {
+    return null;
+  }
+  return {
+    userId,
+    key: `${ACTIVE_RAG_EVAL_KEY_PREFIX}:${encodedUserId}`,
+  };
+}
+
+function isSameRagEvalStorageScope(
+  current: RagEvalStorageScope | null,
+  expected: RagEvalStorageScope,
+): boolean {
+  return current?.userId === expected.userId && current.key === expected.key;
+}
+
+function parseRagEvalSnapshot(record: Record<string, unknown>): RagEvalRequestSnapshot | null {
+  if (typeof record.topic !== "string" || !record.topic.trim()) return null;
+  const evalKind = record.eval_kind === "synthetic_e2e" ? "synthetic_e2e" : "frozen_retrieval";
+  const retrievalMode = record.retrieval_mode === "atomic_dense" ? "atomic_dense" : "production_replay";
+  const judgeMode = record.judge_mode === "full" ? "full" : "standard";
+  const nQuestions = typeof record.n_questions === "number" && Number.isInteger(record.n_questions)
+    && record.n_questions >= 1 && record.n_questions <= 50
+    ? record.n_questions
+    : 20;
+  return {
+    topic: record.topic.trim(),
+    eval_kind: evalKind,
+    retrieval_mode: retrievalMode,
+    judge_mode: judgeMode,
+    n_questions: nQuestions,
+  };
+}
+
+function parseActiveRagEval(raw: string, expectedUserId: string): ActiveRagEval | null {
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== "object") return null;
+    const record = value as Record<string, unknown>;
+    if (record.user_id !== expectedUserId) return null;
+    if (
+      typeof record.job_id !== "string"
+      || !record.job_id.trim()
+      || record.job_id.length > 128
+    ) return null;
+    const snapshot = parseRagEvalSnapshot(record);
+    if (!snapshot) return null;
+    return {
+      ...snapshot,
+      user_id: expectedUserId,
+      job_id: record.job_id.trim(),
+      state: "active",
+      owner_token: typeof record.owner_token === "string" ? record.owner_token : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parsePendingRagEval(raw: string, expectedUserId: string): PendingRagEval | null {
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== "object") return null;
+    const record = value as Record<string, unknown>;
+    if (record.user_id !== expectedUserId) return null;
+    if (
+      record.state !== "starting"
+      || typeof record.owner_token !== "string"
+      || !record.owner_token
+    ) return null;
+    const snapshot = parseRagEvalSnapshot(record);
+    if (!snapshot) return null;
+    return {
+      ...snapshot,
+      user_id: expectedUserId,
+      state: "starting",
+      owner_token: record.owner_token,
+      created_at: typeof record.created_at === "number" ? record.created_at : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function createEvalOwnerToken(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+function persistPendingRagEval(scope: RagEvalStorageScope, pending: PendingRagEval): boolean {
+  if (pending.user_id !== scope.userId) return false;
+  try {
+    localStorage.setItem(scope.key, JSON.stringify(pending));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function promotePendingRagEval(
+  scope: RagEvalStorageScope,
+  ownerToken: string,
+  jobId: string,
+  snapshot: RagEvalRequestSnapshot,
+  pendingWasPersisted: boolean,
+): boolean {
+  const active: ActiveRagEval = {
+    ...snapshot,
+    user_id: scope.userId,
+    job_id: jobId,
+    state: "active",
+    owner_token: ownerToken,
+  };
+  if (!pendingWasPersisted) {
+    try {
+      localStorage.setItem(scope.key, JSON.stringify(active));
+    } catch {
+      // Current-tab polling still works when storage is unavailable.
+    }
+    return true;
+  }
+  try {
+    const raw = localStorage.getItem(scope.key);
+    if (!raw) return false;
+    const pending = parsePendingRagEval(raw, scope.userId);
+    if (pending?.owner_token === ownerToken) {
+      try {
+        localStorage.setItem(scope.key, JSON.stringify(active));
+      } catch {
+        // Keep ownership in the current tab even if the durable promotion failed.
+      }
+      return true;
+    }
+    const existing = parseActiveRagEval(raw, scope.userId);
+    return existing?.owner_token === ownerToken && existing.job_id === jobId;
+  } catch {
+    return true;
+  }
+}
+
+function clearPendingRagEval(scope: RagEvalStorageScope, ownerToken: string): void {
+  try {
+    const raw = localStorage.getItem(scope.key);
+    if (!raw) return;
+    if (parsePendingRagEval(raw, scope.userId)?.owner_token === ownerToken) {
+      localStorage.removeItem(scope.key);
+    }
+  } catch {
+    // Storage can be unavailable in private/restricted browser contexts.
+  }
+}
+
+function getActiveRagEvalForOwner(scope: RagEvalStorageScope, ownerToken: string): ActiveRagEval | null {
+  try {
+    const raw = localStorage.getItem(scope.key);
+    if (!raw) return null;
+    const active = parseActiveRagEval(raw, scope.userId);
+    return active?.owner_token === ownerToken ? active : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearActiveRagEval(scope: RagEvalStorageScope, expectedJobId?: string): void {
+  try {
+    if (expectedJobId) {
+      const raw = localStorage.getItem(scope.key);
+      if (!raw) return;
+      const active = parseActiveRagEval(raw, scope.userId);
+      if (!active || active.job_id !== expectedJobId) return;
+    }
+    localStorage.removeItem(scope.key);
+  } catch {
+    // Storage can be unavailable in private/restricted browser contexts.
+  }
+}
 
 export default function RAGDashboard() {
   const navigate = useNavigate();
+  const { user, loading: authLoading } = useAuth();
+  const evalStorageScope = useMemo(
+    () => authLoading ? null : createRagEvalStorageScope(user?.id),
+    [authLoading, user?.id],
+  );
   const [records, setRecords] = useState<RAGMetricsRecord[]>([]);
   const [topics, setTopics] = useState<Record<string, any>>({});
   const [selectedTopic, setSelectedTopic] = useState<string>("");
   const [loading, setLoading] = useState(true);
+  const [dataError, setDataError] = useState<string | null>(null);
 
   // Offline benchmark dimensions. Frozen + production replay is the default
   // regression view; synthetic judging is an explicit, costlier diagnostic.
@@ -200,136 +424,461 @@ export default function RAGDashboard() {
   const [evalStatus, setEvalStatus] = useState<RagEvalStatus | null>(null);
   const [evalRunning, setEvalRunning] = useState(false);
   const [evalError, setEvalError] = useState<string | null>(null);
+  const [evalRecoveryJobId, setEvalRecoveryJobId] = useState<string | null>(null);
   const [evalRuns, setEvalRuns] = useState<RagEvalRun[]>([]);
   const [evalHistoryLoading, setEvalHistoryLoading] = useState(false);
   const [evalHistoryError, setEvalHistoryError] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const pollGenerationRef = useRef(0);
+  const dataGenerationRef = useRef(0);
+  const evalHistoryGenerationRef = useRef(0);
+  const selectedTopicRef = useRef(selectedTopic);
+  const mountedRef = useRef(false);
+  const evalStartRequestRef = useRef<string | null>(null);
+  const pendingEvalRef = useRef<PendingRagEval | null>(null);
+  const pendingEvalPersistedRef = useRef(false);
+  const evalStorageScopeRef = useRef<RagEvalStorageScope | null>(evalStorageScope);
+  const evalRecoveryScopeRef = useRef<RagEvalStorageScope | null>(null);
 
-  const loadData = async () => {
+  useLayoutEffect(() => {
+    evalStorageScopeRef.current = evalStorageScope;
+  }, [evalStorageScope]);
+
+  const selectTopic = useCallback((topic: string) => {
+    selectedTopicRef.current = topic;
+    setSelectedTopic(topic);
+  }, []);
+
+  const loadData = useCallback(async () => {
+    const generation = ++dataGenerationRef.current;
     setLoading(true);
-    try {
-      const [metrics, topicData] = await Promise.all([
-        getRAGMetrics({ limit: 200 }),
-        getTopics(),
-      ]);
-      setRecords(metrics);
-      setTopics(topicData);
-    } catch (e) {
-      console.error("Failed to load RAG metrics:", e);
-    } finally {
-      setLoading(false);
-    }
-  };
+    setDataError(null);
+    const [metricsResult, topicsResult] = await Promise.allSettled([
+      getRAGMetrics({ limit: 200 }),
+      getTopics(),
+    ]);
+    if (generation !== dataGenerationRef.current) return;
 
-  const loadEvalHistory = async (topic?: string) => {
+    const errors: string[] = [];
+    if (metricsResult.status === "fulfilled") {
+      setRecords(metricsResult.value);
+    } else {
+      const message = metricsResult.reason instanceof Error ? metricsResult.reason.message : "未知错误";
+      errors.push(`在线指标加载失败：${message}`);
+    }
+    if (topicsResult.status === "fulfilled") {
+      setTopics(topicsResult.value);
+    } else {
+      const message = topicsResult.reason instanceof Error ? topicsResult.reason.message : "未知错误";
+      errors.push(`Topic 加载失败：${message}`);
+    }
+    setDataError(errors.length > 0 ? errors.join("；") : null);
+    setLoading(false);
+  }, []);
+
+  const loadEvalHistory = useCallback(async (topic?: string) => {
+    const generation = ++evalHistoryGenerationRef.current;
     setEvalHistoryLoading(true);
     setEvalHistoryError(null);
     try {
-      setEvalRuns(await listRagEvalRuns(topic, 30));
+      const runs = await listRagEvalRuns(topic, 30);
+      if (generation === evalHistoryGenerationRef.current) setEvalRuns(runs);
     } catch (e: any) {
-      setEvalHistoryError(e?.message || "加载离线评测历史失败");
+      if (generation === evalHistoryGenerationRef.current) {
+        setEvalHistoryError(e?.message || "加载离线评测历史失败");
+      }
     } finally {
-      setEvalHistoryLoading(false);
+      if (generation === evalHistoryGenerationRef.current) setEvalHistoryLoading(false);
     }
-  };
+  }, []);
 
-  const refreshAll = async () => {
+  const refreshAll = useCallback(async () => {
     await Promise.all([loadData(), loadEvalHistory(selectedTopic || undefined)]);
-  };
+  }, [loadData, loadEvalHistory, selectedTopic]);
 
-  const stopEvalPolling = () => {
+  const stopEvalPolling = useCallback(() => {
     pollGenerationRef.current += 1;
-    if (pollRef.current) window.clearTimeout(pollRef.current);
+    if (pollRef.current !== null) window.clearTimeout(pollRef.current);
     pollRef.current = null;
-  };
+  }, []);
 
-  const pollEvalJob = (jobId: string, topic: string) => {
+  const pollEvalJob = useCallback((scope: RagEvalStorageScope, jobId: string) => {
+    if (!isSameRagEvalStorageScope(evalStorageScopeRef.current, scope)) return;
     stopEvalPolling();
     const generation = pollGenerationRef.current;
     setEvalRunning(true);
+    setEvalRecoveryJobId(null);
+    evalRecoveryScopeRef.current = null;
+    setEvalError(null);
+    let consecutiveFailures = 0;
 
     const poll = async () => {
-      if (generation !== pollGenerationRef.current) return;
+      if (
+        generation !== pollGenerationRef.current
+        || !isSameRagEvalStorageScope(evalStorageScopeRef.current, scope)
+      ) return;
       try {
         const status = await getRagEvalStatus(jobId);
-        if (generation !== pollGenerationRef.current) return;
+        if (
+          generation !== pollGenerationRef.current
+          || !isSameRagEvalStorageScope(evalStorageScopeRef.current, scope)
+        ) return;
+        consecutiveFailures = 0;
+        setEvalError(null);
         setEvalStatus(status);
         if (status.status === "completed" || status.status === "failed") {
           stopEvalPolling();
-          localStorage.removeItem(ACTIVE_RAG_EVAL_KEY);
+          clearActiveRagEval(scope, jobId);
           setEvalRunning(false);
+          setEvalRecoveryJobId(null);
           if (status.status === "failed") {
             setEvalError(status.error || "评测失败");
           } else {
-            void loadEvalHistory(topic || undefined);
+            void loadEvalHistory(selectedTopicRef.current || undefined);
           }
           return;
         }
-        pollRef.current = window.setTimeout(() => { void poll(); }, 1500);
+        pollRef.current = window.setTimeout(() => { void poll(); }, EVAL_POLL_INITIAL_DELAY_MS);
       } catch (error: any) {
-        if (generation !== pollGenerationRef.current) return;
-        stopEvalPolling();
-        localStorage.removeItem(ACTIVE_RAG_EVAL_KEY);
-        setEvalRunning(false);
-        setEvalError(error?.message || "查询进度失败");
+        if (
+          generation !== pollGenerationRef.current
+          || !isSameRagEvalStorageScope(evalStorageScopeRef.current, scope)
+        ) return;
+        const status = error instanceof RagEvalHttpError ? error.status : null;
+        const terminalClientError = status !== null
+          && status >= 400
+          && status < 500
+          && status !== 408
+          && status !== 429;
+        if (terminalClientError) {
+          if (status === 404) {
+            try {
+              const raw = localStorage.getItem(scope.key);
+              const active = raw ? parseActiveRagEval(raw, scope.userId) : null;
+              if (active?.job_id === jobId && active.owner_token) {
+                const pending: PendingRagEval = {
+                  user_id: scope.userId,
+                  topic: active.topic,
+                  eval_kind: active.eval_kind,
+                  retrieval_mode: active.retrieval_mode,
+                  judge_mode: active.judge_mode,
+                  n_questions: active.n_questions,
+                  state: "starting",
+                  owner_token: active.owner_token,
+                  created_at: Date.now(),
+                };
+                const persisted = persistPendingRagEval(scope, pending);
+                pendingEvalRef.current = pending;
+                pendingEvalPersistedRef.current = persisted;
+                stopEvalPolling();
+                setEvalRunning(false);
+                setEvalRecoveryJobId(null);
+                setEvalStatus(null);
+                setEvalError("评测执行租约已失效；再次点击运行评测将使用原请求安全恢复。");
+                return;
+              }
+            } catch {
+              // Fall through to the legacy terminal cleanup below.
+            }
+          }
+          stopEvalPolling();
+          clearActiveRagEval(scope, jobId);
+          setEvalRunning(false);
+          setEvalRecoveryJobId(null);
+          setEvalStatus(null);
+          setEvalError(
+            status === 404
+              ? "评测任务已不存在，可能因后端重启被清理，请重新运行。"
+              : (error?.message || "评测任务无法继续，请重新运行。"),
+          );
+          return;
+        }
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= EVAL_POLL_MAX_CONSECUTIVE_FAILURES) {
+          stopEvalPolling();
+          setEvalRunning(false);
+          evalRecoveryScopeRef.current = scope;
+          setEvalRecoveryJobId(jobId);
+          setEvalError(
+            `连续 ${consecutiveFailures} 次查询进度失败，已暂停自动重试。可重试进度或停止跟踪此任务：${error?.message || "网络错误"}`,
+          );
+          return;
+        }
+        const delay = Math.min(
+          EVAL_POLL_MAX_DELAY_MS,
+          EVAL_POLL_INITIAL_DELAY_MS * (2 ** Math.min(consecutiveFailures, 4)),
+        );
+        setEvalError("查询进度暂时失败，将在 " + Math.ceil(delay / 1000) + " 秒后重试：" + (error?.message || "网络错误"));
+        pollRef.current = window.setTimeout(() => { void poll(); }, delay);
       }
     };
     void poll();
-  };
+  }, [loadEvalHistory, stopEvalPolling]);
 
-  useEffect(() => { void loadData(); }, []);
-  useEffect(() => { void loadEvalHistory(selectedTopic || undefined); }, [selectedTopic]);
+  const retryEvalPolling = useCallback(() => {
+    if (
+      evalStorageScope
+      && evalRecoveryJobId
+      && isSameRagEvalStorageScope(evalRecoveryScopeRef.current, evalStorageScope)
+    ) {
+      pollEvalJob(evalStorageScope, evalRecoveryJobId);
+    }
+  }, [evalRecoveryJobId, evalStorageScope, pollEvalJob]);
 
-  useEffect(() => {
+  const abandonEvalPolling = useCallback(() => {
+    if (!evalStorageScope || !evalRecoveryJobId) return;
+    stopEvalPolling();
+    clearActiveRagEval(evalStorageScope, evalRecoveryJobId);
+    evalRecoveryScopeRef.current = null;
+    setEvalRecoveryJobId(null);
+    setEvalRunning(false);
+    setEvalStatus(null);
+    setEvalError(null);
+  }, [evalRecoveryJobId, evalStorageScope, stopEvalPolling]);
+
+  const startEvalRequest = useCallback(async (
+    scope: RagEvalStorageScope,
+    snapshot: RagEvalRequestSnapshot,
+    ownerToken: string,
+    requestToken: string,
+    requestGeneration: number,
+    pendingWasPersisted: boolean,
+  ) => {
     try {
-      const raw = localStorage.getItem(ACTIVE_RAG_EVAL_KEY);
-      if (!raw) return;
-      const active = JSON.parse(raw) as { job_id?: string; topic?: string };
-      if (!active.job_id || !active.topic) {
-        localStorage.removeItem(ACTIVE_RAG_EVAL_KEY);
+      const { job_id } = await startRagEval(
+        {
+          topic: snapshot.topic,
+          n_questions: snapshot.n_questions,
+          eval_kind: snapshot.eval_kind,
+          retrieval_mode: snapshot.retrieval_mode,
+          seed: 42,
+          ...(snapshot.eval_kind === "synthetic_e2e" ? { judge_mode: snapshot.judge_mode } : {}),
+        },
+        { idempotencyKey: ownerToken },
+      );
+      const ownsJob = promotePendingRagEval(
+        scope,
+        ownerToken,
+        job_id,
+        snapshot,
+        pendingWasPersisted,
+      );
+      const isCurrentRequest = mountedRef.current
+        && isSameRagEvalStorageScope(evalStorageScopeRef.current, scope)
+        && pollGenerationRef.current === requestGeneration
+        && evalStartRequestRef.current === requestToken;
+      if (isCurrentRequest) {
+        pendingEvalRef.current = null;
+        pendingEvalPersistedRef.current = false;
+      }
+      if (!ownsJob) {
+        if (isCurrentRequest) {
+          setEvalRunning(false);
+          setEvalError("评测启动结果已被另一个页面接管，请刷新查看当前任务。");
+        }
         return;
       }
-      setSelectedTopic(active.topic);
-      pollEvalJob(active.job_id, active.topic);
-    } catch {
-      localStorage.removeItem(ACTIVE_RAG_EVAL_KEY);
+      if (!isCurrentRequest) return;
+      pollEvalJob(scope, job_id);
+    } catch (error: any) {
+      const recovered = getActiveRagEvalForOwner(scope, ownerToken);
+      if (
+        recovered
+        && mountedRef.current
+        && isSameRagEvalStorageScope(evalStorageScopeRef.current, scope)
+        && pollGenerationRef.current === requestGeneration
+        && evalStartRequestRef.current === requestToken
+      ) {
+        pendingEvalRef.current = null;
+        pendingEvalPersistedRef.current = false;
+        pollEvalJob(scope, recovered.job_id);
+        return;
+      }
+      if (
+        mountedRef.current
+        && isSameRagEvalStorageScope(evalStorageScopeRef.current, scope)
+        && pollGenerationRef.current === requestGeneration
+        && evalStartRequestRef.current === requestToken
+      ) {
+        const status = error instanceof RagEvalHttpError ? error.status : null;
+        const terminalClientError = status !== null
+          && status >= 400
+          && status < 500
+          && status !== 408
+          && status !== 429;
+        if (terminalClientError) {
+          clearPendingRagEval(scope, ownerToken);
+          pendingEvalRef.current = null;
+          pendingEvalPersistedRef.current = false;
+        }
+        setEvalRunning(false);
+        const message = error?.message || "启动评测失败";
+        setEvalError(terminalClientError
+          ? message
+          : `${message}；再次点击运行评测将安全重试同一任务。`);
+      }
+    } finally {
+      if (
+        isSameRagEvalStorageScope(evalStorageScopeRef.current, scope)
+        && evalStartRequestRef.current === requestToken
+      ) {
+        evalStartRequestRef.current = null;
+      }
     }
-    return () => stopEvalPolling();
-    // Restore exactly once; polling reads all subsequent state from the API.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [pollEvalJob]);
 
-  // Stop polling on unmount.
-  useEffect(() => () => stopEvalPolling(), []);
+  useEffect(() => { void loadData(); }, [loadData]);
+  useEffect(() => { void loadEvalHistory(selectedTopic || undefined); }, [loadEvalHistory, selectedTopic]);
 
-  const runEval = async () => {
-    if (!selectedTopic) {
+  useEffect(() => {
+    // Authentication may change without a full reload. Invalidate all callbacks
+    // from the previous account before looking at the new account's namespace.
+    evalStartRequestRef.current = null;
+    pendingEvalRef.current = null;
+    pendingEvalPersistedRef.current = false;
+    evalRecoveryScopeRef.current = null;
+    stopEvalPolling();
+    setEvalRunning(false);
+    setEvalRecoveryJobId(null);
+    setEvalStatus(null);
+    setEvalError(null);
+    selectedTopicRef.current = "";
+    setSelectedTopic("");
+
+    if (authLoading || !evalStorageScope) return;
+
+    try {
+      const raw = localStorage.getItem(evalStorageScope.key);
+      if (!raw) return;
+      const pending = parsePendingRagEval(raw, evalStorageScope.userId);
+      if (pending) {
+        pendingEvalRef.current = pending;
+        pendingEvalPersistedRef.current = true;
+        selectedTopicRef.current = pending.topic;
+        setSelectedTopic(pending.topic);
+        setEvalKind(pending.eval_kind);
+        setRetrievalMode(pending.retrieval_mode);
+        setJudgeMode(pending.judge_mode);
+        setNQuestions(pending.n_questions);
+        const requestGeneration = pollGenerationRef.current;
+        const requestToken = createEvalOwnerToken();
+        evalStartRequestRef.current = requestToken;
+        setEvalRunning(true);
+        void startEvalRequest(
+          evalStorageScope,
+          pending,
+          pending.owner_token,
+          requestToken,
+          requestGeneration,
+          true,
+        );
+        return;
+      }
+      const active = parseActiveRagEval(raw, evalStorageScope.userId);
+      if (!active) {
+        clearActiveRagEval(evalStorageScope);
+        return;
+      }
+      selectedTopicRef.current = active.topic;
+      setSelectedTopic(active.topic);
+      setEvalKind(active.eval_kind);
+      setRetrievalMode(active.retrieval_mode);
+      setJudgeMode(active.judge_mode);
+      setNQuestions(active.n_questions);
+      pollEvalJob(evalStorageScope, active.job_id);
+    } catch {
+      clearActiveRagEval(evalStorageScope);
+    }
+
+    return () => {
+      evalStartRequestRef.current = null;
+      pendingEvalRef.current = null;
+      pendingEvalPersistedRef.current = false;
+      stopEvalPolling();
+    };
+  }, [authLoading, evalStorageScope, pollEvalJob, startEvalRequest, stopEvalPolling]);
+
+  // Stop polling on unmount and prevent a pending start request from creating
+  // a new timer after this component has already gone away.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      evalStartRequestRef.current = null;
+      dataGenerationRef.current += 1;
+      evalHistoryGenerationRef.current += 1;
+      stopEvalPolling();
+    };
+  }, [stopEvalPolling]);
+
+  const runEval = () => {
+    if (evalStartRequestRef.current || evalRunning || evalRecoveryJobId) return;
+    if (!evalStorageScope) {
+      setEvalError("当前认证用户尚未就绪，请稍后重试。");
+      return;
+    }
+    let pending = pendingEvalRef.current;
+    let pendingWasPersisted = pendingEvalPersistedRef.current;
+    if (pending?.user_id !== evalStorageScope.userId) {
+      pending = null;
+      pendingEvalRef.current = null;
+      pendingEvalPersistedRef.current = false;
+      pendingWasPersisted = false;
+    }
+    if (!pending) {
+      try {
+        const raw = localStorage.getItem(evalStorageScope.key);
+        pending = raw ? parsePendingRagEval(raw, evalStorageScope.userId) : null;
+        pendingWasPersisted = pending !== null;
+      } catch {
+        pending = null;
+      }
+    }
+    if (!pending && !selectedTopic) {
       setEvalError("请先在上方选择一个具体 Topic（非\"全部\"）再运行评测。");
       return;
     }
     stopEvalPolling();
+    const requestGeneration = pollGenerationRef.current;
+    const requestSnapshot: RagEvalRequestSnapshot = pending || {
+      topic: selectedTopic,
+      eval_kind: evalKind,
+      retrieval_mode: retrievalMode,
+      judge_mode: judgeMode,
+      n_questions: nQuestions,
+    };
+    const ownerToken = pending?.owner_token || createEvalOwnerToken();
+    const requestToken = createEvalOwnerToken();
+    if (!pending) {
+      pending = {
+        ...requestSnapshot,
+        user_id: evalStorageScope.userId,
+        state: "starting",
+        owner_token: ownerToken,
+        created_at: Date.now(),
+      };
+      pendingWasPersisted = persistPendingRagEval(evalStorageScope, pending);
+    }
+    pendingEvalRef.current = pending;
+    pendingEvalPersistedRef.current = pendingWasPersisted;
+    if (pending.topic !== selectedTopic) selectTopic(pending.topic);
+    if (pending.eval_kind !== evalKind) setEvalKind(pending.eval_kind);
+    if (pending.retrieval_mode !== retrievalMode) setRetrievalMode(pending.retrieval_mode);
+    if (pending.judge_mode !== judgeMode) setJudgeMode(pending.judge_mode);
+    if (pending.n_questions !== nQuestions) setNQuestions(pending.n_questions);
+    evalStartRequestRef.current = requestToken;
+    setEvalRecoveryJobId(null);
     setEvalError(null);
     setEvalStatus(null);
     setEvalRunning(true);
-    try {
-      const { job_id } = await startRagEval({
-        topic: selectedTopic,
-        n_questions: nQuestions,
-        eval_kind: evalKind,
-        retrieval_mode: retrievalMode,
-        seed: 42,
-        ...(evalKind === "synthetic_e2e" ? { judge_mode: judgeMode } : {}),
-      });
-      localStorage.setItem(ACTIVE_RAG_EVAL_KEY, JSON.stringify({
-        job_id,
-        topic: selectedTopic,
-      }));
-      pollEvalJob(job_id, selectedTopic);
-    } catch (e: any) {
-      setEvalRunning(false);
-      setEvalError(e?.message || "启动评测失败");
-    }
+    void startEvalRequest(
+      evalStorageScope,
+      requestSnapshot,
+      ownerToken,
+      requestToken,
+      requestGeneration,
+      pendingWasPersisted,
+    );
   };
 
   const filtered = useMemo(() => {
@@ -462,12 +1011,24 @@ export default function RAGDashboard() {
         </Button>
       </div>
 
+      {dataError && (
+        <div className="flex items-start justify-between gap-3 rounded-md border border-border px-3 py-2 text-xs" style={{ color: "var(--sig-danger)", background: "color-mix(in srgb, var(--sig-danger) 8%, transparent)" }}>
+          <div className="flex items-start gap-2 min-w-0">
+            <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+            <span className="break-words">{dataError}</span>
+          </div>
+          <Button variant="outline" size="sm" className="h-7 gap-1.5 shrink-0" onClick={() => { void loadData(); }}>
+            <RefreshCw size={12} /> 重试
+          </Button>
+        </div>
+      )}
+
       {/* Filter */}
       <div className="flex items-center gap-2 flex-wrap">
         <Badge
           variant={selectedTopic === "" ? "default" : "outline"}
           className="cursor-pointer hover:-translate-y-px hover:brightness-110"
-          onClick={() => setSelectedTopic("")}
+          onClick={() => selectTopic("")}
         >
           全部
         </Badge>
@@ -476,7 +1037,7 @@ export default function RAGDashboard() {
             key={k}
             variant={selectedTopic === k ? "default" : "outline"}
             className="cursor-pointer hover:-translate-y-px hover:brightness-110"
-            onClick={() => setSelectedTopic(k)}
+            onClick={() => selectTopic(k)}
           >
             {topics[k]?.name || k}
           </Badge>
@@ -589,9 +1150,13 @@ export default function RAGDashboard() {
             <Button
               size="sm"
               onClick={runEval}
-              disabled={evalRunning || !selectedTopic}
+              disabled={!evalStorageScope || evalRunning || !!evalRecoveryJobId || !selectedTopic}
               className="gap-1.5"
-              title={!selectedTopic ? "请先选择一个具体 Topic" : "运行 RAG 评测"}
+              title={!evalStorageScope
+                ? "当前认证用户尚未就绪"
+                : evalRecoveryJobId
+                ? "请先重试进度或停止跟踪当前任务"
+                : !selectedTopic ? "请先选择一个具体 Topic" : "运行 RAG 评测"}
             >
               {evalRunning ? <Loader2 size={14} className="animate-spin" /> : <FlaskConical size={14} />}
               运行评测
@@ -626,7 +1191,19 @@ export default function RAGDashboard() {
           {evalError && (
             <div className="flex items-start gap-2 text-xs rounded-md px-3 py-2" style={{ color: "var(--sig-danger)", background: "color-mix(in srgb, var(--sig-danger) 10%, transparent)", border: "1px solid color-mix(in srgb, var(--sig-danger) 20%, transparent)" }}>
               <AlertTriangle size={14} className="shrink-0 mt-0.5" />
-              <span>{evalError}</span>
+              <div className="flex-1 min-w-0 space-y-2">
+                <div>{evalError}</div>
+                {evalRecoveryJobId && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Button variant="outline" size="sm" className="h-7 gap-1.5" onClick={retryEvalPolling}>
+                      <RefreshCw size={12} /> 重试进度
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-7" onClick={abandonEvalPolling}>
+                      停止跟踪
+                    </Button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -856,6 +1433,10 @@ function RagEvalHistory({
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const detailGenerationRef = useRef(0);
+
+  useEffect(() => () => {
+    detailGenerationRef.current += 1;
+  }, []);
 
   const toggleRunDetail = async (runId: number) => {
     const generation = ++detailGenerationRef.current;

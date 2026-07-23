@@ -22,6 +22,7 @@ export async function testLLM(params: any): Promise<any> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
   });
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -31,6 +32,7 @@ export async function testEmbedding(params: any): Promise<any> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
   });
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
@@ -50,7 +52,7 @@ export async function updateProfile(data: any): Promise<any> {
   return res.json();
 }
 
-export async function changePassword(data: { old_password: string; new_password: string }): Promise<any> {
+export async function changePassword(data: { current_password: string; new_password: string }): Promise<any> {
   const res = await authFetch(`${API_BASE}/auth/password`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -78,12 +80,22 @@ export async function saveChannels(config: any): Promise<any> {
   return res.json();
 }
 
+export async function saveChannelSection(section: string, channels: any[]): Promise<any> {
+  const res = await authFetch(`${API_BASE}/settings/ai/channels/${section}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(channels),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
 export async function testChannel(section: string, channel: any): Promise<any> {
   const res = await authFetch(`${API_BASE}/settings/ai/channels/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ section, channel }),
   });
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 

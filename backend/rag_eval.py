@@ -81,7 +81,19 @@ def _support_weight(item: dict) -> float:
     if isinstance(level, str) and level.lower() in _SUPPORT_WEIGHTS:
         return _SUPPORT_WEIGHTS[level.lower()]
     # Legacy fallback: bool supported → full/none.
-    return 1.0 if bool(item.get("supported")) else 0.0
+    supported = item.get("supported")
+    if isinstance(supported, str):
+        normalized = supported.strip().lower()
+        if normalized in {"true", "1", "yes", "supported", "full"}:
+            return 1.0
+        if normalized in {"false", "0", "no", "unsupported", "none", ""}:
+            return 0.0
+        return 0.0
+    if supported is True:
+        return 1.0
+    if isinstance(supported, (int, float)) and not isinstance(supported, bool):
+        return 1.0 if supported != 0 else 0.0
+    return 0.0
 
 
 # ── data shapes ──
@@ -757,7 +769,11 @@ async def run_eval(
     """Run the full eval, mutating `job` in place for progress polling. On success
     persists a rag_eval_runs row. One outer guard flips status→failed (no broad
     per-step try/except — individual question failures already degrade gracefully)."""
-    from backend.storage.rag_eval_store import save_failed_rag_eval_run, save_rag_eval_run
+    from backend.storage.rag_eval_store import (
+        RagEvalPersistenceFenceError,
+        save_failed_rag_eval_run,
+        save_rag_eval_run,
+    )
 
     sem = asyncio.Semaphore(_LLM_CONCURRENCY)
     embed_sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
@@ -784,7 +800,10 @@ async def run_eval(
                     "done": job.get("done", 0),
                     "total": job.get("total", 0),
                 },
+                durable_claim=job.get("_durable_claim"),
             )
+        except RagEvalPersistenceFenceError:
+            raise
         except Exception:
             logger.exception("failed to persist failed synthetic RAG eval")
 
@@ -967,6 +986,7 @@ async def run_eval(
             seed=seed,
             status="completed", error="", detail=detail,
             manifest=manifest,
+            durable_claim=job.get("_durable_claim"),
         )
 
         job["summary"] = summary.to_dict()
@@ -975,6 +995,8 @@ async def run_eval(
         job["status"] = "completed"
         job["phase"] = "completed"
         job["updated_at"] = time.time()
+    except RagEvalPersistenceFenceError:
+        raise
     except Exception as e:
         logger.exception("rag_eval run failed")
         job["status"] = "failed"

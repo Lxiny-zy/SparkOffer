@@ -22,7 +22,7 @@ from typing import Iterable
 
 import numpy as np
 
-from backend.indexer import safe_retrieve_topic_context, safe_retrieve_topic_context_with_scores, ChunkWithMeta
+from backend.indexer import safe_retrieve_topic_context_with_scores, ChunkWithMeta
 from backend.redis_cache import get_cache
 from backend.vector_store.base import _cosine_similarity
 

@@ -3,16 +3,17 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 from typing import AsyncGenerator
+import weakref
 
-from backend.config import settings
 from backend.llm_provider import get_langchain_llm
 from backend.context_assembler import resolve_input_budget, count_tokens, pack_messages
 from backend.memory import get_profile, get_profile_summary, _load_profile, profile_transaction, ProfileTransactionAbort
-from backend.storage.sessions import list_sessions, list_distinct_topics, get_session, list_sessions_by_topic
-from backend.storage.favorites import list_favorites, get_favorite_tags
-from backend.storage.algorithm import list_algorithm_cards, get_algorithm_tags
+from backend.storage.sessions import list_sessions, list_distinct_topics, get_session
+from backend.storage.favorites import list_favorites
+from backend.storage.algorithm import list_algorithm_cards
 from backend.storage.assistant_chats import save_message
 from backend.spaced_repetition import get_due_reviews
 from backend.vector_memory import search_memory
@@ -20,6 +21,24 @@ from backend.indexer import load_topics, retrieve_topic_context
 from backend.utils.sse_helpers import chunk_text, chunk_reasoning, iter_chunks_with_idle
 
 logger = logging.getLogger("uvicorn")
+
+
+# Assistant history is scoped to the user rather than a caller-provided session.
+# Keep one complete turn at a time so two browser tabs cannot both read the same
+# history and then append replies in the wrong order.
+_assistant_turn_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+    weakref.WeakValueDictionary()
+)
+_assistant_turn_locks_guard = threading.Lock()
+
+
+def _get_assistant_turn_lock(user_id: str) -> asyncio.Lock:
+    with _assistant_turn_locks_guard:
+        lock = _assistant_turn_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _assistant_turn_locks[user_id] = lock
+        return lock
 
 IDLE_HEARTBEAT_SECONDS = 30
 MAX_RESPONSE_STORE_LENGTH = 8000
@@ -356,13 +375,13 @@ async def _execute_tool(name: str, args: dict, user_id: str) -> dict:
 
     elif name == "search_history":
         result = list_sessions(user_id=user_id, topic=args.get("topic"), mode=args.get("mode"), limit=5)
-        sessions = result.get("sessions", []) if isinstance(result, dict) else result
+        sessions = result.get("items", []) if isinstance(result, dict) else result
         if not sessions:
             return {"data": "没有找到匹配的面试记录。"}
         lines = []
         for s in sessions:
             line = f"- {s.get('created_at', '?')[:10]} | {s.get('mode', '?')} | {s.get('topic', '-')}"
-            if s.get("avg_score"):
+            if s.get("avg_score") is not None:
                 line += f" | 得分 {s['avg_score']}"
             lines.append(line)
         return {"data": "最近的面试记录:\n" + "\n".join(lines)}
@@ -376,7 +395,7 @@ async def _execute_tool(name: str, args: dict, user_id: str) -> dict:
 
     elif name == "list_favorites":
         result = list_favorites(user_id=user_id, topic=args.get("topic"), limit=5)
-        favs = result.get("favorites", []) if isinstance(result, dict) else result
+        favs = result.get("items", []) if isinstance(result, dict) else result
         if not favs:
             return {"data": "收藏夹为空。"}
         lines = [f"- Q: {f.get('question', '?')[:60]}" for f in favs]
@@ -388,7 +407,7 @@ async def _execute_tool(name: str, args: dict, user_id: str) -> dict:
             return {"data": "未找到该面试记录。"}
         lines = [f"面试详情 — {session.get('mode', '?')} | {session.get('topic', '-')} | {session.get('created_at', '?')[:10]}"]
         overall = session.get("overall", {})
-        if overall.get("avg_score"):
+        if overall.get("avg_score") is not None:
             lines.append(f"综合得分: {overall['avg_score']}")
         questions = session.get("questions", [])
         scores = session.get("scores", [])
@@ -428,7 +447,7 @@ async def _execute_tool(name: str, args: dict, user_id: str) -> dict:
         if len(history) >= 2:
             first_score = history[0].get("avg_score", 0)
             last_score = history[-1].get("avg_score", 0)
-            if first_score and last_score:
+            if first_score is not None and last_score is not None:
                 diff = last_score - first_score
                 trend = "上升" if diff > 0 else "下降" if diff < 0 else "持平"
                 lines.append(f"\n整体趋势: {trend} ({'+' if diff > 0 else ''}{diff:.1f}分)")
@@ -708,16 +727,18 @@ async def _execute_tool(name: str, args: dict, user_id: str) -> dict:
         if not topic or not query:
             return {"data": "请提供领域和查询内容。"}
         try:
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(retrieve_topic_context, topic, query, user_id, 5)
-                results = future.result(timeout=60.0)
-        except concurrent.futures.TimeoutError:
+            results = await asyncio.wait_for(
+                asyncio.to_thread(
+                    retrieve_topic_context, topic, query, user_id, 5,
+                ),
+                timeout=60.0,
+            )
+        except asyncio.TimeoutError:
             logger.warning(f"Knowledge base query timed out (60s) for topic={topic}")
-            return {"data": f"知识库查询超时（索引可能正在构建），请稍后重试。"}
+            return {"data": "知识库查询超时（索引可能正在构建），请稍后重试。"}
         except Exception as e:
             logger.warning(f"Knowledge base query failed: {e}")
-            return {"data": f"知识库查询失败，该领域可能还没有知识内容。"}
+            return {"data": "知识库查询失败，该领域可能还没有知识内容。"}
         if not results:
             return {"data": f"在「{topic}」知识库中没有找到与「{query}」相关的内容。"}
         lines = [f"「{topic}」知识库检索结果 (共 {len(results)} 条):"]
@@ -728,7 +749,7 @@ async def _execute_tool(name: str, args: dict, user_id: str) -> dict:
     return {"data": "未知操作"}
 
 
-async def stream_assistant_chat(
+async def _stream_assistant_chat_unlocked(
     message: str, user_id: str
 ) -> AsyncGenerator[str, None]:
     """Stream SSE events for assistant chat with tool calling."""
@@ -889,6 +910,15 @@ async def stream_assistant_chat(
         _extract_and_update_preferences(message, user_id)
 
 
+async def stream_assistant_chat(
+    message: str, user_id: str
+) -> AsyncGenerator[str, None]:
+    """Serialize a complete assistant turn for one user's shared history."""
+    async with _get_assistant_turn_lock(user_id):
+        async for event in _stream_assistant_chat_unlocked(message, user_id):
+            yield event
+
+
 # ── Preference extraction (keyword-based, no LLM) ──
 
 _PREF_PATTERNS = [
@@ -959,7 +989,7 @@ def generate_welcome_back(user_id: str) -> str | None:
 
     # Last session info
     result = list_sessions(user_id=user_id, limit=1)
-    sessions = result.get("sessions", []) if isinstance(result, dict) else result
+    sessions = result.get("items", []) if isinstance(result, dict) else result
     if sessions:
         last = sessions[0]
         topic = last.get("topic", "")
@@ -967,7 +997,7 @@ def generate_welcome_back(user_id: str) -> str | None:
         date_str = last.get("created_at", "")[:10]
         if topic:
             line = f"上次你练习了「{topic}」"
-            if score:
+            if score is not None:
                 line += f"，得了 {score} 分"
             if date_str:
                 line += f"（{date_str}）"
@@ -984,7 +1014,10 @@ def generate_welcome_back(user_id: str) -> str | None:
     # Score trend encouragement
     score_history = stats.get("score_history", [])
     if len(score_history) >= 3:
-        recent = [h.get("avg_score", 0) for h in score_history[-3:] if h.get("avg_score")]
+        recent = [
+            h.get("avg_score") for h in score_history[-3:]
+            if h.get("avg_score") is not None
+        ]
         if len(recent) >= 2 and recent[-1] > recent[0]:
             parts.append("最近的分数一直在进步呢，继续保持！💪")
 

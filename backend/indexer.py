@@ -4,9 +4,13 @@ import hashlib
 import json
 import logging
 import re
+import shutil
+import tempfile
 import threading
 import time
 import weakref
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from llama_index.core import (
@@ -21,10 +25,12 @@ from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
 from llama_index.core.schema import MetadataMode
 
 from backend.config import settings
+from backend.ai_config import get_config_version, get_effective
 from backend.llm_provider import (
     get_llama_llm, get_embedding, get_embedding_for_index,
     _EMBED_BATCH_SIZE, _EMBED_NUM_WORKERS,
 )
+from backend.utils.files import atomic_write_text
 
 logger = logging.getLogger("uvicorn")
 
@@ -38,12 +44,20 @@ class IndexNotReady(Exception):
     绝不在 100s 请求预算内同步全量重嵌入。
     """
 
+
+class IndexSnapshotChanged(RuntimeError):
+    """The source files or embedding configuration changed during a build."""
+
 # In-memory index cache keyed by (user_id, topic_or_resume)
 # Entries expire after 1 hour to prevent unbounded memory growth.
 _INDEX_CACHE_TTL = 3600.0  # 1 hour
 _INDEX_CACHE_MAX_SIZE = 50
+_RESUME_INDEX_ID = "__resume__"
+_TOPIC_INDEX_ESCAPE_PREFIX = "__topic_index__"
 
-_index_cache: dict[tuple[str, str], tuple[float, "VectorStoreIndex"]] = {}  # key -> (expire_time, index)
+_index_cache: dict[
+    tuple[str, str], tuple[float, "VectorStoreIndex", str]
+] = {}  # key -> (expire_time, index, embedding_fingerprint)
 
 # _index_cache is read/written from asyncio.to_thread workers AND from
 # gather_topic_contexts' ThreadPoolExecutor, so it is genuinely shared across
@@ -51,60 +65,147 @@ _index_cache: dict[tuple[str, str], tuple[float, "VectorStoreIndex"]] = {}  # ke
 # "dict changed size during iteration" / KeyError mid-retrieval.
 _index_cache_lock = threading.Lock()
 
+# A queue-full fallback can mark an index dirty while a direct/request-path
+# build is still finishing.  The generation closes the race where that older
+# build would otherwise publish a fresh fingerprint after the dirty marker was
+# removed.  The persisted fingerprint deletion remains the restart-safe marker;
+# this process-local generation only orders concurrent writers.
+_index_dirty_lock = threading.Lock()
+_index_dirty_generation = 0
+_index_dirty_generations: dict[Path, int] = {}
+
+
+def _topic_index_id(topic: str) -> str:
+    """Map public topic keys into an index namespace disjoint from resume.
+
+    Most existing topic keys retain their historical storage id.  Keys that
+    collide with the internal resume id (or with this escape namespace) are
+    encoded injectively, preserving compatibility without exposing resume data.
+    """
+    folded = topic.casefold()
+    if (
+        folded == _RESUME_INDEX_ID.casefold()
+        or folded.startswith(_TOPIC_INDEX_ESCAPE_PREFIX.casefold())
+    ):
+        encoded = topic.encode("utf-8").hex()
+        return f"{_TOPIC_INDEX_ESCAPE_PREFIX}{encoded}"
+    return topic
+
+
+def _dirty_cache_key(cache_dir: Path) -> Path:
+    return cache_dir.resolve(strict=False)
+
+
+def _get_index_dirty_generation(cache_dir: Path) -> int:
+    with _index_dirty_lock:
+        return _index_dirty_generations.get(_dirty_cache_key(cache_dir), 0)
+
+
+def clear_index_cache() -> int:
+    """Drop all in-memory indexes without touching persisted stores."""
+    with _index_cache_lock:
+        count = len(_index_cache)
+        _index_cache.clear()
+        return count
+
 # Background rebuild lock — prevent concurrent rebuilds for the same (user, topic).
 # WeakValueDictionary so idle locks (no in-flight rebuild holding a reference) are
 # GC'd instead of accumulating one entry per (user, topic) forever.
 _rebuild_locks: "weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock]" = weakref.WeakValueDictionary()
 
-# Thread-level build lock — serializes build_topic_index() per (user, topic) across
-# ALL callers (the async rebuild path AND the embedding task-queue path, both of
-# which run build_topic_index(force_rebuild=True) in worker threads). Without this
-# the two paths could concurrently persist/delete the same index → half-written
-# index or a Qdrant collection deleted mid-rebuild. Threading (not asyncio) lock
-# because the critical section runs in thread pools, not the event loop.
-_build_locks: "weakref.WeakValueDictionary[tuple[str, str], threading.Lock]" = weakref.WeakValueDictionary()
+# Thread-level write lock serializes builds, inserts, invalidations, and source
+# mutations for one index. It is reentrant because a source mutation may call
+# invalidate_topic_index while already holding the same lock.
+_build_locks: "weakref.WeakValueDictionary[tuple[str, str], threading.RLock]" = weakref.WeakValueDictionary()
 _build_locks_guard = threading.Lock()
 
+# topics.json is a per-user read/modify/write document. Keep the lock process
+# local (SQLite remains the source of cross-process coordination) and pair it
+# with atomic_write_text so a crash cannot leave truncated JSON.
+_topics_locks: dict[str, threading.RLock] = {}
+_topics_locks_guard = threading.Lock()
 
-def _get_build_lock(cache_key: tuple[str, str]) -> threading.Lock:
+
+def _get_topics_lock(user_id: str) -> threading.RLock:
+    with _topics_locks_guard:
+        return _topics_locks.setdefault(user_id, threading.RLock())
+
+
+@contextmanager
+def topics_transaction(user_id: str):
+    """Yield a topic mapping and atomically persist it on successful exit."""
+    lock = _get_topics_lock(user_id)
+    with lock:
+        topics = load_topics(user_id)
+        yield topics
+        save_topics(topics, user_id)
+
+
+def _get_build_lock(cache_key: tuple[str, str]) -> threading.RLock:
     with _build_locks_guard:
         lock = _build_locks.get(cache_key)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _build_locks[cache_key] = lock
         return lock
 
 
+@contextmanager
+def index_mutation_lock(topic: str, user_id: str):
+    """Serialize a topic's source mutation with all index writes."""
+    with _get_build_lock((user_id, _topic_index_id(topic))):
+        yield
+
+
+@contextmanager
+def resume_index_mutation_lock(user_id: str):
+    """Serialize resume source replacement with resume index writes."""
+    with _get_build_lock((user_id, _RESUME_INDEX_ID)):
+        yield
+
+
 def _cache_get(key: tuple[str, str]) -> "VectorStoreIndex | None":
-    """Get index from cache, returning None if expired or missing."""
+    """Get an index only while its embedding identity is still current."""
     with _index_cache_lock:
         entry = _index_cache.get(key)
         if entry is None:
             return None
-        expire_time, index = entry
-        if time.time() > expire_time:
+        expire_time, index, fingerprint = entry
+        if time.time() > expire_time or fingerprint != _embedding_fingerprint():
             _index_cache.pop(key, None)
             return None
         # Refresh TTL on access so a frequently-used index isn't evicted as the
         # "oldest" entry by _cache_set — makes TTL time-since-last-use (true LRU).
-        _index_cache[key] = (time.time() + _INDEX_CACHE_TTL, index)
+        _index_cache[key] = (time.time() + _INDEX_CACHE_TTL, index, fingerprint)
         return index
 
 
-def _cache_set(key: tuple[str, str], index: "VectorStoreIndex"):
-    """Set index in cache with TTL. Evicts oldest if over max size."""
+def _cache_set(
+    key: tuple[str, str], index: "VectorStoreIndex",
+    expected_fingerprint: str | None = None,
+) -> bool:
+    """Cache an index only if the configuration used to build it is current."""
     with _index_cache_lock:
-        _index_cache[key] = (time.time() + _INDEX_CACHE_TTL, index)
+        current_fingerprint = _embedding_fingerprint()
+        fingerprint = expected_fingerprint or current_fingerprint
+        if fingerprint != current_fingerprint:
+            return False
+        _index_cache[key] = (
+            time.time() + _INDEX_CACHE_TTL, index, fingerprint,
+        )
         if len(_index_cache) > _INDEX_CACHE_MAX_SIZE:
             # Evict expired first
             now = time.time()
-            expired = [k for k, (exp, _) in _index_cache.items() if now > exp]
+            expired = [
+                k for k, (exp, _, _) in _index_cache.items() if now > exp
+            ]
             for k in expired:
                 del _index_cache[k]
             # If still over, evict oldest
             if len(_index_cache) > _INDEX_CACHE_MAX_SIZE:
                 oldest = min(_index_cache, key=lambda k: _index_cache[k][0])
                 del _index_cache[oldest]
+        return True
 
 
 # ── File hash manifest for incremental index rebuilds ──
@@ -120,38 +221,215 @@ def _compute_file_hashes(
     Mirrors ``_load_nodes_streaming``'s recursive scan + extension filter.
     """
     hashes: dict[str, str] = {}
+    allowed_exts = {e.lower() for e in required_exts} if required_exts else None
     if not source_dir.exists():
         return hashes
     for f in sorted(source_dir.rglob("*")):
         if not f.is_file():
             continue
-        if required_exts and f.suffix not in required_exts:
+        if allowed_exts and f.suffix.lower() not in allowed_exts:
             continue
         rel = f.relative_to(source_dir).as_posix()
         hashes[rel] = hashlib.md5(f.read_bytes()).hexdigest()
     return hashes
 
 
+@contextmanager
+def _source_snapshot(
+    source_dir: Path, required_exts: list[str] | None = None,
+):
+    """Copy source files once so parsing and manifest hashes share exact bytes."""
+    allowed_exts = {e.lower() for e in required_exts} if required_exts else None
+    with tempfile.TemporaryDirectory(prefix="sparkoffer-index-") as tmp:
+        snapshot_dir = Path(tmp)
+        if source_dir.exists():
+            for source in sorted(source_dir.rglob("*")):
+                if not source.is_file():
+                    continue
+                if allowed_exts and source.suffix.lower() not in allowed_exts:
+                    continue
+                relative = source.relative_to(source_dir)
+                target = snapshot_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(source, target)
+                except FileNotFoundError as exc:
+                    raise IndexSnapshotChanged(
+                        f"Source changed while taking index snapshot: {relative}"
+                    ) from exc
+        yield snapshot_dir, _compute_file_hashes(snapshot_dir, required_exts)
+
+
 def _manifest_path(cache_dir: Path) -> Path:
     return cache_dir / "_file_hashes.json"
+
+
+def _embedding_fingerprint() -> str:
+    """Stable, secret-free identity for the active embedding configuration."""
+    channels: list[dict] = []
+    try:
+        from backend.channel_manager import get_all_channels
+
+        for channel in get_all_channels("embedding"):
+            if not channel.get("enabled", True):
+                continue
+            backend = str(channel.get("backend") or "api").strip().lower()
+            identity = {
+                "backend": backend,
+                "priority": int(channel.get("priority") or 1),
+            }
+            if backend == "api":
+                identity.update({
+                    "api_model": str(channel.get("api_model") or "").strip(),
+                    "api_base": str(channel.get("api_base") or "").strip(),
+                })
+            else:
+                identity.update({
+                    "local_model": str(channel.get("local_model") or "").strip(),
+                    "local_path": str(channel.get("local_path") or "").strip(),
+                })
+            channels.append(identity)
+    except Exception:
+        channels = []
+
+    if channels:
+        data = {"channels": channels}
+    else:
+        backend = str(get_effective("embedding", "backend") or "").strip().lower()
+        api_base = str(get_effective("embedding", "api_base") or "").strip()
+        api_key_present = bool(get_effective("embedding", "api_key"))
+        if backend == "api" or (not backend and (api_base or api_key_present)):
+            data = {
+                "backend": "api",
+                "api_model": str(
+                    get_effective("embedding", "api_model")
+                    or settings.embedding_api_model_name()
+                ).strip(),
+                "api_base": api_base,
+            }
+        else:
+            local_path = (
+                get_effective("embedding", "local_path")
+                or settings.local_embedding_model_path()
+                or ""
+            )
+            data = {
+                "backend": "local",
+                "local_model": str(
+                    get_effective("embedding", "local_model")
+                    or settings.local_embedding_model_name()
+                ).strip(),
+                "local_path": str(local_path).strip(),
+            }
+    raw = json.dumps(data, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _fingerprint_path(cache_dir: Path) -> Path:
+    return cache_dir / "_embedding_fingerprint"
+
+
+def _load_embedding_fingerprint(cache_dir: Path) -> str:
+    try:
+        return _fingerprint_path(cache_dir).read_text(encoding="ascii").strip()
+    except OSError:
+        return ""
+
+
+def _save_embedding_fingerprint(cache_dir: Path, fingerprint: str) -> None:
+    atomic_write_text(_fingerprint_path(cache_dir), fingerprint + "\n")
+
+
+def _discard_embedding_fingerprint(cache_dir: Path) -> None:
+    try:
+        _fingerprint_path(cache_dir).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _embedding_fingerprint_matches(
+    cache_dir: Path, expected_fingerprint: str | None = None,
+) -> bool:
+    persisted = _load_embedding_fingerprint(cache_dir)
+    expected = expected_fingerprint or _embedding_fingerprint()
+    return bool(persisted) and persisted == expected
 
 
 def _load_manifest(cache_dir: Path) -> dict[str, str]:
     p = _manifest_path(cache_dir)
     if p.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return {}
+            if not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in data.items()
+            ):
+                return {}
+            return data
+        except (OSError, UnicodeError, json.JSONDecodeError):
             return {}
     return {}
 
 
 def _save_manifest(cache_dir: Path, hashes: dict[str, str]):
     cache_dir.mkdir(parents=True, exist_ok=True)
-    _manifest_path(cache_dir).write_text(
+    atomic_write_text(
+        _manifest_path(cache_dir),
         json.dumps(hashes, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
     )
+
+
+def _save_manifest_if_unchanged(
+    cache_dir: Path,
+    source_dir: Path,
+    expected_hashes: dict[str, str],
+    required_exts: list[str] | None,
+    expected_fingerprint: str,
+    expected_config_version: int,
+    expected_dirty_generation: int | None = None,
+) -> bool:
+    """Persist only the hashes corresponding to this build's source snapshot."""
+    if expected_dirty_generation is None:
+        expected_dirty_generation = _get_index_dirty_generation(cache_dir)
+    current_hashes = _compute_file_hashes(source_dir, required_exts)
+    current_fingerprint = _embedding_fingerprint()
+    if (
+        current_hashes != expected_hashes
+        or current_fingerprint != expected_fingerprint
+        or get_config_version() != expected_config_version
+        or _get_index_dirty_generation(cache_dir) != expected_dirty_generation
+    ):
+        logger.info(
+            "Source files changed during index build for %s; keeping the old "
+            "manifest so the queued follow-up detects the change",
+            cache_dir.name,
+        )
+        _discard_embedding_fingerprint(cache_dir)
+        return False
+    # Publish metadata while serialized with mark_topic_index_dirty().  A dirty
+    # mark either wins before this block (generation mismatch) or wins after it
+    # and removes the just-written fingerprint; it can never be overwritten.
+    with _index_dirty_lock:
+        if (
+            _index_dirty_generations.get(_dirty_cache_key(cache_dir), 0)
+            != expected_dirty_generation
+        ):
+            _discard_embedding_fingerprint(cache_dir)
+            return False
+        _save_manifest(cache_dir, expected_hashes)
+        _save_embedding_fingerprint(cache_dir, expected_fingerprint)
+    # Close the window between validation and the two atomic metadata writes.
+    if (
+        _compute_file_hashes(source_dir, required_exts) != expected_hashes
+        or _embedding_fingerprint() != expected_fingerprint
+        or get_config_version() != expected_config_version
+        or _get_index_dirty_generation(cache_dir) != expected_dirty_generation
+    ):
+        _discard_embedding_fingerprint(cache_dir)
+        return False
+    return True
 
 
 def _diff_file_hashes(
@@ -206,19 +484,19 @@ def _diff_with_collateral(
 def load_topics(user_id: str) -> dict:
     """Load topics from user's topics.json. Returns {key: {name, icon, dir}}."""
     path = settings.user_topics_path(user_id)
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+    with _get_topics_lock(user_id):
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
     return {}
 
 
 def save_topics(topics: dict, user_id: str):
     """Write topics back to user's topics.json."""
     path = settings.user_topics_path(user_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(topics, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    with _get_topics_lock(user_id):
+        atomic_write_text(
+            path, json.dumps(topics, ensure_ascii=False, indent=2) + "\n",
+        )
 
 
 def get_topic_map(user_id: str) -> dict[str, str]:
@@ -340,6 +618,7 @@ def reset_qdrant_state() -> None:
     _qdrant_client_singleton = None
     _kb_qdrant_healthy = None
     _embed_dim_cache = None
+    clear_index_cache()
 
 
 def _kb_collection_name(user_id: str, topic: str) -> str:
@@ -358,6 +637,7 @@ def _qdrant_collection_dim(client, collection: str) -> int | None:
 
 def _load_nodes_streaming(
     source_dir: Path, required_exts: list[str] | None = None,
+    metadata_source_dir: Path | None = None,
 ) -> list:
     """Read a directory file-by-file and chunk each before moving on.
 
@@ -368,17 +648,52 @@ def _load_nodes_streaming(
     nodes accumulate. Peak memory drops from (all docs + all nodes) to roughly
     (one file's docs + all nodes).
     """
-    reader_kwargs = {"input_dir": str(source_dir), "recursive": True}
     if required_exts:
-        reader_kwargs["required_exts"] = required_exts
-    reader = SimpleDirectoryReader(**reader_kwargs)
+        allowed = {ext.lower() for ext in required_exts}
+        input_files = [
+            str(path) for path in sorted(source_dir.rglob("*"))
+            if path.is_file() and path.suffix.lower() in allowed
+        ]
+        if not input_files:
+            return []
+        # SimpleDirectoryReader's required_exts comparison is case-sensitive;
+        # explicit files ensure README.MD and CODE.PY are indexed too.
+        reader = SimpleDirectoryReader(input_files=input_files)
+    else:
+        input_files = [
+            str(path) for path in sorted(source_dir.rglob("*")) if path.is_file()
+        ]
+        if not input_files:
+            return []
+        reader = SimpleDirectoryReader(input_files=input_files)
     nodes = []
     for file_docs in reader.iter_data():
+        if metadata_source_dir is not None:
+            _remap_snapshot_metadata(file_docs, source_dir, metadata_source_dir)
         nodes.extend(_build_nodes(file_docs))
     return nodes
 
 
-def _load_nodes_for_files(source_dir: Path, rel_paths: list[str]) -> list:
+def _remap_snapshot_metadata(
+    docs: list, snapshot_dir: Path, source_dir: Path,
+) -> None:
+    """Keep persisted document metadata pointed at the durable source tree."""
+    snapshot_root = snapshot_dir.resolve()
+    for doc in docs:
+        raw_path = (doc.metadata or {}).get("file_path")
+        if not raw_path:
+            continue
+        try:
+            relative = Path(raw_path).resolve().relative_to(snapshot_root)
+        except (OSError, ValueError):
+            continue
+        doc.metadata["file_path"] = str(source_dir / relative)
+
+
+def _load_nodes_for_files(
+    source_dir: Path, rel_paths: list[str],
+    metadata_source_dir: Path | None = None,
+) -> list:
     """Chunk only the given manifest-relative files (incremental re-embed set).
 
     Paths that vanished between diff and read are skipped — their deletion is
@@ -391,6 +706,8 @@ def _load_nodes_for_files(source_dir: Path, rel_paths: list[str]) -> list:
     reader = SimpleDirectoryReader(input_files=existing)
     nodes = []
     for file_docs in reader.iter_data():
+        if metadata_source_dir is not None:
+            _remap_snapshot_metadata(file_docs, source_dir, metadata_source_dir)
         nodes.extend(_build_nodes(file_docs))
     return nodes
 
@@ -462,64 +779,99 @@ def _try_incremental_qdrant_update(
     rebuild (delete_collection + re-embed everything) is required — no manifest
     yet, embedding model changed, or an unexpected error mid-update.
     """
+    build_fingerprint = _embedding_fingerprint()
+    build_config_version = get_config_version()
+    build_dirty_generation = _get_index_dirty_generation(manifest_dir)
     old_hashes = _load_manifest(manifest_dir)
-    if not old_hashes:
+    if not old_hashes or not _embedding_fingerprint_matches(
+        manifest_dir, build_fingerprint,
+    ):
         return None  # no baseline (pre-manifest collection) → full rebuild once
 
-    new_hashes = _compute_file_hashes(source_dir, required_exts)
-    added, modified, deleted, files_to_remove, collateral, sources_to_purge = (
-        _diff_with_collateral(old_hashes, new_hashes)
-    )
-
-    # Stale-manifest guard: manifest claims an established baseline but the
-    # collection is empty (e.g. recreated Qdrant volume). Diff-skipping here
-    # would return a permanently empty index — force the full rebuild instead.
-    try:
-        if new_hashes and client.count(collection).count == 0:
-            logger.info("Qdrant KB %s: collection empty but manifest present, full rebuild", collection)
-            return None
-    except Exception:
-        return None
-
-    if not added and not modified and not deleted:
-        logger.info("Qdrant KB %s: no file changes, skip rebuild", collection)
-        return VectorStoreIndex.from_vector_store(vector_store)
-
-    # 换过 embedding 模型 → 维度对不上，增量插入必然被拒；直接走全量重建。
-    col_dim = _qdrant_collection_dim(client, collection)
-    if col_dim is not None and col_dim != _current_embed_dim():
-        logger.info(
-            "Qdrant KB %s: dim %s != current %s, full rebuild required",
-            collection, col_dim, _current_embed_dim(),
+    with _source_snapshot(source_dir, required_exts) as (
+        snapshot_dir, new_hashes,
+    ):
+        added, modified, deleted, files_to_remove, collateral, sources_to_purge = (
+            _diff_with_collateral(old_hashes, new_hashes)
         )
-        return None
 
-    files_to_embed = [f for f in added + modified + collateral if (source_dir / f).exists()]
-    logger.info(
-        "Qdrant KB %s incremental: +%d ~%d -%d (re-embedding %d files, keeping %d unchanged)",
-        collection, len(added), len(modified), len(deleted),
-        len(files_to_embed), len(new_hashes) - len(files_to_embed),
-    )
+        # Stale-manifest guard: manifest claims an established baseline but the
+        # collection is empty (e.g. recreated Qdrant volume).
+        try:
+            if new_hashes and client.count(collection).count == 0:
+                logger.info(
+                    "Qdrant KB %s: collection empty but manifest present, full rebuild",
+                    collection,
+                )
+                return None
+        except Exception:
+            return None
 
-    try:
-        _qdrant_delete_kb_points(client, collection, files_to_remove, sources_to_purge)
-        new_nodes = _load_nodes_for_files(source_dir, files_to_embed)
-        # 长超时/重试的 index 级 embed model：进度路径预嵌入，无回调时由
-        # insert_nodes 用同一模型内部嵌入 —— 两条路产出的向量一致。
-        embed_model = get_embedding_for_index()
-        index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
-        if new_nodes:
-            _embed_nodes_with_progress(new_nodes, embed_model, progress_cb)
-            index.insert_nodes(new_nodes)
-    except Exception as e:
-        # 增量中途失败会留下「已删未插」的洞 —— 不能保存 manifest 假装成功，
-        # 返回 None 让调用方 delete_collection 后全量重建，真相源在磁盘，无损。
-        logger.warning("Qdrant KB %s incremental update failed, falling back to full rebuild: %s",
-                       collection, e)
-        return None
+        if not added and not modified and not deleted:
+            if (
+                _compute_file_hashes(source_dir, required_exts) != new_hashes
+                or _embedding_fingerprint() != build_fingerprint
+                or get_config_version() != build_config_version
+                or _get_index_dirty_generation(manifest_dir)
+                != build_dirty_generation
+            ):
+                raise IndexSnapshotChanged(
+                    f"Source changed during no-op Qdrant rebuild: {collection}"
+                )
+            logger.info("Qdrant KB %s: no file changes, skip rebuild", collection)
+            return VectorStoreIndex.from_vector_store(vector_store)
 
-    _save_manifest(manifest_dir, new_hashes)
-    return index
+        # A changed dimension cannot be inserted into the existing collection.
+        col_dim = _qdrant_collection_dim(client, collection)
+        if col_dim is not None and col_dim != _current_embed_dim():
+            logger.info(
+                "Qdrant KB %s: dim %s != current %s, full rebuild required",
+                collection, col_dim, _current_embed_dim(),
+            )
+            return None
+
+        files_to_embed = [
+            path for path in added + modified + collateral
+            if (snapshot_dir / path).exists()
+        ]
+        logger.info(
+            "Qdrant KB %s incremental: +%d ~%d -%d "
+            "(re-embedding %d files, keeping %d unchanged)",
+            collection, len(added), len(modified), len(deleted),
+            len(files_to_embed), len(new_hashes) - len(files_to_embed),
+        )
+
+        _discard_embedding_fingerprint(manifest_dir)
+        try:
+            _qdrant_delete_kb_points(
+                client, collection, files_to_remove, sources_to_purge,
+            )
+            new_nodes = _load_nodes_for_files(
+                snapshot_dir, files_to_embed, metadata_source_dir=source_dir,
+            )
+            embed_model = get_embedding_for_index()
+            index = VectorStoreIndex.from_vector_store(
+                vector_store, embed_model=embed_model,
+            )
+            if new_nodes:
+                _embed_nodes_with_progress(new_nodes, embed_model, progress_cb)
+                index.insert_nodes(new_nodes)
+        except Exception as exc:
+            logger.warning(
+                "Qdrant KB %s incremental update failed, falling back to full rebuild: %s",
+                collection, exc,
+            )
+            return None
+
+        if not _save_manifest_if_unchanged(
+            manifest_dir, source_dir, new_hashes, required_exts,
+            build_fingerprint, build_config_version,
+            build_dirty_generation,
+        ):
+            raise IndexSnapshotChanged(
+                f"Source or embedding config changed during Qdrant rebuild: {collection}"
+            )
+        return index
 
 
 def _build_or_load_qdrant_index(
@@ -544,14 +896,26 @@ def _build_or_load_qdrant_index(
     exists = client.collection_exists(collection)
 
     if exists and not force_rebuild:
+        current_fingerprint = _embedding_fingerprint()
         col_dim = _qdrant_collection_dim(client, collection)
-        if col_dim is not None and col_dim != _current_embed_dim():
-            if not build_if_missing:
-                raise IndexNotReady(f"qdrant collection dim mismatch: {collection}")
-            logger.warning(
-                "Qdrant KB '%s' 维度=%s 与当前 embedding 维度=%s 不一致，从源文档重建。",
-                collection, col_dim, _current_embed_dim(),
+        fingerprint_ok = bool(
+            manifest_dir and _embedding_fingerprint_matches(
+                manifest_dir, current_fingerprint,
             )
+        )
+        if not fingerprint_ok or (
+            col_dim is not None and col_dim != _current_embed_dim()
+        ):
+            if not build_if_missing:
+                raise IndexNotReady(
+                    f"qdrant collection embedding identity mismatch: {collection}"
+                )
+            logger.warning(
+                "Qdrant KB '%s' embedding identity changed; rebuilding from source",
+                collection,
+            )
+            if manifest_dir:
+                _discard_embedding_fingerprint(manifest_dir)
             client.delete_collection(collection)
             # Re-instantiate: the old instance cached _collection_initialized=True at
             # construction, so its add() would skip create_collection and upload into
@@ -572,35 +936,49 @@ def _build_or_load_qdrant_index(
             )
             if index is not None:
                 return index
+        if manifest_dir:
+            _discard_embedding_fingerprint(manifest_dir)
         client.delete_collection(collection)  # 全量重建前清空，避免重复 node
         vector_store = _LlamaQdrant(client=client, collection_name=collection)  # 同上：刷新实例状态
 
     if not build_if_missing:
         raise IndexNotReady(f"qdrant collection missing: {collection}")
 
-    if not source_dir.exists():
-        if allow_empty:
-            nodes = []
-        else:
-            raise FileNotFoundError(f"Knowledge directory not found: {source_dir}")
-    else:
-        nodes = _load_nodes_streaming(source_dir, required_exts)
-
-    if not nodes and not allow_empty:
-        raise ValueError(f"No documents found in {source_dir}")
-
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    # Pre-embed with progress (no-op without a callback); the index then reuses the
-    # embeddings instead of re-embedding. Dedicated index instance = long timeout +
-    # retry + concurrency. Query keeps LlamaSettings.embed_model (fast-fail).
-    embed_model = get_embedding_for_index()
-    _embed_nodes_with_progress(nodes, embed_model, progress_cb)
-    index = VectorStoreIndex(
-        nodes, storage_context=storage_context, embed_model=embed_model,
+    build_fingerprint = _embedding_fingerprint()
+    build_config_version = get_config_version()
+    build_dirty_generation = (
+        _get_index_dirty_generation(manifest_dir) if manifest_dir else 0
     )
+    if not source_dir.exists():
+        if not allow_empty:
+            raise FileNotFoundError(f"Knowledge directory not found: {source_dir}")
     if manifest_dir:
-        _save_manifest(manifest_dir, _compute_file_hashes(source_dir, required_exts))
-    return index
+        _discard_embedding_fingerprint(manifest_dir)
+
+    with _source_snapshot(source_dir, required_exts) as (
+        snapshot_dir, expected_hashes,
+    ):
+        nodes = _load_nodes_streaming(
+            snapshot_dir, required_exts, metadata_source_dir=source_dir,
+        )
+        if not nodes and not allow_empty:
+            raise ValueError(f"No documents found in {source_dir}")
+
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        embed_model = get_embedding_for_index()
+        _embed_nodes_with_progress(nodes, embed_model, progress_cb)
+        index = VectorStoreIndex(
+            nodes, storage_context=storage_context, embed_model=embed_model,
+        )
+        if manifest_dir and not _save_manifest_if_unchanged(
+            manifest_dir, source_dir, expected_hashes, required_exts,
+            build_fingerprint, build_config_version,
+            build_dirty_generation,
+        ):
+            raise IndexSnapshotChanged(
+                f"Source or embedding config changed during Qdrant build: {collection}"
+            )
+        return index
 
 
 def _try_incremental_local_update(
@@ -617,84 +995,119 @@ def _try_incremental_local_update(
     Returns the updated index on success, or ``None`` to signal that a full
     rebuild is needed (no manifest yet, corrupted index, or unexpected error).
     """
+    build_fingerprint = _embedding_fingerprint()
+    build_config_version = get_config_version()
+    build_dirty_generation = _get_index_dirty_generation(cache_dir)
     old_hashes = _load_manifest(cache_dir)
-    if not old_hashes:
+    if not old_hashes or not _embedding_fingerprint_matches(
+        cache_dir, build_fingerprint,
+    ):
         return None  # no manifest → first time; full rebuild to establish baseline
 
-    new_hashes = _compute_file_hashes(source_dir, required_exts)
-    added, modified, deleted, files_to_remove, collateral, sources_to_purge = (
-        _diff_with_collateral(old_hashes, new_hashes)
-    )
+    with _source_snapshot(source_dir, required_exts) as (
+        snapshot_dir, new_hashes,
+    ):
+        added, modified, deleted, files_to_remove, collateral, sources_to_purge = (
+            _diff_with_collateral(old_hashes, new_hashes)
+        )
 
-    if not added and not modified and not deleted:
+        if not added and not modified and not deleted:
+            if (
+                _compute_file_hashes(source_dir, required_exts) != new_hashes
+                or _embedding_fingerprint() != build_fingerprint
+                or get_config_version() != build_config_version
+                or _get_index_dirty_generation(cache_dir)
+                != build_dirty_generation
+            ):
+                raise IndexSnapshotChanged(
+                    f"Source changed during no-op local rebuild: {cache_dir.name}"
+                )
+            try:
+                storage_context = StorageContext.from_defaults(
+                    persist_dir=str(cache_dir),
+                )
+                index = load_index_from_storage(storage_context)
+                logger.info(
+                    "Incremental update: %s — no file changes, skip rebuild",
+                    cache_dir.name,
+                )
+                return index
+            except Exception:
+                return None
+
+        unchanged = len(new_hashes) - len(added) - len(modified) - len(collateral)
+        logger.info(
+            "Incremental index update: %s — +%d ~%d -%d (skipping %d unchanged)",
+            cache_dir.name, len(added), len(modified), len(deleted), unchanged,
+        )
+
         try:
             storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
             index = load_index_from_storage(storage_context)
-            logger.info("Incremental update: %s — no file changes, skip rebuild", cache_dir.name)
-            return index
-        except Exception:
+        except Exception as exc:
+            logger.warning("Cannot load existing index for incremental update: %s", exc)
             return None
 
-    unchanged = len(new_hashes) - len(added) - len(modified) - len(collateral)
-    logger.info(
-        "Incremental index update: %s — +%d ~%d -%d (skipping %d unchanged)",
-        cache_dir.name, len(added), len(modified), len(deleted), unchanged,
-    )
-
-    try:
-        storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
-        index = load_index_from_storage(storage_context)
-    except Exception as e:
-        logger.warning("Cannot load existing index for incremental update: %s", e)
-        return None
-
-    # ── Delete nodes belonging to modified / deleted files ──
-    # Also purge the floating deposit-insert nodes (source-tagged, no file_name)
-    # for any deposit file being re-embedded, or they'd duplicate its content.
-    if files_to_remove or sources_to_purge:
-        try:
-            node_ids_to_delete = [
-                nid for nid, node in list(index.docstore.docs.items())
-                if (node.metadata or {}).get("file_name", "") in files_to_remove
-                or (node.metadata or {}).get("source", "") in sources_to_purge
-            ]
-            if node_ids_to_delete:
-                vs_data = index._vector_store._data
-                for nid in node_ids_to_delete:
-                    vs_data.embedding_dict.pop(nid, None)
-                    vs_data.text_id_to_ref_doc_id.pop(nid, None)
-                    vs_data.metadata_dict.pop(nid, None)
-                    index.docstore.delete_document(nid, raise_error=False)
-                logger.info(
-                    "Incremental: removed %d nodes from %d files",
-                    len(node_ids_to_delete), len(files_to_remove),
+        _discard_embedding_fingerprint(cache_dir)
+        if files_to_remove or sources_to_purge:
+            try:
+                node_ids_to_delete = [
+                    nid for nid, node in list(index.docstore.docs.items())
+                    if (node.metadata or {}).get("file_name", "") in files_to_remove
+                    or (node.metadata or {}).get("source", "") in sources_to_purge
+                ]
+                if node_ids_to_delete:
+                    vs_data = index._vector_store._data
+                    for node_id in node_ids_to_delete:
+                        vs_data.embedding_dict.pop(node_id, None)
+                        vs_data.text_id_to_ref_doc_id.pop(node_id, None)
+                        vs_data.metadata_dict.pop(node_id, None)
+                        index.docstore.delete_document(node_id, raise_error=False)
+                    logger.info(
+                        "Incremental: removed %d nodes from %d files",
+                        len(node_ids_to_delete), len(files_to_remove),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Incremental node deletion failed, falling back to full rebuild: %s",
+                    exc,
                 )
-        except Exception as e:
-            logger.warning("Incremental node deletion failed, falling back to full rebuild: %s", e)
-            return None
+                return None
 
-    # ── Embed and insert nodes for added / modified files ──
-    # Collateral basename twins lost their nodes in the deletion pass above, so
-    # they re-embed alongside the genuinely changed files.
-    files_to_add = [f for f in added + modified + collateral if (source_dir / f).exists()]
-    if files_to_add:
-        try:
-            new_nodes = _load_nodes_for_files(source_dir, files_to_add)
-            if new_nodes:
-                embed_model = get_embedding_for_index()
-                _embed_nodes_with_progress(new_nodes, embed_model, progress_cb)
-                index.insert_nodes(new_nodes)
-                logger.info(
-                    "Incremental: inserted %d nodes from %d files",
-                    len(new_nodes), len(files_to_add),
+        files_to_add = [
+            path for path in added + modified + collateral
+            if (snapshot_dir / path).exists()
+        ]
+        if files_to_add:
+            try:
+                new_nodes = _load_nodes_for_files(
+                    snapshot_dir, files_to_add, metadata_source_dir=source_dir,
                 )
-        except Exception as e:
-            logger.warning("Incremental node insertion failed, falling back to full rebuild: %s", e)
-            return None
+                if new_nodes:
+                    embed_model = get_embedding_for_index()
+                    _embed_nodes_with_progress(new_nodes, embed_model, progress_cb)
+                    index.insert_nodes(new_nodes)
+                    logger.info(
+                        "Incremental: inserted %d nodes from %d files",
+                        len(new_nodes), len(files_to_add),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Incremental node insertion failed, falling back to full rebuild: %s",
+                    exc,
+                )
+                return None
 
-    index.storage_context.persist(persist_dir=str(cache_dir))
-    _save_manifest(cache_dir, new_hashes)
-    return index
+        index.storage_context.persist(persist_dir=str(cache_dir))
+        if not _save_manifest_if_unchanged(
+            cache_dir, source_dir, new_hashes, required_exts,
+            build_fingerprint, build_config_version,
+            build_dirty_generation,
+        ):
+            raise IndexSnapshotChanged(
+                f"Source or embedding config changed during local rebuild: {cache_dir.name}"
+            )
+        return index
 
 
 def _build_or_load_local_index(
@@ -709,8 +1122,14 @@ def _build_or_load_local_index(
     ``build_if_missing=False`` 时：磁盘无 persist 缓存就抛 :class:`IndexNotReady`
     而非现场全量重嵌入——请求路径用它避免 100s 死线内的同步重建。"""
     if cache_dir.exists() and not force_rebuild:
-        storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
-        return load_index_from_storage(storage_context)
+        if _embedding_fingerprint_matches(cache_dir):
+            storage_context = StorageContext.from_defaults(persist_dir=str(cache_dir))
+            return load_index_from_storage(storage_context)
+        if not build_if_missing:
+            raise IndexNotReady(
+                f"local index embedding identity mismatch: {cache_dir.name}"
+            )
+        force_rebuild = True
 
     # force_rebuild with an existing index on disk → try incremental update
     if force_rebuild and cache_dir.exists():
@@ -724,56 +1143,83 @@ def _build_or_load_local_index(
     if not build_if_missing:
         raise IndexNotReady(f"local index missing: {cache_dir}")
 
+    build_fingerprint = _embedding_fingerprint()
+    build_config_version = get_config_version()
+    build_dirty_generation = _get_index_dirty_generation(cache_dir)
     if not source_dir.exists():
-        if allow_empty:
-            nodes = []
-        else:
+        if not allow_empty:
             raise FileNotFoundError(f"Knowledge directory not found: {source_dir}")
-    else:
-        nodes = _load_nodes_streaming(source_dir, required_exts)
 
-    if not nodes and not allow_empty:
-        raise ValueError(f"No documents found in {source_dir}")
+    _discard_embedding_fingerprint(cache_dir)
+    with _source_snapshot(source_dir, required_exts) as (
+        snapshot_dir, expected_hashes,
+    ):
+        nodes = _load_nodes_streaming(
+            snapshot_dir, required_exts, metadata_source_dir=source_dir,
+        )
+        if not nodes and not allow_empty:
+            raise ValueError(f"No documents found in {source_dir}")
 
-    embed_model = get_embedding_for_index()
-    _embed_nodes_with_progress(nodes, embed_model, progress_cb)
-    index = VectorStoreIndex(nodes, embed_model=embed_model)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    index.storage_context.persist(persist_dir=str(cache_dir))
-    _save_manifest(cache_dir, _compute_file_hashes(source_dir, required_exts))
-    return index
+        embed_model = get_embedding_for_index()
+        _embed_nodes_with_progress(nodes, embed_model, progress_cb)
+        index = VectorStoreIndex(nodes, embed_model=embed_model)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        index.storage_context.persist(persist_dir=str(cache_dir))
+        if not _save_manifest_if_unchanged(
+            cache_dir, source_dir, expected_hashes, required_exts,
+            build_fingerprint, build_config_version,
+            build_dirty_generation,
+        ):
+            raise IndexSnapshotChanged(
+                f"Source or embedding config changed during local build: {cache_dir.name}"
+            )
+        return index
 
 
 def build_resume_index(user_id: str, force_rebuild: bool = False) -> VectorStoreIndex:
     """Build or load the resume index."""
-    cache_key = (user_id, "resume")
+    cache_key = (user_id, _RESUME_INDEX_ID)
     cached = _cache_get(cache_key)
     if cached is not None and not force_rebuild:
         return cached
 
-    _init_llama_settings()
-    resume_path = settings.user_resume_path(user_id)
-    cache_dir = settings.user_index_cache_path(user_id) / "resume"
-    collection = _kb_collection_name(user_id, "resume")
+    build_lock = _get_build_lock(cache_key)
+    with build_lock:
+        if not force_rebuild:
+            cached = _cache_get(cache_key)
+            if cached is not None:
+                return cached
 
-    if _use_qdrant_kb():
-        # Qdrant-only：错误收敛成 IndexNotReady，绝不退本地（与 build_topic_index 一致）。
-        try:
-            index = _build_or_load_qdrant_index(
-                collection, resume_path, force_rebuild, allow_empty=True,
+        _init_llama_settings()
+        resume_path = settings.user_resume_path(user_id)
+        cache_dir = settings.user_index_cache_path(user_id) / _RESUME_INDEX_ID
+        collection = _kb_collection_name(user_id, _RESUME_INDEX_ID)
+
+        if _use_qdrant_kb():
+            # Qdrant-only：错误收敛成 IndexNotReady，绝不退本地（与 build_topic_index 一致）。
+            try:
+                index = _build_or_load_qdrant_index(
+                    collection, resume_path, force_rebuild, allow_empty=True,
+                    manifest_dir=cache_dir,
+                )
+            except IndexNotReady:
+                raise
+            except Exception as e:
+                logger.warning("Qdrant KB 操作失败（resume/%s）：%s", user_id, e)
+                raise IndexNotReady(f"qdrant kb unavailable: resume/{user_id}") from e
+        else:
+            index = _build_or_load_local_index(
+                cache_dir, resume_path, force_rebuild, allow_empty=True,
             )
-        except IndexNotReady:
-            raise
-        except Exception as e:
-            logger.warning("Qdrant KB 操作失败（resume/%s）：%s", user_id, e)
-            raise IndexNotReady(f"qdrant kb unavailable: resume/{user_id}") from e
-    else:
-        index = _build_or_load_local_index(
-            cache_dir, resume_path, force_rebuild, allow_empty=True,
-        )
 
-    _cache_set(cache_key, index)
-    return index
+        persisted_fingerprint = _load_embedding_fingerprint(cache_dir)
+        if not persisted_fingerprint or not _cache_set(
+            cache_key, index, persisted_fingerprint,
+        ):
+            raise IndexSnapshotChanged(
+                f"Embedding configuration changed while loading resume index: {user_id}"
+            )
+        return index
 
 
 def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False,
@@ -787,7 +1233,8 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False,
     lookup raise :class:`IndexNotReady` instead of synchronously re-embedding the
     whole topic — request-path callers pass it to avoid blocking on a rebuild.
     """
-    cache_key = (user_id, topic)
+    index_id = _topic_index_id(topic)
+    cache_key = (user_id, index_id)
     cached = _cache_get(cache_key)
     if cached is not None and not force_rebuild:
         return cached
@@ -817,7 +1264,7 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False,
 
         dir_name = topic_map[topic]
         topic_dir = settings.user_knowledge_path(user_id) / dir_name
-        cache_dir = settings.user_index_cache_path(user_id) / topic
+        cache_dir = settings.user_index_cache_path(user_id) / index_id
         exts = [".md", ".txt", ".py"]
 
         if _use_qdrant_kb():
@@ -826,7 +1273,7 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False,
             # 后台重建失败则由任务队列重试。全程不读写本地 .index_cache。
             try:
                 index = _build_or_load_qdrant_index(
-                    _kb_collection_name(user_id, topic), topic_dir, force_rebuild,
+                    _kb_collection_name(user_id, index_id), topic_dir, force_rebuild,
                     required_exts=exts, progress_cb=progress_cb, build_if_missing=build_if_missing,
                     manifest_dir=cache_dir,
                 )
@@ -841,7 +1288,13 @@ def build_topic_index(topic: str, user_id: str, force_rebuild: bool = False,
                 progress_cb=progress_cb, build_if_missing=build_if_missing,
             )
 
-        _cache_set(cache_key, index)
+        persisted_fingerprint = _load_embedding_fingerprint(cache_dir)
+        if not persisted_fingerprint or not _cache_set(
+            cache_key, index, persisted_fingerprint,
+        ):
+            raise IndexSnapshotChanged(
+                f"Embedding configuration changed while loading topic index: {topic}"
+            )
         return index
     finally:
         build_lock.release()
@@ -855,35 +1308,53 @@ def topic_index_exists(topic: str, user_id: str) -> bool:
     isn't built yet (rebuild scheduled)" from "index is fine, just no match", so the
     drill timeline can show 「索引重建中」 instead of a silent empty result.
     """
-    if _cache_get((user_id, topic)) is not None:
+    index_id = _topic_index_id(topic)
+    if _cache_get((user_id, index_id)) is not None:
         return True
     if _use_qdrant_kb():
         try:
-            return _get_qdrant_client().collection_exists(_kb_collection_name(user_id, topic))
+            cache_dir = settings.user_index_cache_path(user_id) / index_id
+            return (
+                _get_qdrant_client().collection_exists(
+                    _kb_collection_name(user_id, index_id)
+                )
+                and _embedding_fingerprint_matches(cache_dir)
+            )
         except Exception:
             return False
-    return (settings.user_index_cache_path(user_id) / topic).exists()
+    cache_dir = settings.user_index_cache_path(user_id) / index_id
+    return cache_dir.exists() and _embedding_fingerprint_matches(cache_dir)
 
 
 def topic_chunk_count(topic: str, user_id: str) -> int:
     """已索引的 chunk（节点）数量。Qdrant 后端 O(1) 取 collection 点数；本地后端取
     docstore 节点数（不做整索引加载）。取不到 / 未建 返回 0。"""
+    index_id = _topic_index_id(topic)
     if _use_qdrant_kb():
         try:
             client = _get_qdrant_client()
-            collection = _kb_collection_name(user_id, topic)
-            return client.count(collection).count if client.collection_exists(collection) else 0
+            collection = _kb_collection_name(user_id, index_id)
+            cache_dir = settings.user_index_cache_path(user_id) / index_id
+            return (
+                client.count(collection).count
+                if client.collection_exists(collection)
+                and _embedding_fingerprint_matches(cache_dir)
+                else 0
+            )
         except Exception as e:
             logger.warning("topic_chunk_count (qdrant) failed for %s/%s: %s", topic, user_id, e)
             return 0
     # 本地：优先用已缓存的内存索引；否则数 docstore.json 的节点（比向量文件小，免整载）。
-    cached = _cache_get((user_id, topic))
+    cached = _cache_get((user_id, index_id))
     if cached is not None:
         try:
             return len(cached.docstore.docs)
         except Exception:
             pass
-    docstore = settings.user_index_cache_path(user_id) / topic / "docstore.json"
+    cache_dir = settings.user_index_cache_path(user_id) / index_id
+    if not _embedding_fingerprint_matches(cache_dir):
+        return 0
+    docstore = cache_dir / "docstore.json"
     if docstore.exists():
         try:
             data = json.loads(docstore.read_text(encoding="utf-8"))
@@ -915,30 +1386,66 @@ def query_topic(topic: str, question: str, user_id: str, top_k: int = 5) -> str:
     return str(response)
 
 
-def invalidate_topic_index(topic: str, user_id: str):
-    """Remove cached index for a topic so it gets rebuilt on next access.
+def _invalidate_index(index_id: str, user_id: str, *, strict: bool) -> None:
+    cache_key = (user_id, index_id)
+    cache_dir = settings.user_index_cache_path(user_id) / index_id
+    failures: list[tuple[str, Exception]] = []
 
-    NOTE: Prefer incremental_insert_to_index() for knowledge evolution scenarios
-    to avoid costly full rebuilds. This function should only be used when the
-    knowledge base has been fundamentally restructured (files deleted, renamed, etc.).
-    """
-    cache_key = (user_id, topic)
-    with _index_cache_lock:  # see lock comment: every access must hold it
-        _index_cache.pop(cache_key, None)
-    # 配置了 Qdrant 就尽力删掉对应 collection（即便当前降级到本地，也清掉残留）。
-    if _use_qdrant_kb():
+    # Never delete persisted state underneath an active build. This lock also
+    # covers resume builds, which share the same cache-key convention.
+    build_lock = _get_build_lock(cache_key)
+    with build_lock:
+        with _index_cache_lock:  # see lock comment: every access must hold it
+            _index_cache.pop(cache_key, None)
+
+        # Remove the validity marker first. Even if a later delete fails, the
+        # remaining persisted data cannot be mistaken for a usable index.
         try:
-            client = _get_qdrant_client()
-            collection = _kb_collection_name(user_id, topic)
-            if client.collection_exists(collection):
-                client.delete_collection(collection)
-        except Exception as e:
-            logger.warning("Failed to drop Qdrant kb collection %s/%s: %s", user_id, topic, e)
-    # 本地磁盘缓存也一并清掉（默认后端，或 Qdrant 降级期间落地的索引）。
-    cache_dir = settings.user_index_cache_path(user_id) / topic
-    if cache_dir.exists():
-        import shutil
-        shutil.rmtree(cache_dir, ignore_errors=True)
+            _discard_embedding_fingerprint(cache_dir)
+        except OSError as exc:
+            failures.append(("embedding fingerprint", exc))
+
+        if _use_qdrant_kb():
+            try:
+                client = _get_qdrant_client()
+                collection = _kb_collection_name(user_id, index_id)
+                if client.collection_exists(collection):
+                    client.delete_collection(collection)
+            except Exception as exc:
+                failures.append(("Qdrant collection", exc))
+
+        if cache_dir.exists():
+            try:
+                shutil.rmtree(cache_dir)
+            except OSError as exc:
+                failures.append(("local index cache", exc))
+
+    for target, exc in failures:
+        logger.warning(
+            "Failed to invalidate %s for %s/%s: %s",
+            target, user_id, index_id, exc,
+        )
+    if strict and failures:
+        details = "; ".join(f"{target}: {exc}" for target, exc in failures)
+        raise RuntimeError(
+            f"Unable to fully invalidate index for {user_id}/{index_id}: {details}"
+        ) from failures[0][1]
+
+
+def invalidate_topic_index(
+    topic: str, user_id: str, *, strict: bool = False,
+) -> None:
+    """Remove a topic index so it gets rebuilt on next access.
+
+    Prefer incremental_insert_to_index() for knowledge evolution. Full
+    invalidation is intended for source deletion, renaming, or forced rebuilds.
+    """
+    _invalidate_index(_topic_index_id(topic), user_id, strict=strict)
+
+
+def invalidate_resume_index(user_id: str, *, strict: bool = False) -> None:
+    """Invalidate the resume index in its reserved internal namespace."""
+    _invalidate_index(_RESUME_INDEX_ID, user_id, strict=strict)
 
 
 def evict_topic_cache(topic: str, user_id: str):
@@ -950,7 +1457,30 @@ def evict_topic_cache(topic: str, user_id: str):
     ``invalidate_topic_index`` instead.
     """
     with _index_cache_lock:
-        _index_cache.pop((user_id, topic), None)
+        _index_cache.pop((user_id, _topic_index_id(topic)), None)
+
+
+def mark_topic_index_dirty(topic: str, user_id: str) -> None:
+    """Make a topic's persisted index unusable without deleting its baseline.
+
+    Used when a requested rebuild cannot enter the bounded queue.  Keeping the
+    manifest/store allows diagnostics, while removing the fingerprint prevents
+    retrieval from re-caching stale vectors.  A generation also rejects an older
+    concurrent build that started before this mark.
+    """
+    global _index_dirty_generation
+
+    index_id = _topic_index_id(topic)
+    cache_key = (user_id, index_id)
+    cache_dir = settings.user_index_cache_path(user_id) / index_id
+    with _index_dirty_lock:
+        _index_dirty_generation += 1
+        _index_dirty_generations[_dirty_cache_key(cache_dir)] = (
+            _index_dirty_generation
+        )
+        _discard_embedding_fingerprint(cache_dir)
+    with _index_cache_lock:
+        _index_cache.pop(cache_key, None)
 
 
 def incremental_insert_to_index(topic: str, user_id: str, new_text: str, source: str = "auto_evolution"):
@@ -964,19 +1494,33 @@ def incremental_insert_to_index(topic: str, user_id: str, new_text: str, source:
     "qa_ingest" for user-confirmed QA-card ingestion) so retrieval/eval can later
     distinguish or down-weight user-deposited knowledge from curated seed docs.
     """
-    cache_key = (user_id, topic)
+    index_id = _topic_index_id(topic)
+    cache_key = (user_id, index_id)
+    cache_dir = settings.user_index_cache_path(user_id) / index_id
     try:
-        index = build_topic_index(topic, user_id)
-        # Create a Document from the new text and insert into existing index
-        doc = Document(text=new_text, metadata={"source": source, "topic": topic})
-        index.insert(doc)  # qdrant-backed 时自动推送到 Qdrant，无需本地 persist
-        # 非 Qdrant 后端（本地）才需 insert 后 persist 到磁盘，否则缓存淘汰后新内容丢失。
-        if not _use_qdrant_kb():
-            cache_dir = settings.user_index_cache_path(user_id) / topic
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            index.storage_context.persist(persist_dir=str(cache_dir))
-        # Update in-memory cache
-        _cache_set(cache_key, index)
+        with _get_build_lock(cache_key):
+            build_fingerprint = _embedding_fingerprint()
+            build_dirty_generation = _get_index_dirty_generation(cache_dir)
+            index = build_topic_index(topic, user_id)
+            doc = Document(
+                text=new_text, metadata={"source": source, "topic": topic},
+            )
+            index.insert(doc)
+            if (
+                _embedding_fingerprint() != build_fingerprint
+                or _get_index_dirty_generation(cache_dir)
+                != build_dirty_generation
+            ):
+                raise IndexSnapshotChanged(
+                    f"Index state changed during insert: {topic}"
+                )
+            if not _use_qdrant_kb():
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                index.storage_context.persist(persist_dir=str(cache_dir))
+            if not _cache_set(cache_key, index, build_fingerprint):
+                raise IndexSnapshotChanged(
+                    f"Embedding configuration changed while caching insert: {topic}"
+                )
         logger.info(f"Incremental insert to index: topic={topic}, user={user_id}, text_len={len(new_text)}")
     except Exception as e:
         # If incremental insert fails (e.g. no index exists yet), fall back to invalidation
@@ -1014,11 +1558,11 @@ async def async_rebuild_topic_index(topic: str, user_id: str):
             logger.info(f"Background index rebuild completed: topic={topic}, user={user_id}")
         except Exception as e:
             logger.warning(f"Background index rebuild failed for {topic}/{user_id}: {e}")
-            try:
-                from backend.embedding_tasks import get_circuit_breaker
-                get_circuit_breaker().record_failure()
-            except Exception:
-                pass
+            # This legacy entry point does not acquire an embedding-circuit
+            # permit.  Failure accounting belongs to the queue worker (which
+            # owns the permit) or to vector_memory's admitted embedding calls;
+            # reporting here would let an unadmitted/late failure mutate a
+            # HALF_OPEN recovery probe.
 
 
 # ── Safe retrieval timeout (seconds) ──
@@ -1028,10 +1572,6 @@ _RETRIEVAL_TIMEOUT = 60.0
 # seconds; a full rebuild can be longer, but past this we skip to the next topic
 # so one slow/unreachable topic can't stall the whole serial warmup queue.
 _WARMUP_PER_TOPIC_TIMEOUT = 120.0
-
-
-from dataclasses import dataclass
-
 
 @dataclass
 class ChunkWithMeta:

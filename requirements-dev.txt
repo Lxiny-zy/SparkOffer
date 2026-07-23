@@ -1,4 +1,4 @@
-# Dev/test-only dependencies — NOT installed into the production Docker image.
+# Dev/test-only dependencies - NOT installed into the production Docker image.
 # Install on the server with:  pip install -r requirements-dev.txt
 # Run tests with:              python -m pytest tests/ -v
 pytest>=8.0.0

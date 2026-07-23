@@ -17,6 +17,7 @@ class ChannelState:
     __slots__ = (
         "channel_id", "healthy", "error_count", "cooldown_until",
         "current_key_index", "probing", "probe_started",
+        "active_probe_token",
     )
 
     def __init__(self, channel_id: str):
@@ -27,6 +28,9 @@ class ChannelState:
         self.current_key_index = 0
         self.probing = False
         self.probe_started = 0.0
+        # A probe may outlive its admission timeout.  Keep an opaque generation
+        # token so a late completion cannot mutate a newer probe's state.
+        self.active_probe_token: str | None = None
 
     def next_key(self, keys: list[str]) -> str:
         if not keys:
@@ -35,8 +39,36 @@ class ChannelState:
         self.current_key_index = (self.current_key_index + 1) % len(keys)
         return key
 
-    def mark_error(self):
+    def _accept_probe_completion(self, probe_token: str | None) -> bool:
+        """Validate and consume a probe lease, if the caller supplied one.
+
+        Tokenless calls retain historical behavior for healthy channels. A
+        HALF_OPEN completion must own the active lease, so both stale tokens
+        and legacy tokenless callbacks are ignored while a probe is active.
+        """
+        if probe_token is None:
+            # A tokenless completion remains valid for ordinary healthy-channel
+            # calls, but it cannot prove ownership of a HALF_OPEN admission.
+            return not self.probing
+        if not self.probing or self.active_probe_token != probe_token:
+            return False
         self.probing = False
+        self.probe_started = 0.0
+        self.active_probe_token = None
+        return True
+
+    def invalidate_probe(self) -> None:
+        """Invalidate an in-flight probe when channel configuration reloads."""
+        self.probing = False
+        self.probe_started = 0.0
+        self.active_probe_token = None
+
+    def mark_error(self, probe_token: str | None = None) -> bool:
+        if not self._accept_probe_completion(probe_token):
+            return False
+        self.probing = False
+        self.probe_started = 0.0
+        self.active_probe_token = None
         self.error_count += 1
         if self.error_count >= MAX_ERRORS_BEFORE_COOLDOWN:
             self.healthy = False
@@ -45,13 +77,19 @@ class ChannelState:
                 "Channel %s entered cooldown for %.0fs after %d errors",
                 self.channel_id, COOLDOWN_SECONDS, self.error_count,
             )
+        return True
 
-    def mark_success(self):
+    def mark_success(self, probe_token: str | None = None) -> bool:
+        if not self._accept_probe_completion(probe_token):
+            return False
         if self.error_count > 0:
             logger.info("Channel %s recovered", self.channel_id)
         self.error_count = 0
         self.healthy = True
         self.probing = False
+        self.probe_started = 0.0
+        self.active_probe_token = None
+        return True
 
     def is_available(self) -> bool:
         if self.healthy:
@@ -65,8 +103,26 @@ class ChannelState:
         # healthy stays False until a real mark_success() so the gate keeps holding.
         if self.probing and (now - self.probe_started) < PROBE_TIMEOUT_SECONDS:
             return False
+        # UUIDs remain unique even if a channel id is removed and later added,
+        # which would otherwise reset a per-state integer generation (ABA).
+        self.active_probe_token = uuid.uuid4().hex
         self.probing = True
         self.probe_started = now
+        return True
+
+    def probe_token(self) -> str | None:
+        """Return the token attached to the currently admitted probe."""
+        return self.active_probe_token if self.probing else None
+
+    def release_probe(self, probe_token: str | None) -> bool:
+        """Release a probe without changing health (e.g. a cache hit)."""
+        if probe_token is None or not self.probing:
+            return False
+        if self.active_probe_token != probe_token:
+            return False
+        self.probing = False
+        self.probe_started = 0.0
+        self.active_probe_token = None
         return True
 
 
@@ -92,7 +148,12 @@ class ChannelManager:
             for ch in sorted_channels:
                 cid = ch["id"]
                 if cid in old_states:
-                    new_states[cid] = old_states[cid]
+                    state = old_states[cid]
+                    # A config reload can replace the endpoint while an old
+                    # request is still in flight.  Do not let that request
+                    # report against the newly loaded channel generation.
+                    state.invalidate_probe()
+                    new_states[cid] = state
                 else:
                     new_states[cid] = ChannelState(cid)
             self._states[section] = new_states
@@ -134,6 +195,9 @@ class ChannelManager:
                 resolved = dict(ch)
                 if state:
                     resolved["api_key"] = state.next_key(ch.get("keys", []))
+                    probe_token = state.probe_token()
+                    if probe_token is not None:
+                        resolved["_probe_token"] = probe_token
                 else:
                     keys = ch.get("keys", [])
                     resolved["api_key"] = keys[0] if keys else ""
@@ -152,17 +216,38 @@ class ChannelManager:
                     )
         return None
 
-    def report_error(self, section: str, channel_id: str):
+    def report_error(
+        self,
+        section: str,
+        channel_id: str,
+        probe_token: str | None = None,
+    ):
         with self._lock:
             state = self._states.get(section, {}).get(channel_id)
             if state:
-                state.mark_error()
+                state.mark_error(probe_token)
 
-    def report_success(self, section: str, channel_id: str):
+    def report_success(
+        self,
+        section: str,
+        channel_id: str,
+        probe_token: str | None = None,
+    ):
         with self._lock:
             state = self._states.get(section, {}).get(channel_id)
             if state:
-                state.mark_success()
+                state.mark_success(probe_token)
+
+    def release_probe(
+        self,
+        section: str,
+        channel_id: str,
+        probe_token: str | None,
+    ):
+        with self._lock:
+            state = self._states.get(section, {}).get(channel_id)
+            if state:
+                state.release_probe(probe_token)
 
     def get_health(self, section: str) -> list[dict]:
         with self._lock:
@@ -208,11 +293,14 @@ def get_channel(section: str, tier: str | None = None) -> dict | None:
 def get_next_channel(section: str, exclude: set[str], tier: str | None = None) -> dict | None:
     return _manager.get_next_channel(section, exclude, tier=tier)
 
-def report_error(section: str, channel_id: str):
-    _manager.report_error(section, channel_id)
+def report_error(section: str, channel_id: str, probe_token: str | None = None):
+    _manager.report_error(section, channel_id, probe_token=probe_token)
 
-def report_success(section: str, channel_id: str):
-    _manager.report_success(section, channel_id)
+def report_success(section: str, channel_id: str, probe_token: str | None = None):
+    _manager.report_success(section, channel_id, probe_token=probe_token)
+
+def release_probe(section: str, channel_id: str, probe_token: str | None):
+    _manager.release_probe(section, channel_id, probe_token=probe_token)
 
 def get_health(section: str) -> list[dict]:
     return _manager.get_health(section)

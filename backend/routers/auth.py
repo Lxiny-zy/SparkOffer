@@ -1,9 +1,12 @@
 """Auth routes — login, register, config, account management.
 
 Login/register are rate-limited per client IP (in-memory sliding window) and
-write to the audit log. Behind nginx the client IP comes from X-Forwarded-For
-(first hop), which frontend/nginx.conf sets from $remote_addr.
+write to the audit log. Forwarding headers are accepted only from explicitly
+configured trusted proxy networks.
 """
+import hashlib
+import ipaddress
+
 from fastapi import APIRouter, HTTPException, Depends, Request
 
 from backend.models import RegisterRequest, LoginRequest, UpdateProfileRequest, ChangePasswordRequest
@@ -11,7 +14,7 @@ from backend.config import settings
 from backend.auth import (
     create_user, authenticate_user, create_token, get_current_user,
     update_user_profile, change_user_password, get_user_by_id,
-    MIN_PASSWORD_LENGTH,
+    validate_new_password,
 )
 from backend import rate_limit
 from backend.storage.audit import log_event
@@ -27,16 +30,52 @@ _REGISTER_WINDOW_S = 3600
 
 
 def client_ip(request: Request) -> str:
-    # X-Real-IP is unconditionally overwritten by our nginx (frontend/nginx.conf),
-    # so it can't be spoofed through the proxy. X-Forwarded-For is append-style
-    # (client-supplied values survive in front), so it's only a fallback.
+    peer_host = request.client.host if request.client else "unknown"
+    try:
+        peer_ip = ipaddress.ip_address(peer_host)
+    except ValueError:
+        return peer_host
+
+    try:
+        trusted_networks = settings.trusted_proxy_networks()
+        trusted = any(peer_ip in network for network in trusted_networks)
+    except ValueError:
+        # Startup validation normally catches this. Staying on the direct peer
+        # is the secure behavior if this helper is invoked independently.
+        trusted = False
+    if not trusted:
+        return str(peer_ip)
+
+    # Walk X-Forwarded-For from the server side of the chain. Selecting the
+    # left-most value directly lets a client prepend a spoofed address when a
+    # trusted proxy appends instead of replacing the incoming header.
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        try:
+            chain = [
+                ipaddress.ip_address(value.strip())
+                for value in forwarded.split(",")
+                if value.strip()
+            ]
+        except ValueError:
+            return str(peer_ip)
+        if not chain:
+            return str(peer_ip)
+
+        current = peer_ip
+        for candidate in reversed(chain):
+            if not any(current in network for network in trusted_networks):
+                return str(current)
+            current = candidate
+        return str(current)
+
     real = request.headers.get("x-real-ip", "").strip()
     if real:
-        return real
-    fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+        try:
+            return str(ipaddress.ip_address(real))
+        except ValueError:
+            return str(peer_ip)
+    return str(peer_ip)
 
 
 @router.get("/auth/config")
@@ -69,19 +108,25 @@ def login(req: LoginRequest, request: Request):
     email = req.email.lower().strip()
     # Two buckets: (ip, email) so one user's typos can't lock out others behind
     # the same NAT, plus a coarse per-ip cap against credential spraying.
-    acct_key = f"login:{ip}:{email}"
+    email_key = hashlib.sha256(email.encode("utf-8")).hexdigest()[:20]
+    acct_key = f"login:{ip}:{email_key}"
     ip_key = f"login-ip:{ip}"
-    if not rate_limit.allow(acct_key, _LOGIN_MAX_FAILURES, _LOGIN_WINDOW_S) \
-            or not rate_limit.allow(ip_key, _LOGIN_IP_MAX_FAILURES, _LOGIN_WINDOW_S):
+    reserved, reservation_token = rate_limit.reserve_many([
+        (acct_key, _LOGIN_MAX_FAILURES, _LOGIN_WINDOW_S),
+        (ip_key, _LOGIN_IP_MAX_FAILURES, _LOGIN_WINDOW_S),
+    ])
+    if not reserved:
         log_event("login_rate_limited", email=email, ip=ip)
         raise HTTPException(429, "Too many failed attempts, try again later")
     user = authenticate_user(email, req.password)
     if not user:
-        rate_limit.record_failure(acct_key, _LOGIN_WINDOW_S)
-        rate_limit.record_failure(ip_key, _LOGIN_WINDOW_S)
         log_event("login_failed", email=email, ip=ip)
         raise HTTPException(401, "Invalid email or password")
-    rate_limit.reset(acct_key)
+    # The reservation protects the bcrypt interval. Successful attempts do not
+    # count toward the failed-attempt windows, so remove exactly this request's
+    # event without clearing failures from concurrent requests.
+    rate_limit.release_record(acct_key, reservation_token)
+    rate_limit.release_record(ip_key, reservation_token)
     log_event("login_success", user_id=user["id"], email=user["email"], ip=ip)
     token = create_token(user["id"])
     return {"token": token, "user": user}
@@ -105,8 +150,7 @@ def update_profile(req: UpdateProfileRequest, request: Request, user_id: str = D
 
 @router.put("/auth/password")
 def change_password(req: ChangePasswordRequest, request: Request, user_id: str = Depends(get_current_user)):
-    if len(req.new_password) < MIN_PASSWORD_LENGTH:
-        raise HTTPException(422, f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
+    validate_new_password(req.new_password)
     ok = change_user_password(user_id, req.current_password, req.new_password)
     if not ok:
         log_event("password_change_failed", user_id=user_id, ip=client_ip(request))

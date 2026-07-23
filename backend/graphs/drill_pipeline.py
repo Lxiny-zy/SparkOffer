@@ -20,10 +20,8 @@ surface for Phases 2-7 to plug into.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
-import uuid
 from collections.abc import AsyncGenerator
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -36,7 +34,7 @@ from backend.graphs.seed_pool import draft_from_seed_pool, has_pool
 from backend.graphs.validators import (
     DEFAULT_VALIDATORS, ValidationContext, ValidationResult,
 )
-from backend.indexer import safe_retrieve_topic_context, topic_index_exists
+from backend.indexer import topic_index_exists
 from backend.llm_provider import get_langchain_llm
 from backend.context_assembler import ContextBudget, Section, resolve_input_budget, count_tokens
 from backend.ai_config import get_retrieval_setting
@@ -48,7 +46,7 @@ from backend.prompts.interviewer import (
 from backend.prompts.strategies import allocate_slots, render_strategy_block, difficulty_range_for_plan
 from backend.redis_cache import get_cache
 from backend.spaced_repetition import get_due_reviews, init_sr_for_existing_points
-from backend.storage.sessions import create_session
+from backend.storage.sessions import create_session, new_session_id
 from backend.utils.sse_helpers import sse_event, iter_llm_stream
 from backend.utils.stream_parser import extract_complete_objects
 
@@ -767,7 +765,7 @@ class DrillPipeline:
         except Exception as exc:
             logger.warning("Difficulty calibration skipped: %s", exc)
 
-        self.session_id = uuid.uuid4().hex[:8]
+        self.session_id = new_session_id()
         create_session(
             self.session_id, self.mode, self.topic,
             questions=self.questions, user_id=self.user_id,
