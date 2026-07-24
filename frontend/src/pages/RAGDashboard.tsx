@@ -996,7 +996,7 @@ export default function RAGDashboard() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-5xl mx-auto w-full space-y-6">
+    <div className="sig-page flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-5xl mx-auto w-full space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -1170,7 +1170,7 @@ export default function RAGDashboard() {
                 ? "固定版本查询集，不调用 LLM 裁判；适合回归门禁。"
                 : "从当前知识库按 seed=42 合成 golden 集并调用 LLM 裁判；结果有模型随机性。"}
               {retrievalMode === "production_replay"
-                ? " 当前复放多查询 → RRF → 语义去重 → 重排链路。"
+                ? " 当前复放多查询、RRF、语义去重与重排链路。"
                 : " 当前只检查单查询基础向量召回。"}
             </span>
           </div>

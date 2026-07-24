@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import { ArrowLeft, ArrowRight } from "lucide-react";
+import { ArrowLeft, ArrowRight, BrainCircuit, Database, ShieldCheck } from "lucide-react";
 import CatAvatar from "@/components/CatAvatar";
+import GeometricNetwork from "@/components/GeometricNetwork";
 
 export default function Login() {
   const [isRegister, setIsRegister] = useState(false);
@@ -88,8 +89,41 @@ export default function Login() {
 
       <div className="sig-hr" />
 
-      {/* Card */}
-      <div className="relative z-10 flex-1 grid place-items-center px-6 py-14 md:py-20">
+      {/* Editorial split: product thesis on the left, focused auth on the right */}
+      <div className="relative z-10 flex-1 w-full max-w-[1440px] mx-auto grid lg:grid-cols-[minmax(0,1.25fr)_minmax(420px,0.75fr)]">
+        <section className="sig-auth-manifesto hidden lg:flex relative min-h-[calc(100vh-130px)] overflow-hidden border-r" style={{ borderColor: "var(--sig-line)" }}>
+          <GeometricNetwork />
+          <div className="relative z-10 w-full flex flex-col justify-between p-10 xl:p-16">
+            <div>
+              <div className="sig-kicker">// CONTINUOUS INTERVIEW INTELLIGENCE</div>
+              <h2 className="sig-display mt-8 text-[clamp(4rem,7vw,7.5rem)] leading-[0.82]">
+                ONE<br />SESSION<br /><span className="sig-accent-c">AHEAD.</span>
+              </h2>
+              <p className="mt-8 max-w-xl text-[15px] leading-relaxed text-[color:var(--sig-dim)]">
+                不是清空上下文后重新开始。训练、评估、画像与复习调度组成同一个持续演进的系统。
+              </p>
+            </div>
+
+            <div className="grid grid-cols-3 border" style={{ borderColor: "var(--sig-line)" }}>
+              {[
+                [BrainCircuit, "MEMORY", "跨会话画像"],
+                [Database, "CONTEXT", "知识库检索"],
+                [ShieldCheck, "PRIVATE", "数据归你"],
+              ].map(([Icon, label, detail]) => {
+                const FeatureIcon = Icon as typeof BrainCircuit;
+                return (
+                  <div key={String(label)} className="p-4 border-r last:border-r-0" style={{ borderColor: "var(--sig-line)" }}>
+                    <FeatureIcon size={16} className="text-[color:var(--sig-accent)]" />
+                    <div className="sig-kicker mt-4">{String(label)}</div>
+                    <div className="mt-1 text-[11px] text-[color:var(--sig-dim)]">{String(detail)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </section>
+
+        <section className="flex items-center justify-center px-6 py-14 md:py-20 lg:px-10">
         <div className="w-full max-w-[420px]">
           <div className="sig-kicker">// {isRegister ? "创建账号" : "登录"}</div>
           <h1 className="sig-display mt-4 text-[clamp(2rem,6vw,3.25rem)]">
@@ -99,7 +133,7 @@ export default function Login() {
             {isRegister ? "创建账号，开启你的自适应面试训练。" : "继续你的训练 — 进度与画像已为你保留。"}
           </p>
 
-          <div className="sig-card mt-8 p-6 md:p-7">
+          <div className="sig-card sig-auth-card mt-8 p-6 md:p-7">
             <form onSubmit={handleSubmit} className="space-y-5">
               {isRegister && (
                 <div className="space-y-2">
@@ -175,6 +209,7 @@ export default function Login() {
 
           <p className="sig-kicker mt-6 text-center">本地优先 · 数据归你 · Built with Claude</p>
         </div>
+        </section>
       </div>
     </div>
   );

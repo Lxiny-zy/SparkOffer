@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { FileText, ChevronRight, Target, TrendingUp, Zap, BriefcaseBusiness, AlertCircle, CheckCircle2, Brain } from "lucide-react";
+import { FileText, ChevronRight, ArrowRight, Target, TrendingUp, Zap, BriefcaseBusiness, AlertCircle, CheckCircle2, Brain } from "lucide-react";
 import { toast } from "sonner";
 import TopicCard from "../components/TopicCard";
 import { getTopics, startInterview, startInterviewStream, getResumeStatus, uploadResume, getProfile, getDueReviews } from "../api/interview";
@@ -305,21 +305,43 @@ export default function Home() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
-      {/* Hero */}
-      <div className="text-center mb-10 md:mb-12">
-        <div className="sig-kicker mb-3 inline-block">// AI-POWERED MOCK INTERVIEW</div>
-        <h1 className="sig-display text-3xl md:text-[44px] mb-3">
-          SparkOffer<span className="sig-accent-c">.</span>
-        </h1>
-        <p className="text-base text-dim max-w-[500px] mx-auto">
-          越练越懂你的 AI 面试教练——追踪你的成长轨迹，精准命中薄弱点
-        </p>
+    <div className="sig-page flex-1 overflow-y-auto min-h-0 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
+      {/* Editorial hero: product statement + live, real user signals */}
+      <div className="w-full max-w-[1320px] grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-end mb-10 md:mb-14">
+        <div className="lg:col-span-8 text-left">
+          <div className="sig-kicker mb-4 inline-block">// AI-POWERED MOCK INTERVIEW</div>
+          <h1 className="sig-display text-[clamp(2.8rem,7vw,5.8rem)] leading-[0.88] mb-5">
+            TRAIN.<br />ADAPT.<br /><span className="sig-accent-c">OFFER.</span>
+          </h1>
+          <p className="text-[15px] md:text-base text-dim max-w-[620px] leading-relaxed">
+            越练越懂你的 AI 面试教练。每次回答都会写回长期画像，下一道题由你此刻真实的薄弱点生成。
+          </p>
+        </div>
+
+        <div className="sig-home-console lg:col-span-4" aria-label="训练概览">
+          <div className="sig-kicker flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: "var(--sig-line)" }}>
+            <span>LIVE PROFILE</span>
+            <span className="text-[color:var(--sig-success)]">SYNCED</span>
+          </div>
+          <div className="grid grid-cols-2">
+            {[
+              ["SESSIONS", profile?.stats?.total_sessions ?? 0],
+              ["AVG SCORE", profile?.stats?.avg_score ?? "—"],
+              ["TOPICS", Object.keys(topics).length],
+              ["DUE REVIEW", dueReviews.length],
+            ].map(([label, value]) => (
+              <div key={label} className="sig-home-metric">
+                <span className="sig-kicker">{label}</span>
+                <strong className="sig-stat text-2xl md:text-3xl">{value}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* Mode cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 md:gap-6 mb-10 md:mb-12 w-full max-w-[1320px] stagger-scale">
-        {MODE_CARDS.map((card) => {
+        {MODE_CARDS.map((card, index) => {
           const Icon = card.icon;
           const isActive = mode === card.mode;
           return (
@@ -328,7 +350,7 @@ export default function Home() {
               data-spotlight={isActive ? undefined : ""}
               style={isActive ? { borderColor: "var(--sig-accent)", background: "color-mix(in srgb, var(--sig-accent) 6%, transparent)" } : undefined}
               className={cn(
-                "sig-card w-full relative overflow-hidden cursor-pointer text-left active:scale-[0.97] group",
+                "sig-card sig-mode-card w-full relative overflow-hidden cursor-pointer text-left active:scale-[0.97] group",
                 "transition-[transform,border-color,background-color] duration-300 ease-[cubic-bezier(0.2,0,0,1)]",
                 isActive ? "" : "sig-hover-lift spotlight"
               )}
@@ -339,6 +361,7 @@ export default function Home() {
                 if (switching) resetStreaming();
               }}
             >
+              <span className="sig-mode-index sig-num">{String(index + 1).padStart(2, "0")}</span>
               {/* L1 — Eyebrow 眼眉色条 */}
               <div className="relative px-6 pt-6 pb-0">
                 <div className="flex items-center gap-2 mb-3">
@@ -405,8 +428,8 @@ export default function Home() {
                 </div>
               ))}
               {dueReviews.length > 6 && (
-                <div className="text-[12px] text-dim pt-1 text-center">
-                  还有 {dueReviews.length - 6} 个薄弱点 →
+                <div className="text-[12px] text-dim pt-1 flex items-center justify-center gap-1">
+                  还有 {dueReviews.length - 6} 个薄弱点 <ArrowRight size={12} aria-hidden="true" />
                 </div>
               )}
             </div>
@@ -577,7 +600,7 @@ export default function Home() {
                 });
               }}
             >
-              开始答题 →
+              开始答题 <ArrowRight size={16} aria-hidden="true" />
             </Button>
           </CardContent>
         </Card>

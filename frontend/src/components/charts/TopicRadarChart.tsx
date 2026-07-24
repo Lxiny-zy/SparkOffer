@@ -2,6 +2,7 @@ import {
   ResponsiveContainer, RadarChart, Radar, PolarGrid,
   PolarAngleAxis, PolarRadiusAxis, Tooltip,
 } from "recharts";
+import { ArrowRight } from "lucide-react";
 import { TopicMastery } from "../../types/api";
 
 interface CustomTooltipProps {
@@ -21,7 +22,7 @@ function CustomTooltip({ active, payload }: CustomTooltipProps) {
       <div className="font-medium">{d.topic}</div>
       <div className="font-bold text-primary mt-0.5">
         {prev != null ? (
-          <>{prev} → {current} <span className={diff! > 0 ? "text-green" : diff! < 0 ? "text-red" : "text-dim"}>({diff! > 0 ? "+" : ""}{diff})</span></>
+          <span className="inline-flex items-center gap-1">{prev} <ArrowRight size={12} aria-hidden="true" /> {current} <span className={diff! > 0 ? "text-green" : diff! < 0 ? "text-red" : "text-dim"}>({diff! > 0 ? "+" : ""}{diff})</span></span>
         ) : (
           <>{current}/100</>
         )}

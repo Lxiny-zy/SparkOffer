@@ -155,7 +155,7 @@ export default function AlgorithmCollection() {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
+    <div className="sig-page flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
       {/* Header */}
       <div className="mb-8 animate-fade-in">
         <div className="sig-kicker mb-2">// 算法收藏 / ALGORITHMS</div>

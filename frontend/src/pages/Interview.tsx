@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { useParams, useLocation, useNavigate } from "react-router-dom";
 import { Markdown } from "../components/ChatBubble";
-import { Check, Minus, Star, Lightbulb, Eye, Loader2, RefreshCw } from "lucide-react";
+import { Check, Minus, Star, Lightbulb, Eye, Loader2, RefreshCw, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import ChatBubble from "../components/ChatBubble";
 import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics, type DrillProgressPayload } from "../api/interview";
@@ -9,6 +9,7 @@ import { formatQuestionLabel } from "@/lib/question";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { scrollToElement } from "@/lib/utils";
 import type { Question, ChatMessage } from "../types/api";
 
 interface HintState {
@@ -258,7 +259,7 @@ export default function Interview() {
   }, [drillInput, currentIndex, questions, isBatchMode, restoring, finished]);
 
   useEffect(() => {
-    if (!isBatchMode) chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!isBatchMode) scrollToElement(chatEndRef.current);
   }, [messages, sending, isBatchMode]);
 
   useEffect(() => {
@@ -564,8 +565,8 @@ export default function Interview() {
 
   if (isBatchMode) {
     return (
-      <div className="flex-1 flex flex-col h-full">
-        <div className="flex items-center justify-between px-3 py-2.5 md:px-6 md:py-3 border-b border-border/50 flex-wrap gap-2" style={{ background: "var(--sig-bg)" }}>
+      <div className="sig-page sig-workspace flex-1 flex flex-col h-full">
+        <div className="sig-workspace-header flex items-center justify-between px-3 py-2.5 md:px-6 md:py-3 border-b border-border/50 flex-wrap gap-2" style={{ background: "var(--sig-bg)" }}>
           <div className="flex items-center gap-2 md:gap-3 flex-wrap min-w-0">
             <Badge variant={modeBadge.variant as any}>{modeBadge.text}</Badge>
             {isJobPrep
@@ -583,7 +584,7 @@ export default function Interview() {
           </Button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-8 flex flex-col items-center gap-4 md:gap-5">
+        <div className="sig-workspace-scroll flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-8 flex flex-col items-center gap-4 md:gap-5">
           {/* Eval failure banner — answers are preserved; one-click retry. */}
           {evalError && !submitting && (
             <div className="w-full max-w-[720px] rounded-xl bg-red/8 border border-red/20 px-4 py-3.5 flex flex-col gap-2 animate-fade-in">
@@ -789,8 +790,8 @@ export default function Interview() {
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full">
-      <div className="flex items-center justify-between px-4 py-3 md:px-6 border-b border-border/50" style={{ background: "var(--sig-bg)" }}>
+    <div className="sig-page sig-workspace flex-1 flex flex-col h-full">
+      <div className="sig-workspace-header flex items-center justify-between px-4 py-3 md:px-6 border-b border-border/50" style={{ background: "var(--sig-bg)" }}>
         <div className="flex items-center gap-2 md:gap-3 flex-wrap">
           <Badge variant={modeBadge.variant as any}>{modeBadge.text}</Badge>
           {effectiveInit.topic && <span className="text-sm text-dim">{effectiveInit.topic}</span>}
@@ -806,7 +807,7 @@ export default function Interview() {
         </Button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-6 md:px-6 md:py-8 flex flex-col gap-7 max-w-3xl w-full mx-auto">
+      <div className="sig-workspace-scroll flex-1 overflow-y-auto px-4 py-6 md:px-6 md:py-8 flex flex-col gap-7 max-w-3xl w-full mx-auto">
         {messages.map((msg, i) => (
           <ChatBubble key={i} role={msg.role} content={msg.content} />
         ))}
@@ -821,7 +822,7 @@ export default function Interview() {
         <div ref={chatEndRef} />
       </div>
 
-        <div className="px-3 pt-3 pb-4 md:px-6 md:pt-4 md:pb-6 flex justify-center safe-area-bottom border-t border-border/50" style={{ background: "var(--sig-bg)" }}>
+        <div className="sig-workspace-composer px-3 pt-3 pb-4 md:px-6 md:pt-4 md:pb-6 flex justify-center safe-area-bottom border-t border-border/50" style={{ background: "var(--sig-bg)" }}>
           <div className="relative w-full max-w-3xl">
             <textarea
               ref={textareaRef}
@@ -889,7 +890,7 @@ function SaveIndicator({ status, lastSavedAt }: SaveIndicatorProps) {
   // error
   return (
     <span className="text-[11px] text-orange flex items-center gap-1 whitespace-nowrap" title="本地已缓存，云端连接恢复后会自动同步">
-      ⚠ 云端失败
+      <AlertTriangle size={11} aria-hidden="true" /> 云端失败
     </span>
   );
 }

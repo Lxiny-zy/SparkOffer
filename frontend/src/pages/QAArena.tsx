@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, memo, useMemo } from "react";
 import {
   Plus, Trash2, Send, Download, FileText, Loader2,
-  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square, RefreshCw, AlertCircle, Brain, BookPlus, ImagePlus,
+  MessageSquare, Pencil, Check, X, PanelLeftOpen, Eraser, Square, RefreshCw, AlertCircle, Brain, BookPlus, ImagePlus, CheckCircle2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Markdown } from "../components/ChatBubble";
@@ -952,21 +952,23 @@ export default function QAArena() {
   }
 
   return (
-    <div className="flex flex-1 min-h-0 overflow-hidden">
+    <div className="sig-page sig-workspace flex flex-1 min-h-0 overflow-hidden">
       {/* ── Left sidebar: session list ── */}
       {/* Desktop sidebar */}
-      <aside className="hidden md:flex flex-col border-r border-border bg-bg shrink-0 w-64">
-        <div className="p-3 flex items-center gap-2 border-b border-border">
+      <aside className="sig-workspace-sidebar hidden md:flex flex-col border-r border-border bg-bg shrink-0 w-64">
+        <div className="sig-workspace-sidebar-head p-3 flex items-center gap-2 border-b border-border">
+          <span className="sig-workspace-sidebar-label flex-1">SESSION INDEX</span>
           <Button variant="outline" size="sm" className="flex-1 gap-1.5" onClick={handleNewSession} disabled={sessionLoading || sessionListBusy}>
             <Plus className="w-4 h-4" /> 新对话
           </Button>
         </div>
-        <div className="flex-1 overflow-y-auto">
+        <div className="sig-workspace-sidebar-list flex-1 overflow-y-auto">
           {sessions.map((s) => (
             <div
               key={s.id}
+              data-active={s.id === activeId}
               className={cn(
-                "group flex items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors border-b border-border/50",
+                "sig-workspace-row group flex items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors border-b border-border/50",
                 s.id === activeId ? "bg-secondary" : "hover:bg-secondary/50",
               )}
               onClick={() => {
@@ -1026,9 +1028,9 @@ export default function QAArena() {
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
         <div className="fixed inset-0 z-50 md:hidden flex">
-          <aside className="flex flex-col border-r border-border bg-bg w-72 max-w-[85vw] shadow-2xl animate-slide-in-right z-10">
-            <div className="p-3 border-b border-border flex items-center justify-between">
-              <span className="text-sm font-medium text-dim">对话列表</span>
+          <aside className="sig-workspace-sidebar flex flex-col border-r border-border bg-bg w-72 max-w-[85vw] shadow-2xl animate-slide-in-right z-10">
+            <div className="sig-workspace-sidebar-head p-3 border-b border-border flex items-center justify-between">
+              <span className="sig-workspace-sidebar-label">SESSION INDEX</span>
               <button onClick={() => setSidebarOpen(false)} className="p-1 rounded-lg hover:bg-secondary text-dim">
                 <X className="w-4 h-4" />
               </button>
@@ -1039,12 +1041,13 @@ export default function QAArena() {
                   <Plus className="w-4 h-4" /> 新对话
                 </Button>
               </div>
-              <div className="flex-1 overflow-y-auto">
+              <div className="sig-workspace-sidebar-list flex-1 overflow-y-auto">
                 {sessions.map((s) => (
                   <div
                     key={s.id}
+                    data-active={s.id === activeId}
                     className={cn(
-                      "group flex items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors border-b border-border/50",
+                      "sig-workspace-row group flex items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors border-b border-border/50",
                       s.id === activeId ? "bg-secondary" : "hover:bg-secondary/50",
                     )}
                     onClick={() => {
@@ -1105,17 +1108,20 @@ export default function QAArena() {
       )}
 
       {/* ── Right main area ── */}
-      <div className="flex-1 flex flex-col min-w-0 min-h-0">
+      <div className="sig-workspace-main flex-1 flex flex-col min-w-0 min-h-0">
         {/* Header */}
-        <div className="px-3 py-2.5 md:px-4 border-b border-border flex items-center gap-2">
+        <div className="sig-workspace-header px-3 py-2.5 md:px-4 border-b border-border flex items-center gap-2">
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-1.5 rounded-lg hover:bg-secondary text-dim md:hidden shrink-0">
             <PanelLeftOpen className="w-5 h-5" />
           </button>
-          <h2 className="text-base font-medium flex-1 truncate min-w-0">
-            {activeSession?.title || "问答演练场"}
-          </h2>
+          <div className="sig-workspace-heading flex-1 min-w-0">
+            <span className="sig-kicker hidden sm:block">// Q&amp;A / LIVE</span>
+            <h2 className="sig-workspace-title truncate">
+              {activeSession?.title || "问答演练场"}
+            </h2>
+          </div>
           {activeId && (
-            <div className="flex items-center gap-1 shrink-0">
+            <div className="sig-workspace-toolbar flex items-center gap-1 shrink-0">
               <Button
                 variant="ghost"
                 size="sm"
@@ -1176,7 +1182,7 @@ export default function QAArena() {
         </div>
 
         {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 md:px-8 py-6">
+        <div ref={scrollRef} className="sig-workspace-scroll flex-1 overflow-y-auto px-3 md:px-8 py-6">
           {sessionLoading ? (
             <div className="h-full flex items-center justify-center">
               <Loader2 className="w-5 h-5 animate-spin text-dim" />
@@ -1228,7 +1234,7 @@ export default function QAArena() {
 
         {/* Input */}
         {activeId && !sessionLoadError && (
-          <div className="px-3 md:px-8 py-3 border-t border-border/50 safe-area-bottom" style={{ background: "var(--sig-bg)" }}>
+          <div className="sig-workspace-composer px-3 md:px-8 py-3 border-t border-border/50 safe-area-bottom" style={{ background: "var(--sig-bg)" }}>
             {streamError && !isStreaming && (
               <div className="max-w-3xl mx-auto mb-2 flex items-center gap-1.5 text-xs text-dim">
                 <AlertCircle className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--sig-accent)" }} />
@@ -1354,12 +1360,12 @@ export default function QAArena() {
             </div>
             {ingestResult && (
               <div
-                className="px-5 py-2 text-xs border-b border-border/50"
+                className="px-5 py-2 text-xs border-b border-border/50 flex items-center gap-1.5"
                 style={{ color: ingestResult.ok ? "var(--sig-accent)" : "var(--sig-fg-dim, #888)" }}
               >
                 {ingestResult.ok
-                  ? `✓ 已收录到「${ingestResult.topic}」知识库，下次出题即可检索到`
-                  : `· ${ingestResult.reason}`}
+                  ? <><CheckCircle2 size={13} aria-hidden="true" /> 已收录到「{ingestResult.topic}」知识库，下次出题即可检索到</>
+                  : ingestResult.reason}
               </div>
             )}
             <div className="px-5 py-4 flex-1">

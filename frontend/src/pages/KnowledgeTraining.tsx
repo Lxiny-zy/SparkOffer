@@ -332,14 +332,14 @@ export default function KnowledgeTraining() {
     (studyMode === "review" || studyMode === "saved" || !!selectedInfo?.available);
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
-      <header className="border-b border-border px-4 py-3 md:px-6" style={{ background: "var(--sig-bg)" }}>
+    <div className="sig-page sig-workspace flex flex-1 min-h-0 flex-col overflow-hidden">
+      <header className="sig-workspace-header border-b border-border px-4 py-3 md:px-6" style={{ background: "var(--sig-bg)" }}>
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="min-w-0">
+          <div className="sig-workspace-heading min-w-0">
             <div className="sig-kicker mb-1">// KNOWLEDGE TRAINING</div>
-            <h1 className="text-xl font-semibold tracking-normal">知识训练场</h1>
+            <h1 className="sig-workspace-title sig-display">知识训练场</h1>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="sig-workspace-toolbar flex flex-wrap items-center gap-2">
             <div className="flex rounded-md border border-[color:var(--sig-line-2)] p-0.5 text-sm">
               <button
                 className={cn(
@@ -441,7 +441,7 @@ export default function KnowledgeTraining() {
         </div>
       </header>
 
-      <div className="border-b border-border/60 px-4 py-2 md:px-6" style={{ background: "color-mix(in srgb, var(--sig-fg) 3%, transparent)" }}>
+      <div className="sig-workspace-context border-b border-border/60 px-4 py-2 md:px-6" style={{ background: "color-mix(in srgb, var(--sig-fg) 3%, transparent)" }}>
         <div className="flex flex-wrap items-center gap-3 text-xs text-dim">
           {selectedInfo ? (
             <>
@@ -462,7 +462,7 @@ export default function KnowledgeTraining() {
         </div>
       </div>
 
-      <main className="grid flex-1 min-h-0 gap-4 overflow-y-auto p-4 md:p-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <main className="sig-workspace-scroll grid flex-1 min-h-0 gap-4 overflow-y-auto p-4 md:p-6 xl:grid-cols-[minmax(0,1fr)_320px]">
         <section className="min-w-0">
           {error && (
             <div className="mb-4 flex items-start gap-2 rounded-md border border-red/30 bg-red/10 px-3 py-2 text-sm text-red">
@@ -626,7 +626,7 @@ export default function KnowledgeTraining() {
           )}
         </section>
 
-        <aside className="min-w-0 xl:sticky xl:top-0 xl:self-start">
+        <aside className="sig-workspace-rail min-w-0 xl:sticky xl:top-0 xl:self-start">
           <Card interactive={false}>
             <CardContent className="p-4">
               <div className="mb-3 flex items-center justify-between gap-2">

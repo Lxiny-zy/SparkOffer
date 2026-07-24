@@ -27,21 +27,23 @@ export default function GeometricNetwork() {
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let nodes: Node[] = [];
     let raf = 0;
+    let inViewport = true;
+    let pageVisible = !document.hidden;
     let colors = readColors();
     // Cached canvas viewport rect — maps the shared pointer (clientX/Y) into
     // canvas-local space. Refreshed on resize + ResizeObserver (sidebar collapse).
     let rect = canvas.getBoundingClientRect();
 
     function readColors() {
-      const root = getComputedStyle(document.documentElement);
+      const scope = canvas!.closest(".sig-root") || document.documentElement;
+      const root = getComputedStyle(scope);
       const isDark = document.documentElement.classList.contains("dark");
-      const line = toRgb(root.getPropertyValue("--aurora-2").trim()) || (isDark ? [208, 188, 255] : [103, 80, 164]);
-      const node = toRgb(root.getPropertyValue("--aurora-1").trim()) || (isDark ? [167, 139, 250] : [103, 80, 164]);
+      const accent = toRgb(root.getPropertyValue("--sig-accent").trim()) || (isDark ? [139, 108, 255] : [109, 59, 255]);
       return {
-        line,
-        node,
-        lineOpacity: isDark ? 0.32 : 0.22,
-        nodeOpacity: isDark ? 0.78 : 0.55,
+        line: accent,
+        node: accent,
+        lineOpacity: isDark ? 0.24 : 0.18,
+        nodeOpacity: isDark ? 0.72 : 0.52,
       };
     }
 
@@ -76,7 +78,20 @@ export default function GeometricNetwork() {
       rect = canvas!.getBoundingClientRect();
     }
 
+    function stop() {
+      if (raf !== 0) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+    }
+
+    function schedule() {
+      if (reduced || !inViewport || !pageVisible || raf !== 0) return;
+      raf = requestAnimationFrame(draw);
+    }
+
     function draw() {
+      raf = 0;
       const w = canvas!.clientWidth;
       const h = canvas!.clientHeight;
       ctx!.clearRect(0, 0, w, h);
@@ -145,7 +160,7 @@ export default function GeometricNetwork() {
         ctx!.fill();
       }
 
-      raf = requestAnimationFrame(draw);
+      schedule();
     }
 
     resize();
@@ -159,24 +174,57 @@ export default function GeometricNetwork() {
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
         resize();
+        draw();
         resizeTimer = null;
       }, 150);
     };
     window.addEventListener("resize", onResize);
 
-    const observer = new MutationObserver(() => { colors = readColors(); });
+    const observer = new MutationObserver(() => {
+      colors = readColors();
+      if (reduced || !pageVisible || !inViewport) draw();
+    });
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+
+    const onVisibility = () => {
+      pageVisible = !document.hidden;
+      if (pageVisible) {
+        resize();
+        draw();
+      } else {
+        stop();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    const visibilityObserver = new IntersectionObserver((entries) => {
+      const nextVisible = entries[0]?.isIntersecting ?? true;
+      if (nextVisible === inViewport) return;
+      inViewport = nextVisible;
+      if (inViewport) {
+        resize();
+        draw();
+      } else {
+        stop();
+      }
+    }, { threshold: 0.01 });
+    visibilityObserver.observe(canvas);
 
     // Keep the cached rect fresh when the canvas changes size without a window
     // resize event (e.g. the sidebar collapsing widens the main area).
-    const ro = new ResizeObserver(() => { rect = canvas!.getBoundingClientRect(); });
+    const ro = new ResizeObserver(() => {
+      rect = canvas!.getBoundingClientRect();
+      if (reduced) draw();
+    });
     ro.observe(canvas);
 
     return () => {
-      cancelAnimationFrame(raf);
+      stop();
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       window.removeEventListener("resize", onResize);
+      document.removeEventListener("visibilitychange", onVisibility);
       observer.disconnect();
+      visibilityObserver.disconnect();
       ro.disconnect();
     };
   }, []);

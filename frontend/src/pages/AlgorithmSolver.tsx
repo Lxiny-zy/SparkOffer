@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import ChatBubble, { Markdown } from "@/components/ChatBubble";
+import { scrollToElement } from "@/lib/utils";
 import useDraftPersist from "../hooks/useDraftPersist";
 import type { ChatMessage } from "../types/api";
 
@@ -85,7 +86,7 @@ export default function AlgorithmSolver() {
 
   // Auto-scroll chat
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    scrollToElement(chatEndRef.current);
   }, [chatMessages, solution]);
 
   // Draft persistence — backup the unsubmitted problem description. Disabled
@@ -198,7 +199,7 @@ export default function AlgorithmSolver() {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
+    <div className="sig-page flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
       {/* Header */}
       <div className="mb-8 animate-fade-in">
         <div className="sig-kicker mb-2">// 算法解题 / ALGORITHM</div>

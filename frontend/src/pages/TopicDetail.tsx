@@ -63,7 +63,7 @@ export default function TopicDetail() {
   const masteryScore = mastery.score ?? (mastery.level ? mastery.level * 20 : 0);
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
+    <div className="sig-page flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
       <button
         className="text-sm text-dim hover:text-text cursor-pointer mb-4 inline-flex items-center gap-1 transition-colors"
         onClick={() => navigate("/profile")}

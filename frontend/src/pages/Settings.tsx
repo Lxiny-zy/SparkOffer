@@ -285,7 +285,7 @@ export default function Settings() {
   }, [loadHealth, isOwner]);
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 w-full"><div className="max-w-3xl mx-auto p-4 md:p-8 space-y-6">
+    <div className="sig-page flex-1 overflow-y-auto min-h-0 w-full"><div className="max-w-3xl mx-auto p-4 md:p-8 space-y-6">
       <div className="space-y-1 animate-fade-in">
         <div className="sig-kicker mb-1">// 设置 / SETTINGS</div>
         <h1 className="sig-display text-2xl md:text-[28px]">设置<span className="sig-accent-c">.</span></h1>

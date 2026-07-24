@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { BriefcaseBusiness, Loader2, Sparkles, FileText, Target, ShieldAlert } from "lucide-react";
+import { BriefcaseBusiness, Loader2, Sparkles, FileText, Target, ShieldAlert, ArrowRight, CheckCircle2, AlertTriangle } from "lucide-react";
 import { getResumeStatus, previewJobPrep, startJobPrep } from "../api/interview";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -114,7 +114,7 @@ export default function JobPrep() {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
+    <div className="sig-page flex-1 overflow-y-auto min-h-0 flex flex-col items-center px-4 pt-8 pb-10 md:px-6 md:pt-12">
       <div className="w-full max-w-[860px]">
         <div className="mb-8 animate-fade-in">
           <div className="sig-kicker mb-2">// JD 定向备面 / JOB PREP</div>
@@ -354,16 +354,16 @@ export default function JobPrep() {
               {/* Status hint line */}
               <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-dim">
                 {!canPreview && payload.jd_text.length < 50 && (
-                  <span>📝 JD 至少 50 字才能开始分析（当前 {payload.jd_text.length}）</span>
+                  <span className="flex items-center gap-1.5"><FileText size={12} aria-hidden="true" /> JD 至少 50 字才能开始分析（当前 {payload.jd_text.length}）</span>
                 )}
                 {canPreview && !preview && (
-                  <span className="text-primary">→ 表单已就绪，点击分析</span>
+                  <span className="text-primary flex items-center gap-1.5"><ArrowRight size={12} aria-hidden="true" /> 表单已就绪，点击分析</span>
                 )}
                 {preview && !previewStale && (
-                  <span className="text-green">✓ 分析完成，可以开始训练</span>
+                  <span className="text-green flex items-center gap-1.5"><CheckCircle2 size={12} aria-hidden="true" /> 分析完成，可以开始训练</span>
                 )}
                 {previewStale && (
-                  <span className="text-warning">⚠ 表单已修改，请重新分析</span>
+                  <span className="text-warning flex items-center gap-1.5"><AlertTriangle size={12} aria-hidden="true" /> 表单已修改，请重新分析</span>
                 )}
               </div>
             </div>

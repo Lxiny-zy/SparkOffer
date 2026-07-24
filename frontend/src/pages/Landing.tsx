@@ -4,9 +4,11 @@ import { useNavigate } from "react-router-dom";
 import {
   Sun, Moon, ArrowRight, ArrowDown, Target, FileText, BriefcaseBusiness,
   MessageSquare, Code2, Brain, Radar, ChartLine, GitFork, User, Flame,
-  BarChart3, BookOpen, ShieldCheck,
+  BarChart3, BookOpen, ShieldCheck, RotateCcw, Heart,
 } from "lucide-react";
 import CatAvatar from "@/components/CatAvatar";
+import GeometricNetwork from "@/components/GeometricNetwork";
+import { scrollToElement } from "@/lib/utils";
 
 /* ─────────────────────────────────────────────────────────────
    访客首页 · 设计假设（sig 系统内深化，不引入新设计语言）
@@ -58,7 +60,7 @@ const LAYERS = [
   },
   {
     tag: "LAYER 2", name: "领域掌握度",
-    desc: "0-100 掌握度走确定性算法（难度/5 × 得分/10 加权），不靠 LLM 主观分。掌握度决定难度带：概念辨析 → 场景应用 → 系统设计。",
+    desc: "0-100 掌握度走确定性算法（难度/5 × 得分/10 加权），不靠 LLM 主观分。掌握度决定难度带：概念辨析、场景应用、系统设计。",
     src: ["掌握度算法", "历史薄弱点", "SM-2 到期项"],
   },
   {
@@ -76,7 +78,7 @@ const LAYER_OUTPUT = {
 /* ── 六种训练场景（与产品内命名一致：Home 四模式 + 算法/问答两个竞技场）── */
 const SCENES = [
   { icon: Target, tag: "精准打击", title: "弱点狙击站", desc: "选一个领域集中训练，AI 根据你的回答动态调整难度。前几题精准命中历史薄弱点，掌握度越高题越难。" },
-  { icon: FileText, tag: "沉浸体验", title: "实战模拟场", desc: "AI 读取你的简历，模拟真实面试官。自我介绍 → 技术问题 → 项目深挖 → 反问收尾，完整走一遍面试流程。" },
+  { icon: FileText, tag: "沉浸体验", title: "实战模拟场", desc: "AI 读取你的简历，模拟真实面试官。自我介绍、技术问题、项目深挖、反问收尾，完整走一遍面试流程。" },
   { icon: BriefcaseBusiness, tag: "定向突破", title: "岗位特训营", desc: "贴入目标岗位 JD，AI 拆解岗位重点，结合简历生成高概率问题和岗位匹配复盘。" },
   { icon: Brain, tag: "记忆强化", title: "知识训练场", desc: "AI 把知识库拆成记忆卡片，正反翻面强化记忆，三档深度循序渐进，配合 SM-2 到期复习。" },
   { icon: Code2, tag: "错题闭环", title: "算法竞技场", desc: "刷题收藏、错题回顾、AI 解题陪练 —— 反复出错的题自动进入高频复习队列。" },
@@ -199,7 +201,7 @@ function LoopViz() {
         </div>
         <div className="mt-2.5 flex items-center justify-between sig-kicker">
           <span>Memory Writeback</span>
-          <span>↺ 洞察回流 — 下一轮出题携带全部历史</span>
+          <span className="flex items-center gap-1.5"><RotateCcw size={11} aria-hidden="true" /> 洞察回流 — 下一轮出题携带全部历史</span>
         </div>
       </div>
 
@@ -223,7 +225,7 @@ function LoopViz() {
             </div>
           </div>
         ))}
-        <div className="mt-3 sig-kicker text-center">↺ 洞察回流至下一轮出题</div>
+        <div className="mt-3 sig-kicker flex items-center justify-center gap-1.5"><RotateCcw size={11} aria-hidden="true" /> 洞察回流至下一轮出题</div>
       </div>
 
       {/* 实时说明行 */}
@@ -351,7 +353,11 @@ export default function Landing() {
 
       {/* Hero */}
       <section className="relative z-10 mx-auto max-w-[1200px] px-6 md:px-8 pt-16 md:pt-28 pb-16 md:pb-24">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-8">
+        <div className="sig-landing-field hidden lg:block" aria-hidden="true">
+          <GeometricNetwork />
+          <span className="sig-mono">MEMORY FIELD / LIVE</span>
+        </div>
+        <div className="relative grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-8">
           <div className="lg:col-span-8">
             <div className="sig-kicker sig-rise" style={{ animationDelay: "0.05s" }}>
               // 自适应面试训练系统
@@ -369,7 +375,7 @@ export default function Landing() {
                 立即开始训练 <ArrowRight size={16} />
               </button>
               <button
-                onClick={() => document.getElementById("loop")?.scrollIntoView({ behavior: "smooth" })}
+                onClick={() => scrollToElement(document.getElementById("loop"))}
                 className="sig-cta-ghost justify-center"
               >
                 看它如何进化 <ArrowDown size={15} />
@@ -551,7 +557,7 @@ export default function Landing() {
       {/* Footer */}
       <footer className="relative z-10 mx-auto max-w-[1200px] px-6 md:px-8 h-16 flex items-center justify-between sig-kicker">
         <span>© 2026 SparkOffer</span>
-        <span>Built with ❤ + Claude</span>
+        <span className="flex items-center gap-1.5">Built with <Heart size={11} strokeWidth={1.8} aria-hidden="true" /> + Claude</span>
       </footer>
     </div>
   );

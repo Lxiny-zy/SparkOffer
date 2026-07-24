@@ -14,7 +14,7 @@ export async function getTopics(): Promise<any> {
   return res.json();
 }
 
-export async function createTopic(name: string, icon: string = "📝"): Promise<any> {
+export async function createTopic(name: string, icon: string = "FileText"): Promise<any> {
   const res = await authFetch(`${API_BASE}/topics`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

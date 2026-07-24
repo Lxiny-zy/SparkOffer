@@ -103,7 +103,7 @@ export default function Profile() {
   const weakImproved = (profile!.weak_points || []).filter((w) => w.improved);
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
+    <div className="sig-page flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-3xl mx-auto w-full">
       <div className="flex items-center justify-between mb-2 animate-fade-in">
         <div>
           <div className="sig-kicker mb-2">// 成长报告 / PROFILE</div>

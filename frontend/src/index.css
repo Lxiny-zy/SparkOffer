@@ -1871,3 +1871,680 @@
   .sig-loop-conn > i, .sig-loop-return > i { animation: none !important; transform: scaleX(1) !important; }
   .sig-loop-conn-v > i { animation: none !important; transform: scaleY(1) !important; }
 }
+
+/* ═══════════════════════════════════════════════════════════
+   sig v2 — Editorial Operating System
+   The protected app, public landing and auth surfaces share one disciplined
+   spatial system: hairline framing, hard-shadow feedback, dense mono metadata
+   and one coordinated entrance language. This block intentionally neutralises
+   legacy aurora/glass helpers that still exist for backwards compatibility.
+   ═══════════════════════════════════════════════════════════ */
+
+.sig-root {
+  --sig-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --sig-ease-snap: cubic-bezier(0.2, 0, 0, 1);
+  --sig-card-radius: 6px;
+  --sig-hard-shadow: 4px 4px 0 var(--sig-fg);
+  --sig-soft-shadow: 0 24px 80px rgba(0, 0, 0, 0.14);
+  --sig-bar-height: 36px;
+  text-wrap: pretty;
+}
+
+.sig-root ::selection {
+  color: var(--sig-accent-fg);
+  background: var(--sig-accent);
+}
+
+.sig-root :is(h1, h2, h3) {
+  text-wrap: balance;
+}
+
+.sig-root :is(button, a, input, textarea, select):focus-visible {
+  outline: 2px solid var(--sig-accent);
+  outline-offset: 3px;
+}
+
+.sig-app-shell {
+  position: relative;
+  isolation: isolate;
+  background: var(--sig-bg);
+}
+
+.sig-app-main {
+  min-width: 0;
+  background: var(--sig-bg);
+}
+
+.sig-app-content {
+  isolation: isolate;
+}
+
+.sig-system-bar {
+  height: var(--sig-bar-height);
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: 0 1rem;
+  border-bottom: 1px solid var(--sig-line);
+  background: color-mix(in srgb, var(--sig-bg) 94%, var(--sig-fg));
+  color: var(--sig-faint);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.sig-system-route {
+  color: var(--sig-dim);
+}
+
+.sig-system-online {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--sig-success);
+}
+
+.sig-system-online svg {
+  animation: sig-system-pulse 2.4s var(--sig-ease-out) infinite;
+}
+
+@keyframes sig-system-pulse {
+  0%, 100% { opacity: 0.35; transform: scaleX(0.82); }
+  45% { opacity: 1; transform: scaleX(1); }
+}
+
+.sig-sidebar {
+  box-shadow: 1px 0 0 color-mix(in srgb, var(--sig-fg) 3%, transparent);
+}
+
+.sig-sidebar-brand {
+  min-height: 72px;
+}
+
+.sig-sidebar-brand::after {
+  content: "01";
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  color: var(--sig-faint);
+}
+
+.sig-sidebar[data-collapsed="true"] .sig-sidebar-brand::after {
+  display: none;
+}
+
+.sig-navitem {
+  min-height: 38px;
+  overflow: hidden;
+}
+
+.sig-navitem::after {
+  content: "";
+  position: absolute;
+  right: 9px;
+  width: 4px;
+  height: 4px;
+  border: 1px solid var(--sig-faint);
+  opacity: 0;
+  transform: rotate(45deg) scale(0.5);
+  transition: opacity 0.18s ease, transform 0.28s var(--sig-ease-out);
+}
+
+.sig-navitem:hover::after,
+.sig-navitem-active::after {
+  opacity: 1;
+  transform: rotate(45deg) scale(1);
+}
+
+.sig-user-card {
+  background: color-mix(in srgb, var(--sig-fg) 3%, var(--sig-surface));
+}
+
+.sig-mobile-header {
+  min-height: 58px;
+  backdrop-filter: none;
+}
+
+.sig-card {
+  border-radius: var(--sig-card-radius);
+  border-color: var(--sig-line);
+  background: color-mix(in srgb, var(--sig-surface) 97%, var(--sig-fg));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--sig-fg) 4%, transparent);
+}
+
+.dark .sig-card {
+  background: color-mix(in srgb, var(--sig-surface) 96%, white);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.sig-card-hover {
+  transform-origin: center bottom;
+  transition:
+    transform 0.24s var(--sig-ease-out),
+    border-color 0.2s ease,
+    box-shadow 0.24s var(--sig-ease-out);
+}
+
+.sig-card-hover:hover {
+  transform: translate(-2px, -2px);
+  border-color: var(--sig-fg);
+  box-shadow: var(--sig-hard-shadow);
+}
+
+.sig-hover-lift {
+  transition:
+    transform 0.24s var(--sig-ease-out),
+    border-color 0.2s ease,
+    box-shadow 0.24s var(--sig-ease-out);
+}
+
+.sig-hover-lift:hover {
+  transform: translate(-2px, -2px);
+  border-color: var(--sig-line-2);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--sig-fg) 82%, transparent);
+}
+
+.sig-btn,
+.sig-cta,
+.sig-cta-ghost {
+  position: relative;
+  overflow: hidden;
+  transition:
+    transform 0.22s var(--sig-ease-out),
+    box-shadow 0.22s var(--sig-ease-out),
+    color 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.sig-btn-accent:hover,
+.sig-cta:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: var(--sig-hard-shadow);
+}
+
+.sig-field,
+.sig-textarea,
+.sig-root input:not([type="checkbox"]):not([type="radio"]),
+.sig-root textarea,
+.sig-root select {
+  border-radius: 4px;
+}
+
+.sig-page {
+  position: relative;
+  isolation: isolate;
+  animation: sig-page-enter 0.62s var(--sig-ease-out) both;
+}
+
+.sig-home-console {
+  border: 1px solid var(--sig-line-2);
+  background: color-mix(in srgb, var(--sig-bg) 94%, var(--sig-fg));
+  box-shadow: 8px 8px 0 color-mix(in srgb, var(--sig-fg) 8%, transparent);
+}
+
+.sig-home-metric {
+  min-height: 104px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding: 1rem;
+  border-right: 1px solid var(--sig-line);
+  border-bottom: 1px solid var(--sig-line);
+}
+
+.sig-home-metric:nth-child(even) { border-right: 0; }
+.sig-home-metric:nth-child(n + 3) { border-bottom: 0; }
+
+.sig-mode-card {
+  min-height: 250px;
+}
+
+.sig-mode-index {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 1;
+  font-size: 11px;
+  color: var(--sig-faint);
+  transition: color 0.2s ease, transform 0.3s var(--sig-ease-out);
+}
+
+.sig-mode-card:hover .sig-mode-index {
+  color: var(--sig-accent);
+  transform: translateY(-2px);
+}
+
+.sig-auth-manifesto {
+  background:
+    linear-gradient(to right, var(--sig-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--sig-line) 1px, transparent 1px);
+  background-size: 72px 72px;
+}
+
+.sig-auth-manifesto canvas {
+  opacity: 0.42;
+  mask-image: linear-gradient(to bottom, #000 5%, rgba(0, 0, 0, 0.7) 70%, transparent 100%);
+}
+
+.sig-auth-manifesto::after {
+  content: "X 032 / Y 118";
+  position: absolute;
+  top: 20px;
+  right: 24px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--sig-faint);
+}
+
+.sig-auth-card {
+  box-shadow: 8px 8px 0 color-mix(in srgb, var(--sig-fg) 8%, transparent);
+}
+
+.sig-landing-field {
+  position: absolute;
+  top: 7%;
+  right: -6%;
+  width: 58%;
+  height: 82%;
+  border: 1px solid var(--sig-line);
+  overflow: hidden;
+  opacity: 0.78;
+  mask-image: linear-gradient(to left, #000 58%, rgba(0, 0, 0, 0.55) 82%, transparent 100%);
+}
+
+.sig-landing-field::before,
+.sig-landing-field::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.sig-landing-field::before {
+  inset: 12px;
+  border-top: 1px solid var(--sig-line-2);
+  border-right: 1px solid var(--sig-line-2);
+}
+
+.sig-landing-field::after {
+  right: 12px;
+  bottom: 12px;
+  width: 42px;
+  height: 42px;
+  border-right: 1px solid var(--sig-accent);
+  border-bottom: 1px solid var(--sig-accent);
+}
+
+.sig-landing-field > span {
+  position: absolute;
+  right: 18px;
+  top: 18px;
+  z-index: 3;
+  font-size: 8px;
+  letter-spacing: 0.16em;
+  color: var(--sig-faint);
+}
+
+.sig-page::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 1px;
+  background: linear-gradient(to bottom, transparent, var(--sig-line-2) 12%, var(--sig-line-2) 88%, transparent);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+@keyframes sig-page-enter {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Keep legacy helper class names functional while removing their generic
+   gradient/glass visual language inside the sig product shell. */
+.sig-root :is(.glass, .glass-strong, .glass-subtle) {
+  background: var(--sig-surface) !important;
+  border-color: var(--sig-line) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+
+.sig-root :is(.bg-aurora, .bg-noise)::before,
+.sig-root :is(.bg-aurora, .bg-noise)::after {
+  display: none !important;
+}
+
+.sig-root .bg-aurora {
+  background: var(--sig-bg) !important;
+  animation: none !important;
+}
+
+.sig-root :is(.gradient-text, .gradient-text-vivid, .aurora-text) {
+  background: none !important;
+  color: var(--sig-accent) !important;
+  -webkit-text-fill-color: currentColor !important;
+  text-shadow: none !important;
+  animation: none !important;
+}
+
+.sig-root :is(.gradient-border, .tech-border)::before,
+.sig-root :is(.card-spotlight, .scan-line)::before,
+.sig-root :is(.card-spotlight, .scan-line)::after {
+  display: none !important;
+}
+
+/* Legacy large radii are compressed into the sharp sig silhouette. Circular
+   status dots, avatars and icon bubbles deliberately retain rounded-full. */
+.sig-root .rounded-3xl { border-radius: 10px !important; }
+.sig-root .rounded-2xl { border-radius: 8px !important; }
+.sig-root .rounded-xl { border-radius: 6px !important; }
+.sig-root .rounded-lg { border-radius: 5px !important; }
+
+/* Replace the generic ambient glow with a restrained blueprint crosshair. */
+.cursor-glow {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  background: transparent;
+  mix-blend-mode: normal;
+  transform: translate3d(
+    calc(var(--cursor-x, -9999px) - 14px),
+    calc(var(--cursor-y, -9999px) - 14px),
+    0
+  );
+}
+
+.cursor-glow::before,
+.cursor-glow::after {
+  content: "";
+  position: absolute;
+  inset: 50% auto auto 50%;
+  background: color-mix(in srgb, var(--primary) 60%, transparent);
+  transform: translate(-50%, -50%);
+}
+
+.cursor-glow::before { width: 36px; height: 1px; }
+.cursor-glow::after { width: 1px; height: 36px; }
+.cursor-glow.is-active { opacity: 0.42; }
+
+@media (max-width: 767px) {
+  .sig-page::before { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sig-page,
+  .sig-system-online svg { animation: none !important; }
+  .sig-card-hover:hover,
+  .sig-hover-lift:hover,
+  .sig-btn-accent:hover,
+  .sig-cta:hover { transform: none !important; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   sig workspace kit — dense product surfaces
+   Knowledge, training, Q&A and interview views share the same
+   operating-system chrome while their content remains task-specific.
+   ═══════════════════════════════════════════════════════════ */
+
+.sig-workspace {
+  --sig-workspace-header: 58px;
+  --sig-workspace-gutter: clamp(1rem, 2.4vw, 2rem);
+  min-width: 0;
+  background: var(--sig-bg);
+}
+
+.sig-workspace-header {
+  position: relative;
+  z-index: 2;
+  min-height: var(--sig-workspace-header);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.7rem var(--sig-workspace-gutter);
+  border-bottom: 1px solid var(--sig-line);
+  background: color-mix(in srgb, var(--sig-bg) 96%, var(--sig-fg));
+}
+
+.sig-workspace-header::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 42px;
+  height: 2px;
+  background: var(--sig-accent);
+}
+
+.sig-workspace-header::after {
+  content: "";
+  position: absolute;
+  right: var(--sig-workspace-gutter);
+  bottom: -1px;
+  width: 18px;
+  height: 1px;
+  background: var(--sig-accent);
+  opacity: 0.75;
+}
+
+.sig-workspace-heading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.2rem;
+}
+
+.sig-workspace-title {
+  min-width: 0;
+  color: var(--sig-fg);
+  font-size: 0.95rem;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+.sig-workspace-title.sig-display {
+  font-size: clamp(1.15rem, 1.8vw, 1.5rem);
+  letter-spacing: -0.04em;
+}
+
+.sig-workspace-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.sig-workspace-sidebar {
+  z-index: 2;
+  background: color-mix(in srgb, var(--sig-bg) 97%, var(--sig-fg));
+  border-color: var(--sig-line);
+  box-shadow: 1px 0 0 color-mix(in srgb, var(--sig-fg) 3%, transparent);
+}
+
+.sig-workspace-sidebar:not(.fixed) { position: relative; }
+
+.sig-workspace-sidebar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 1px;
+  height: 28%;
+  background: var(--sig-accent);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.sig-workspace-sidebar-head {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid var(--sig-line);
+}
+
+.sig-workspace-sidebar-label {
+  color: var(--sig-dim);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.sig-workspace-sidebar-list {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sig-line-2) transparent;
+}
+
+.sig-workspace-sidebar-list::-webkit-scrollbar,
+.sig-workspace-scroll::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+.sig-workspace-sidebar-list::-webkit-scrollbar-thumb,
+.sig-workspace-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--sig-fg) 18%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.sig-workspace-main {
+  min-width: 0;
+  min-height: 0;
+  background: var(--sig-bg);
+}
+
+.sig-workspace-scroll {
+  min-width: 0;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--sig-line-2) transparent;
+}
+
+.sig-workspace-context {
+  position: relative;
+  z-index: 1;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  padding: 0.55rem var(--sig-workspace-gutter);
+  border-bottom: 1px solid var(--sig-line);
+  background: color-mix(in srgb, var(--sig-fg) 3%, transparent);
+}
+
+.sig-workspace-tab {
+  position: relative;
+  min-height: 42px;
+  color: var(--sig-dim);
+  transition: color 0.18s ease, background 0.18s ease;
+}
+
+.sig-workspace-tab::after {
+  content: "";
+  position: absolute;
+  right: 0.8rem;
+  bottom: -1px;
+  left: 0.8rem;
+  height: 2px;
+  background: var(--sig-accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.24s var(--sig-ease-out);
+}
+
+.sig-workspace-tab:hover { color: var(--sig-fg); }
+.sig-workspace-tab[data-active="true"] { color: var(--sig-fg); }
+.sig-workspace-tab[data-active="true"]::after { transform: scaleX(1); }
+
+.sig-workspace-panel {
+  border: 1px solid var(--sig-line);
+  border-radius: var(--sig-card-radius);
+  background: color-mix(in srgb, var(--sig-surface) 96%, var(--sig-bg));
+}
+
+.sig-workspace-composer {
+  position: relative;
+  z-index: 2;
+  border-top: 1px solid var(--sig-line);
+  background: color-mix(in srgb, var(--sig-bg) 97%, var(--sig-fg));
+}
+
+.sig-workspace-composer::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: var(--sig-workspace-gutter);
+  width: 28px;
+  height: 1px;
+  background: var(--sig-accent);
+}
+
+.sig-workspace-rail {
+  min-width: 0;
+  align-self: start;
+}
+
+.sig-workspace-row {
+  border-bottom: 1px solid color-mix(in srgb, var(--sig-line) 72%, transparent);
+  transition: background 0.18s ease, color 0.18s ease, padding-left 0.22s var(--sig-ease-out);
+}
+
+.sig-workspace-row:hover {
+  background: color-mix(in srgb, var(--sig-fg) 4%, transparent);
+}
+
+.sig-workspace-row[data-active="true"] {
+  color: var(--sig-fg);
+  background: color-mix(in srgb, var(--sig-accent) 7%, transparent);
+  box-shadow: inset 2px 0 0 var(--sig-accent);
+}
+
+@media (max-width: 767px) {
+  .sig-workspace {
+    --sig-workspace-header: auto;
+    --sig-workspace-gutter: 1rem;
+  }
+
+  .sig-workspace-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    padding-top: 0.75rem;
+    padding-bottom: 0.75rem;
+  }
+
+  .sig-workspace-toolbar {
+    width: 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+
+  .sig-workspace-context {
+    overflow-x: auto;
+  }
+
+  .sig-workspace-composer::before { left: 1rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sig-workspace-tab::after,
+  .sig-workspace-row,
+  .sig-workspace-tab { transition: none !important; }
+}

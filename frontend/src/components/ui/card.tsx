@@ -11,7 +11,7 @@ interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
 }
 
 const Card = React.forwardRef<HTMLDivElement, CardProps>(
-  ({ className, variant, interactive = true, hoverLift = false, ...props }, ref) => {
+  ({ className, variant, interactive = false, hoverLift = false, ...props }, ref) => {
     const variantClass =
       variant === "glass"
         ? "sig-card text-text transition-all duration-200 ease-[cubic-bezier(0.2,0,0,1)]"

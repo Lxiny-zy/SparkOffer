@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, ArrowRight } from "lucide-react";
 import ForceGraph2D from "react-force-graph-2d";
 import { getTopics, getGraphData } from "../api/interview";
 import { getTopicIcon } from "../utils/topicIcons";
@@ -126,7 +126,7 @@ export default function Graph() {
   const topicEntries = Object.entries(topics);
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
+    <div className="sig-page flex-1 overflow-y-auto min-h-0 px-4 py-8 md:px-6 md:py-10 max-w-4xl mx-auto w-full">
       <div className="mb-6 animate-fade-in">
         <div className="sig-kicker mb-2">// 能力星图 / KNOWLEDGE GRAPH</div>
         <h1 className="sig-display text-2xl md:text-[28px]">能力星图<span className="sig-accent-c">.</span></h1>
@@ -227,7 +227,7 @@ export default function Graph() {
                 {hoveredNode.focus_area && <span>{hoveredNode.focus_area}</span>}
                 {hoveredNode.date && <span>{hoveredNode.date}</span>}
               </div>
-              {hoveredNode.session_id && <div className="mt-1.5 text-[11px] text-primary">点击查看本题回顾 →</div>}
+              {hoveredNode.session_id && <div className="mt-1.5 text-[11px] text-primary flex items-center gap-1">点击查看本题回顾 <ArrowRight size={11} aria-hidden="true" /></div>}
             </div>
           )}
         </CardContent>

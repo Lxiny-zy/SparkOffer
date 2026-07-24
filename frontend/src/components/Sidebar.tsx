@@ -63,13 +63,17 @@ export default function Sidebar() {
   const { user, logout } = useAuth();
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
   const [openForLocation, setOpenForLocation] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("sidebar-collapsed") === "true");
   const open = openForLocation === location.key;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     localStorage.setItem("theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem("sidebar-collapsed", String(collapsed));
+  }, [collapsed]);
 
   const toggleTheme = () => setTheme((t: string) => t === "dark" ? "light" : "dark");
   const isActive = (path: string) =>
@@ -118,10 +122,13 @@ export default function Sidebar() {
     return <div key={path}>{btn}</div>;
   };
 
-  const renderGroup = (group: NavGroup) => (
+  const renderGroup = (group: NavGroup, index: number) => (
     <div key={group.label} className={cn("mb-1", !collapsed && "mb-4")}>
       {!collapsed && (
-        <div className="px-3 mb-2 sig-kicker">{group.label}</div>
+        <div className="px-3 mb-2 flex items-center justify-between sig-kicker">
+          <span>{group.label}</span>
+          <span className="sig-num text-[9px] text-[color:var(--sig-faint)]">0{index + 1}</span>
+        </div>
       )}
       {collapsed && <div className="h-2" />}
       <div className="flex flex-col gap-0.5">
@@ -133,16 +140,20 @@ export default function Sidebar() {
   const nav = (
     <aside
       className={cn(
-        "flex flex-col h-full relative transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] overflow-hidden border-r",
+        "sig-sidebar flex flex-col h-full relative transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] overflow-hidden border-r",
         collapsed ? "w-[72px]" : "w-[260px]"
       )}
+      data-collapsed={collapsed ? "true" : "false"}
       style={{ background: "var(--sig-bg)", borderColor: "var(--sig-line)" }}
     >
       {/* Brand */}
-      <div className={cn("flex items-center shrink-0 px-4 py-5 relative z-10", collapsed ? "justify-center" : "gap-2.5")}>
+      <div className={cn("sig-sidebar-brand flex items-center shrink-0 px-4 py-5 relative z-10", collapsed ? "justify-center" : "gap-2.5")}>
         <CatAvatar size={collapsed ? 28 : 32} mood="idle" className="shrink-0" />
         {!collapsed && (
-          <span className="sig-display text-lg tracking-[-0.02em]">SparkOffer</span>
+          <div className="min-w-0">
+            <span className="sig-display block text-lg tracking-[-0.02em]">SparkOffer</span>
+            <span className="sig-mono block mt-1 text-[8px] tracking-[0.2em] text-[color:var(--sig-faint)]">INTERVIEW / OS</span>
+          </div>
         )}
       </div>
 
@@ -159,7 +170,7 @@ export default function Sidebar() {
         <div className={cn("py-3 space-y-0.5 relative z-10", collapsed ? "px-2" : "px-3")}>
           {/* User card */}
           {user && !collapsed && (
-            <div className="sig-card mb-2 px-3 py-2.5 flex items-center gap-2.5">
+            <div className="sig-card sig-user-card mb-2 px-3 py-2.5 flex items-center gap-2.5">
               <div
                 className="w-8 h-8 rounded flex items-center justify-center text-xs font-semibold shrink-0"
                 style={{ background: "var(--sig-accent)", color: "var(--sig-accent-fg)" }}
@@ -223,7 +234,7 @@ export default function Sidebar() {
   return (
     <>
       <div
-        className="md:hidden flex items-center justify-between px-4 py-3 shrink-0 border-b"
+        className="sig-mobile-header md:hidden flex items-center justify-between px-4 py-3 shrink-0 border-b"
         style={{ background: "var(--sig-bg)", borderColor: "var(--sig-line)" }}
       >
         <div
@@ -240,6 +251,7 @@ export default function Sidebar() {
           variant="ghost"
           size="icon"
           onClick={() => setOpenForLocation((current) => current === location.key ? null : location.key)}
+          aria-label={open ? "关闭导航" : "打开导航"}
         >
           {open ? <X size={18} /> : <Menu size={18} />}
         </Button>

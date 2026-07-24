@@ -1,6 +1,6 @@
 import { lazy, Suspense, ReactNode, useState, useEffect, useCallback } from "react";
-import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
-import { Loader2, AlertTriangle } from "lucide-react";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
+import { Loader2, AlertTriangle, Activity, Cpu } from "lucide-react";
 import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { onSessionExpired, resetSessionExpired } from "./api/client";
@@ -68,10 +68,47 @@ function AuthPage() {
 }
 
 function AppShell({ children }: { children: ReactNode }) {
+  const location = useLocation();
+  const routeLabel = (() => {
+    const path = location.pathname;
+    if (path === "/") return "BASE / HOME";
+    if (path.startsWith("/interview/")) return "SESSION / INTERVIEW";
+    if (path.startsWith("/review/")) return "SESSION / REVIEW";
+    if (path.startsWith("/profile/topic/")) return "PROFILE / TOPIC";
+    const labels: Record<string, string> = {
+      "/history": "DATA / HISTORY",
+      "/profile": "DATA / PROFILE",
+      "/knowledge": "SYSTEM / KNOWLEDGE",
+      "/knowledge-training": "TRAIN / KNOWLEDGE",
+      "/graph": "DATA / GRAPH",
+      "/job-prep": "TRAIN / JOB PREP",
+      "/favorites": "DATA / FAVORITES",
+      "/algorithm": "TRAIN / ALGORITHM",
+      "/algorithm/collection": "DATA / COLLECTION",
+      "/settings": "SYSTEM / SETTINGS",
+      "/qa-arena": "TRAIN / Q&A ARENA",
+      "/rag-dashboard": "SYSTEM / RAG QUALITY",
+    };
+    return labels[path] || "SYSTEM / WORKSPACE";
+  })();
+
   return (
-    <div className="sig-root flex flex-col md:flex-row h-screen">
+    <div className="sig-root sig-app-shell flex flex-col md:flex-row h-screen">
       <Sidebar />
-      <main className="flex-1 overflow-hidden flex flex-col relative">
+      <main className="sig-app-main flex-1 overflow-hidden flex flex-col relative">
+        <div className="sig-system-bar hidden md:flex shrink-0" aria-label="系统状态">
+          <div className="flex items-center gap-2 min-w-0">
+            <Cpu size={13} aria-hidden="true" />
+            <span className="truncate">SPARKOFFER / ADAPTIVE INTERVIEW OS</span>
+          </div>
+          <div className="flex items-center gap-5 shrink-0">
+            <span className="sig-system-route">{routeLabel}</span>
+            <span className="sig-system-online">
+              <Activity size={12} aria-hidden="true" />
+              SYSTEM ONLINE
+            </span>
+          </div>
+        </div>
         {/* Sticky wrapper (height 0) keeps the static blueprint grid glued to the
             viewport while content scrolls — no parallax, no particle animation. */}
         <div className="hidden md:block sticky top-0 left-0 h-0 w-full z-0 pointer-events-none">
@@ -79,7 +116,7 @@ function AppShell({ children }: { children: ReactNode }) {
             <div className="sig-grid absolute inset-0 opacity-70" />
           </div>
         </div>
-        <div className="relative z-[1] flex-1 flex flex-col min-h-0">
+        <div className="sig-app-content relative z-[1] flex-1 flex flex-col min-h-0">
           <Suspense fallback={
             <div className="flex-1 flex items-center justify-center">
               <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--sig-accent)" }} />

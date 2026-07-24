@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { Menu, X, Sparkles, ChevronRight, ChevronDown, Activity, Clock, FileText, RefreshCw, Loader2, CheckCircle2, XCircle, CircleDashed, Upload, Layers } from "lucide-react";
+import { Menu, X, Plus, Sparkles, ChevronRight, ChevronDown, Activity, Clock, FileText, RefreshCw, Loader2, CheckCircle2, XCircle, CircleDashed, Upload, Layers, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { getTopicIcon, ICON_OPTIONS } from "../utils/topicIcons";
 import {
@@ -68,6 +68,7 @@ export default function Knowledge() {
   const [coreFiles, setCoreFiles] = useState<CoreFile[]>([]);
   const [coreLoading, setCoreLoading] = useState<boolean>(false);
   const [coreLoadError, setCoreLoadError] = useState<string | null>(null);
+  const [topicsLoadError, setTopicsLoadError] = useState<string | null>(null);
   const [coreLoadedTopic, setCoreLoadedTopic] = useState<string | null>(null);
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
   const [editContent, setEditContent] = useState<Record<string, string>>({});
@@ -116,6 +117,17 @@ export default function Knowledge() {
     return t;
   }, []);
 
+  const loadTopics = useCallback(async () => {
+    try {
+      const t = await refreshTopics();
+      setTopicsLoadError(null);
+      const keys = Object.keys(t);
+      setSelected((current) => current && current in t ? current : (keys[0] ?? null));
+    } catch (error: any) {
+      setTopicsLoadError(error?.message || "无法加载训练领域");
+    }
+  }, [refreshTopics]);
+
   const loadChunkCounts = useCallback(async () => {
     try { setChunkCounts(await getChunkCounts()); } catch { /* best-effort: leave prior counts */ }
   }, []);
@@ -123,12 +135,9 @@ export default function Knowledge() {
   selectedRef.current = selected;
 
   useEffect(() => {
-    refreshTopics().then((t: Record<string, TopicInfo>) => {
-      const keys = Object.keys(t);
-      if (keys.length > 0) setSelected(keys[0]);
-    });
+    void loadTopics();
     loadChunkCounts();
-  }, [refreshTopics, loadChunkCounts]);
+  }, [loadTopics, loadChunkCounts]);
 
   const loadCore = useCallback(async (topic: string, generation = topicGenerationRef.current) => {
     if (generation !== topicGenerationRef.current || selectedRef.current !== topic) return;
@@ -607,33 +616,37 @@ export default function Knowledge() {
   const topicKeys = Object.keys(topics);
 
   return (
-    <div className="flex flex-1 overflow-hidden h-full">
+    <div className="sig-page sig-workspace flex flex-1 overflow-hidden h-full">
       <Button
         variant="default"
         size="icon"
-        className="fixed bottom-4 right-4 z-50 md:hidden rounded-full w-12 h-12"
+        className="sig-workspace-mobile-toggle fixed bottom-4 right-4 z-50 md:hidden rounded-full w-12 h-12"
         onClick={() => setSidebarOpen(!sidebarOpen)}
       >
         {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
       </Button>
 
       <div className={cn(
-        "fixed inset-y-0 left-0 z-30 w-[200px] border-r border-border/50 p-4 flex flex-col transition-transform duration-200 md:static md:translate-x-0 md:shrink-0",
+        "sig-workspace-sidebar fixed inset-y-0 left-0 z-30 w-[200px] border-r border-border/50 p-4 flex flex-col transition-transform duration-200 md:static md:translate-x-0 md:shrink-0",
         sidebarOpen ? "translate-x-0" : "-translate-x-full"
       )} style={{ background: "var(--sig-bg)" }}>
-        <div className="flex justify-between items-center mb-3 px-2">
-          <div className="text-[13px] font-semibold text-dim">专项领域</div>
-          <Button variant="ghost" size="icon" className="w-6 h-6 text-base" title="新增领域" onClick={() => setShowAddTopic(true)}>+</Button>
+        <div className="sig-workspace-sidebar-head -mx-4 -mt-4 mb-3 px-4">
+          <div className="min-w-0 flex-1">
+            <div className="sig-workspace-sidebar-label">KNOWLEDGE INDEX</div>
+            <div className="mt-1 text-[13px] font-semibold text-dim">专项领域</div>
+          </div>
+          <Button variant="ghost" size="icon" className="w-6 h-6" title="新增领域" aria-label="新增领域" onClick={() => setShowAddTopic(true)}><Plus size={14} /></Button>
         </div>
-        <div className="flex-1 overflow-y-auto">
+        <div className="sig-workspace-sidebar-list flex-1 overflow-y-auto">
           {topicKeys.map((key) => {
             const isCurrent = selected === key;
             const showDirtyDot = isCurrent && anyDirty;
             return (
               <div key={key} className="relative mb-0.5 group">
                 <button
+                  data-active={isCurrent}
                   className={cn(
-                    "w-full px-3 py-2.5 rounded-md text-sm text-left flex items-center gap-2 transition-all cursor-pointer",
+                    "sig-workspace-row w-full px-3 py-2.5 rounded-md text-sm text-left flex items-center gap-2 transition-all cursor-pointer",
                     isCurrent ? "bg-secondary text-text" : "text-dim hover:bg-secondary/60 hover:translate-x-0.5"
                   )}
                   style={isCurrent ? { boxShadow: "inset 2px 0 0 var(--sig-accent)" } : undefined}
@@ -701,13 +714,14 @@ export default function Knowledge() {
         </div>
       )}
 
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <div className="flex border-b border-border px-4 md:px-6 bg-card items-center">
+      <div className="sig-workspace-main flex-1 flex flex-col overflow-hidden">
+        <div className="sig-workspace-header flex border-b border-border px-4 md:px-6 bg-card items-center">
           {["core", "high_freq"].map((t) => (
             <button
               key={t}
+              data-active={tab === t}
               className={cn(
-                "px-4 py-3 md:px-5 text-sm border-b-2 transition-all cursor-pointer",
+                "sig-workspace-tab px-4 py-3 md:px-5 text-sm border-b-2 transition-all cursor-pointer",
                 tab === t ? "text-text border-b-primary font-medium" : "text-dim border-b-transparent hover:text-text"
               )}
               onClick={() => setTab(t)}
@@ -715,7 +729,7 @@ export default function Knowledge() {
               {t === "core" ? "核心知识库" : "高频题库"}
             </button>
           ))}
-          <div className="ml-auto pr-1 relative flex items-center gap-2">
+          <div className="sig-workspace-toolbar ml-auto pr-1 relative flex items-center gap-2">
             {hasActiveTask && (
               <div className="hidden md:flex items-center gap-2 text-xs text-dim px-3 py-1.5 rounded-lg bg-primary/8 border border-primary/20 max-w-[280px]">
                 <Loader2 size={14} className="animate-spin text-primary shrink-0" />
@@ -777,7 +791,16 @@ export default function Knowledge() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-6">
+        <div className="sig-workspace-scroll flex-1 overflow-y-auto p-4 md:p-6">
+          {topicsLoadError && (
+            <div className="mb-4 flex items-center gap-2 border border-red/30 bg-red/10 px-3 py-2 text-sm text-red">
+              <AlertCircle size={15} className="shrink-0" />
+              <span className="min-w-0 flex-1">知识领域加载失败：{topicsLoadError}</span>
+              <Button variant="outline" size="sm" className="shrink-0" onClick={() => void loadTopics()}>
+                <RefreshCw size={13} /> 重试
+              </Button>
+            </div>
+          )}
           {!selected ? (
             <div className="text-center py-15 text-dim text-sm">选择一个领域</div>
           ) : (
