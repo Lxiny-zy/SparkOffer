@@ -62,11 +62,11 @@ ALGORITHM_SOLVE_PROMPT = """请分析并解决以下算法问题。
 
 ### 5. 语言特化与工程实践注意点
 
-针对 **{language}** 给出与其它常见语言对比的差异和工程实战要点：
+针对 **{language}** 给出与其它常见语言对比的差异和工程实战要点。**只展开与 {language} 对应的陷阱清单**；若 {language} 不在下列清单中，按同样粒度自行给出该语言的等价陷阱：
 
-- **Python 常见陷阱**：默认参数可变对象、装饰器记忆化 vs `functools.lru_cache`、整数任意精度、字符串拼接性能、`is` vs `==`
-- **Java 常见陷阱**：整数溢出（用 `Math.addExact` 或 `long`）、自动装箱性能、HashMap 容量与负载因子、`equals/hashCode` 一致性、`String` 不可变与 `StringBuilder`
-- **生产环境补丁**：在面试场景下能展示工程素养的额外考虑（输入校验、可观测、并发安全、单测覆盖）
+- **Python 常见陷阱**（仅当语言为 Python）：默认参数可变对象、装饰器记忆化 vs `functools.lru_cache`、整数任意精度、字符串拼接性能、`is` vs `==`
+- **Java 常见陷阱**（仅当语言为 Java）：整数溢出（用 `Math.addExact` 或 `long`）、自动装箱性能、HashMap 容量与负载因子、`equals/hashCode` 一致性、`String` 不可变与 `StringBuilder`
+- **生产环境补丁**（所有语言通用）：在面试场景下能展示工程素养的额外考虑（输入校验、可观测、并发安全、单测覆盖）
 
 ---
 

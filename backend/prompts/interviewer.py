@@ -91,7 +91,7 @@ RESUME_INTERVIEWER_SYSTEM = """你是一位在 LLM 应用 / Agent 工程领域�
 - `next_focus`：基于本次表现，下一步你想验证什么
 - `pillar`：本问题所属板块，取值之一："java" / "python" / "agent" / "general"
 
-标记格式要求：整个 EVAL 注释必须写在**一行内**（JSON 不换行），且是回复的最后一行；JSON 字符串值里不要出现双引号（用中文引号或改写），保证注释体是合法 JSON。
+标记格式要求：整个 EVAL 注释必须写在**一行内**（JSON 不换行），且是回复的最后一行。**仅在本 EVAL 标记内**：字符串值里不要出现英文双引号，需要引用时用成对的中文引号「」或改写——这是嵌在 HTML 注释里的单行 JSON 的场景特例，不适用于其它 JSON 输出。
 
 """ + SCORING_RUBRIC + """
 
@@ -172,13 +172,14 @@ DRILL_QUESTION_GEN_PROMPT = """## 知识库使用约束（必读）
 | Python | 什么是 GIL / 列举 asyncio API | 你的多线程爬虫为什么没跑满 CPU？/ 一个 async 函数里调用了同步 requests.get，事件循环里会发生什么？ |
 | Agent | 描述 RAG 流程 / 列出 ReAct 步骤 | RAG 系统对长尾问题召回率低，可能哪些环节出问题？/ Agent loop 在第 4 轮 tool call 后陷入循环，你会从哪几方面定位？ |
 
-## 题目分组要求（强约束）
+## 题目分组要求
 
-10 道题必须按以下分组分布：
+`category` 标签与「出题策略」的槽位计划**对齐推导**，不是一套独立配额：
 
-- `weak_point` 组：**≥3 题**，直接命中候选人已知薄弱点
-- `scenario` 组：**≥2 题**，给一个真实工程场景让候选人诊断 / 设计 / 取舍
-- `core_concept` 组：补足到 10 题，考察核心原理但要求结合实际而非背诵
+- 针对具体 weak_point 的槽（focus / consolidate / graduate 角色）→ category 填 `weak_point`
+- exploration 槽 → 按题型填 `scenario`（真实工程场景的诊断 / 设计 / 取舍）或 `core_concept`（核心原理但结合实际）
+- 全卷至少 2 题采用场景题型呈现（可落在任何槽位；weak_point 槽的场景化题 category 仍标 `weak_point`）
+- 「已知薄弱点」为空时 weak_point 组自然为 0 —— **禁止**为凑分组虚构薄弱点
 
 ## 输出格式
 
@@ -305,6 +306,9 @@ COLD_START_DRILL_PROMPT = """你是「{topic_name}」资深面试官，正在为
 
 字段：id / question / difficulty (1-5) / focus_area / category / pillar
 
+- `category`："scenario" / "core_concept" 二选一（诊断模式没有已知薄弱点，**禁止**填 "weak_point"）
+- `pillar`："java" / "python" / "agent" / "general" 四选一
+
 只返回 JSON，禁止其他文字。"""
 
 
@@ -314,13 +318,17 @@ COLD_START_DRILL_PROMPT = """你是「{topic_name}」资深面试官，正在为
 
 DRILL_PER_QUESTION_SCORE_PROMPT = """你是「{topic_name}」资深面试官，正在为**一道**训练题打分。
 
+""" + injection_guard("`<answer>`", data_kind="候选人作答内容", tail="必须按真实表现评分。") + """
+
 ## 题目（难度 {difficulty}/5）
 
 {question}
 
 ## 候选人回答
 
+<answer>
 {answer}
+</answer>
 
 ## 参考知识（如有）
 
@@ -471,7 +479,7 @@ HINT_PROMPT = """你是「{topic_name}」领域的技术面试教练，候选人
 
 ## 风格
 
-- 简洁，**总共 2-3 句**，不超过 100 字
+- 简洁，三步各一句、相邻两步可自然合并成一句，总共不超过 100 字
 - 像资深同事在旁边轻声提醒，不是教科书段落
 - 术语精准——例如 Python 题里用"event loop"而不是"事件圈"
 
@@ -565,9 +573,13 @@ PROFILE_UPDATE_PROMPT = """你是用户画像更新引擎。对比已有画像�
 
 TOPIC_RETROSPECTIVE_PROMPT = """你是面试教练，为候选人生成「{topic_name}」领域的训练回顾报告。
 
+""" + injection_guard("`<history>`", data_kind="候选人的历史训练记录", tail="也不影响你的分析结论。") + """
+
 ## 训练历史（按时间顺序）
 
+<history>
 {session_history}
+</history>
 
 ## 当前掌握度
 

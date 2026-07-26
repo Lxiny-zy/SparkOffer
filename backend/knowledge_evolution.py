@@ -78,17 +78,7 @@ def _operation_marker(operation_id: str | None) -> str:
     digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
     return f"<!-- session-sync-operation:{digest} -->"
 
-_EXTRACT_PROMPT = """你是一个知识提取引擎。请从以下面试 Q&A 中提取有价值的知识点。
-
-## Q&A 列表
-{qa_text}
-
-## 任务
-- 对于得分 >= 7 的回答，提取其中体现的深度知识、最佳实践或独到见解
-- 对于得分 < 6 的回答，提取正确答案方向和关键概念作为参考
-
-每个知识点用 `## ` 开头，简洁明确，包含核心概念和实际应用。
-只返回 Markdown 知识点，不要其他内容。"""
+from backend.prompts.knowledge_evolution import KNOWLEDGE_EXTRACT_PROMPT as _EXTRACT_PROMPT  # prompt 已集中到 prompts/
 
 
 async def extract_and_writeback(
