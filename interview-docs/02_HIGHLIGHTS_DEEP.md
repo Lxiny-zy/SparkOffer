@@ -9,7 +9,7 @@
 2. **亮点 3** 自研向量检索 —— **工程取舍判断力**
 3. **亮点 6** LangGraph 隐藏 EVAL —— **巧思 + 实战经验**
 4. **亮点 4** 多渠道 LLM Failover —— **生产化能力**
-5. **亮点 10** FloatingAssistant 14 工具 —— **Function Calling 实战**
+5. **亮点 10** FloatingAssistant 18 工具 —— **Function Calling 实战**
 
 ---
 
@@ -878,6 +878,6 @@ class TaskStatus:
 - 亮点 7 · 流式 SSE + 增量 JSON 解析
 - 亮点 8 · SM-2 间隔重复
 - 亮点 9 · 知识库自动沉淀
-- 亮点 10 · FloatingAssistant 14 工具 Function Calling Agent
+- 亮点 10 · FloatingAssistant 18 工具 Function Calling Agent
 
 详见 [02 十大亮点 · 下半部分](02b_HIGHLIGHTS_DEEP_part2.md)

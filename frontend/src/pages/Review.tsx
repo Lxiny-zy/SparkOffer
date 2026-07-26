@@ -649,12 +649,12 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
                       return (
                         <div className="flex gap-2 mt-2 text-[11px]">
                           {pq.faithfulness != null && (
-                            <Badge variant="outline" className="font-mono text-[10px] gap-1" style={{ borderColor: metricColorVar(pq.faithfulness / 10), color: metricColorVar(pq.faithfulness / 10) }}>
+                            <Badge variant="outline" className="font-mono text-[10px] gap-1" style={{ borderColor: metricColorVar(pq.faithfulness / 10, "faithfulness"), color: metricColorVar(pq.faithfulness / 10, "faithfulness") }}>
                               忠实 {pq.faithfulness}/10
                             </Badge>
                           )}
                           {pq.answer_relevance != null && (
-                            <Badge variant="outline" className="font-mono text-[10px] gap-1" style={{ borderColor: metricColorVar(pq.answer_relevance / 10), color: metricColorVar(pq.answer_relevance / 10) }}>
+                            <Badge variant="outline" className="font-mono text-[10px] gap-1" style={{ borderColor: metricColorVar(pq.answer_relevance / 10, "answer_relevance"), color: metricColorVar(pq.answer_relevance / 10, "answer_relevance") }}>
                               切题 {pq.answer_relevance}/10
                             </Badge>
                           )}

@@ -35,6 +35,8 @@
 
 ```python
 # graphs/resume_interview.py:compile_resume_interview
+from backend.graphs.checkpointer import get_checkpointer
+
 def compile_resume_interview(user_id):
     graph = StateGraph(ResumeInterviewState)
 
@@ -55,7 +57,7 @@ def compile_resume_interview(user_id):
     })
 
     return graph.compile(
-        checkpointer=MemorySaver(),           # ★ 状态持久化
+        checkpointer=get_checkpointer(),      # ★ 进程级 SqliteSaver（data/checkpoints.db）
         interrupt_before=["wait"],            # ★ 暂停等用户输入
     )
 ```
@@ -237,9 +239,9 @@ Prompt 强制约定（`prompts/interviewer.py:80-94`）：
 
 **为什么 `phase_question_count >= 2` 才让 LLM 推进**：避免一上来 should_advance=true 就推进，至少给候选人 2 题表现机会。
 
-**为什么用 MemorySaver（内存）而不是 SqliteSaver**：
-- 内存 saver 单进程足够，重启会丢
-- 我们额外存了一份在 live_store + SQLite live_sessions 表，作为持久化兜底（实际上 LangGraph state 主要是 messages，业务关键数据已经在 sessions 表里）
+**为什么用 SqliteSaver 而不是 MemorySaver**：
+- checkpointer 走进程级 `SqliteSaver` 单例（`graphs/checkpointer.py`，落盘 `data/checkpoints.db`），state 按 `thread_id`（= session_id）持久化，**进程重启 / 多 worker 都能续接在途面试**——这正是弃用内存 saver 的原因
+- 另外还在 live_store + SQLite live_sessions 表存了一份短期态作兜底（LangGraph state 主要是 messages，业务关键数据也已落在 sessions 表里）
 
 ### 6.6 失败处理
 
@@ -271,7 +273,7 @@ Prompt 强制约定（`prompts/interviewer.py:80-94`）：
 - 护栏 2：至少 2 题才允许推进（避免一上来就 should_advance=true）
 - 护栏 3：最大题数兜底（`max_questions_per_phase=5`）
 
-LangGraph 的 `interrupt_before=["wait"]` + `MemorySaver` checkpointer 让对话状态自动持久化，前端只要传 thread_id 就能续接。"
+LangGraph 的 `interrupt_before=["wait"]` + 进程级 `SqliteSaver` checkpointer 让对话状态自动落盘 `data/checkpoints.db`，前端只要传 thread_id 就能续接、重启也不丢。"
 
 ---
 
@@ -787,17 +789,17 @@ async def collect_high_freq(topic, questions, scores, user_id):
 
 ---
 
-## 亮点 10 · ★★★★★ FloatingAssistant 14 工具 Function Calling Agent
+## 亮点 10 · ★★★★★ FloatingAssistant 18 工具 Function Calling Agent
 
 ### 10.1 是什么
 
 一个全局漂浮的小猫助手「小鱼」，可以：
 - 多轮对话（带历史 + 长期记忆）
-- 调用 14 个工具（导航、画像查询、复习查询、训练启动、知识库检索、薄弱点详情...）
+- 调用 18 个工具（导航、画像查询、复习查询、训练启动、知识库检索、薄弱点详情...）
 - 流式响应（带 tool_call 检测和工具结果回填）
 - 双档运行（关怀档 / 技术解释档）
 
-### 10.2 14 个工具完整列表
+### 10.2 18 个工具完整列表
 
 ```python
 TOOLS = [
@@ -989,7 +991,7 @@ _FOCUS_PATTERN = re.compile(
 
 "FloatingAssistant 这块是真正的 Agent 实战：单 Agent + Tool Use + 多轮对话 + 长期记忆。
 
-设计了 **14 个工具**覆盖『导航、画像查询、训练启动、历史搜索、向量记忆检索、知识库查询』。
+设计了 **18 个工具**覆盖『导航、画像查询、训练启动、历史搜索、向量记忆检索、知识库查询』。
 
 最难的是**多轮工具调用循环**：
 - 流式生成时检测 chunk 里有没有 `tool_call_chunks`
@@ -1016,7 +1018,7 @@ Prompt 设计最得意的是**工具调用决策树**：用表格教 LLM '什么
 > 1. （亮点 2）画像系统 —— Mem0 风格两阶段更新 + 向量去重 fallback
 > 2. （亮点 3）向量检索 —— 自研 SQLite + numpy 而不上 Milvus
 > 3. （亮点 6）LangGraph 隐藏 EVAL —— 让 LLM 自评驱动状态机
-> 4. （亮点 10）FloatingAssistant —— 14 工具的 Agent 实战
+> 4. （亮点 10）FloatingAssistant —— 18 工具的 Agent 实战
 >
 > "另外做了一些工程鲁棒性设计："
 > 5. （亮点 4）多渠道 LLM Failover

@@ -511,6 +511,7 @@ export default function RAGDashboard() {
     evalRecoveryScopeRef.current = null;
     setEvalError(null);
     let consecutiveFailures = 0;
+    let successDelay = EVAL_POLL_INITIAL_DELAY_MS;
 
     const poll = async () => {
       if (
@@ -538,7 +539,9 @@ export default function RAGDashboard() {
           }
           return;
         }
-        pollRef.current = window.setTimeout(() => { void poll(); }, EVAL_POLL_INITIAL_DELAY_MS);
+        // Ease off gradually on long-running jobs; stays responsive early on.
+        successDelay = Math.min(EVAL_POLL_MAX_DELAY_MS, successDelay * 1.5);
+        pollRef.current = window.setTimeout(() => { void poll(); }, successDelay);
       } catch (error: any) {
         if (
           generation !== pollGenerationRef.current

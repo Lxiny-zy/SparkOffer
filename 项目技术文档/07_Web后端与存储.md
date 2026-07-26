@@ -1,6 +1,6 @@
 # Part 2 · 07 — Web 后端与存储
 
-> 本章覆盖支撑整个系统的工程底座：**FastAPI**（异步 Web 框架）、**asyncio 并发模式**（这是后端性能的关键）、**SQLite/WAL 存储**（9 张表）、以及 **JWT + bcrypt 认证 + 路径穿越防护**。
+> 本章覆盖支撑整个系统的工程底座：**FastAPI**（异步 Web 框架）、**asyncio 并发模式**（这是后端性能的关键）、**SQLite/WAL 存储**（16 张表）、以及 **JWT + bcrypt 认证 + 路径穿越防护**。
 
 ---
 
@@ -13,7 +13,7 @@
 - **Pydantic 校验**：请求/响应模型用类型注解声明，自动校验 + 生成 OpenAPI 文档。
 - **依赖注入**：`Depends(...)` 把鉴权、DB 连接等横切关注点声明式注入。
 
-本项目 16 个 router、API 版本 0.3.0，在 `main.py` 用 `app.include_router(...)` 注册。
+本项目 15 个 router、API 版本 0.3.0，在 `main.py` 用 `app.include_router(...)` 注册。
 
 ### 1.2 异步路由与 SSE
 
@@ -101,7 +101,7 @@ SSE 流式的核心：路由返回一个 async 生成器，FastAPI 边迭代边�
 ### 3.1 为什么是 SQLite
 
 单文件、零运维、嵌入式——非常适合**单机部署的中小应用**。本项目两个库：
-- `data/interviews.db`：9 张业务表。
+- `data/interviews.db`：16 张业务表。
 - `data/checkpoints.db`：LangGraph 状态（**独立库**，避免和业务表锁争用）。
 
 ### 3.2 WAL 模式 + busy_timeout
@@ -114,7 +114,7 @@ PRAGMA busy_timeout=5000   # 锁等待 5 秒
 - **WAL（预写日志）**：写操作先写日志、不直接改主库文件，**让"读"和"写"可以并发**（传统 rollback journal 模式下写会阻塞读）。对"一边出题落库、一边查历史"的场景很关键。
 - **busy_timeout=5s**：拿不到锁时等 5 秒再报错，而不是立刻 `database is locked` 失败——吸收短暂的锁争用。
 
-### 3.3 9 张表 schema（`storage/database.py`）
+### 3.3 16 张表 schema（`storage/database.py`）
 
 | 表 | 存什么 | 关键列/索引 |
 |---|---|---|
@@ -129,6 +129,10 @@ PRAGMA busy_timeout=5000   # 锁等待 5 秒
 | `qa_sessions` / `qa_messages` | QA Arena 会话 + 消息 | context_summary、summary_msg_count（滚动摘要） |
 | `rag_metrics` | 在线 RAG 质量信号 | relevance/coverage/diversity/faithfulness… |
 | `rag_eval_runs` | 离线 RAG 评测结果 | hit_at_k、mrr、context_precision… |
+| `qa_ingest_requests` | QA Arena 入库幂等去重 | user_id、session_id、idempotency_key/marker |
+| `rag_eval_start_requests` | 离线评测启动幂等去重 | user_id、idempotency_key、job_id、response_json |
+| `knowledge_cards` | 知识训练闪卡 + SM-2 复习态 | id(kt-hash)、user_id、topic、next_review |
+| `audit_logs` | 安全审计流水（登录/注册/改密 + 全局配置变更） | event、user_id、detail(JSON)、created_at |
 
 > 注意 **embedding 存为 BLOB**——这就是"自研向量检索"的物理形态（04 章）：向量序列化成字节存进 SQLite，读出来 numpy 反序列化算余弦。
 
@@ -202,7 +206,7 @@ if user_id != _default_user_id(settings.default_email):
 
 - **FastAPI**：异步路由 + Pydantic 校验 + 依赖注入鉴权 + `StreamingResponse` 流式。
 - **asyncio 模式**：`to_thread`（移走阻塞调用，最关键）/ `wait_for`（超时）/ `gather`（并发，墙钟取 max）/ `Semaphore`（限流）/ async generator（SSE）。
-- **SQLite WAL**：读写并发 + busy_timeout 吸收锁争用；9 张表，向量存 BLOB；业务库与 checkpoint 库分离。
+- **SQLite WAL**：读写并发 + busy_timeout 吸收锁争用；16 张表，向量存 BLOB；业务库与 checkpoint 库分离。
 - **认证安全**：bcrypt 慢哈希 + JWT(HS256) 无状态鉴权 + **正则校验 user_id 防路径穿越** + owner-only RBAC + 用户目录隔离。
 
 ➡️ 下一章：[08_评测体系.md](08_评测体系.md)——离线评测矩阵、LLM-as-Judge、KL 散度、基线对比方法论。

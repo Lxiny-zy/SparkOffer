@@ -850,7 +850,7 @@ QA Arena 展示了 Agent 系统中“短期会话记忆、长期记忆和外部�
 `backend/rag_metrics.py` 位于真实出题链路，低成本计算：
 
 1. relevance。
-2. discrimination。
+2. coverage。
 3. diversity。
 
 它们没有人工 ground truth，主要用于发现召回质量是否突然退化。

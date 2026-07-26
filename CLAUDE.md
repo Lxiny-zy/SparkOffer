@@ -14,21 +14,24 @@ pip install -r requirements.txt
 # Optional, only if EMBEDDING_BACKEND=local
 pip install -r requirements.local-embedding.txt
 
-# Dev server (host 0.0.0.0:8000, reload on change)
+# Dev server (127.0.0.1:8000, reload on change; add --host 0.0.0.0 to expose)
 uvicorn backend.main:app --reload --port 8000
 
 # Standalone scripts (run via -m from repo root so backend.* imports resolve)
 python -m scripts.warmup_index
 python -m scripts.migrate_to_three_topics
+
+# Backend tests (pytest.ini at repo root; deps in requirements-dev.txt)
+python -m pytest tests/
 ```
 
-No pytest suite exists. Smoke-test backend changes by hitting `http://localhost:8000/docs`.
+Smoke-test API changes not covered by `tests/` via `http://localhost:8000/docs`.
 
 ### Frontend (from `frontend/`)
 ```bash
 npm install
 npm run dev        # vite, defaults to http://localhost:5173
-npm run build      # vite build → frontend/dist
+npm run build      # tsc --noEmit && vite build → frontend/dist
 npm run lint       # eslint .
 ```
 No frontend test runner is configured.
@@ -36,7 +39,7 @@ No frontend test runner is configured.
 ### Full stack via Docker
 ```bash
 docker compose up --build         # local: front 80, back 8000
-# Server deploy uses ports 9000 (front) / 9001 (back) — see DEPLOYMENT.md
+# Server deploy publishes only the front on 9000; the backend stays internal (expose 8000) — see DEPLOYMENT.md
 ```
 The backend container has a `data:/app/data` volume — SQLite DB, knowledge docs, user profiles, and `ai_config.json` persist here. Never bake user data into the image.
 
@@ -61,8 +64,8 @@ The backend is **mostly flat, not layered**. Each file is responsible for a doma
 - `auth.py` — JWT (HS256, 7-day) + bcrypt. Default user is auto-created on startup; registration gated by `ALLOW_REGISTRATION`.
 - `storage/` — SQLite (WAL mode, 5s busy_timeout). All tables live in **one** `data/interviews.db`. `database.py` owns connection + schema init; other files are table-specific repositories.
 - `models.py` — Pydantic schemas + the `InterviewPhase` enum that drives the LangGraph state machine.
-- `graphs/` — LangGraph workflows. **Four entry points**: `resume_interview.py` (5-phase state machine), `job_prep.py` (JD-targeted), `topic_drill.py` (10-question专项), `review.py` (SM-2 due items). Each builds a `StateGraph` with `MemorySaver` checkpointing.
-- `assistant.py` — Floating side-panel agent. **Single agent + tool-use** (~14 tools, see `TOOLS` constant). Not multi-agent — do not describe it as such.
+- `graphs/` — Interview workflows. **Four entry points**: `resume_interview.py` (5-phase state machine), `job_prep.py` (JD-targeted), `topic_drill.py` (10-question专项), `review.py` (SM-2 due items). Only `resume_interview.py` is a LangGraph `StateGraph`, checkpointed via `checkpointer.py`'s shared `SqliteSaver` (`data/checkpoints.db` — survives restarts); the others are plain async pipelines.
+- `assistant.py` — Floating side-panel agent. **Single agent + tool-use** (18 tools, see `TOOLS` constant). Not multi-agent — do not describe it as such.
 - `memory.py` — Long-term user profile. Mem0-style two-stage update: (1) LLM extracts new findings, (2) LLM merges with existing profile choosing ADD / UPDATE / NOOP / IMPROVE per entry.
 - `vector_memory.py` — Long-term memory vectors. Backend chosen by `vector_store/` factory: **numpy**（SQLite BLOB + 余弦，裸 uvicorn 默认）or **Qdrant**（Docker 部署默认，单 collection payload 多租户）. Designed for ≤500 vectors per user (`MAX_VECTORS_PER_USER`). Includes time-decay (14-day half-life, capped at 30% weight) and semantic dedup at similarity 0.75. **Do not swap to Milvus/Pinecone** — the two-backend design is intentional for project scale.
 - `indexer.py` — LlamaIndex knowledge-base indices. Backend follows `VECTOR_BACKEND`: local persist (`.index_cache/`) or Qdrant (`kb_{user}_{topic}` collections, Docker 默认). **Cached in-process** (TTL 1h, max 50 user indices). Rebuilds are incremental by default on BOTH backends: a file-hash manifest (`_file_hashes.json`) diffs added/modified/deleted files and only re-embeds changes; full re-embed happens on first build, embedding-model switch (dim mismatch), empty-collection self-heal, or explicit `?force=true`. Retrieval is wrapped with `asyncio.to_thread` + 60s timeout — LlamaIndex itself is sync.
@@ -101,7 +104,7 @@ data/
 - **LLM/Embedding access goes through `llm_provider` + `channel_manager`.** Calling vendor SDKs directly defeats the failover/cooldown layer.
 - **Prompts live in `backend/prompts/`.** Don't inline new long prompts in graph/router code; centralize them.
 - **Mastery scoring is deterministic** (`difficulty/5 × score/10`), not an LLM judgment. Profile *merging* is the only LLM-driven step. Don't conflate the two when changing scoring logic.
-- **Two distinct RAG-metric systems, never comparable.** `rag_metrics.py` = online, zero-LLM-cost retrieval health gauges on the question-gen path (`relevance` / `discrimination` / `diversity` — embedding-only, no ground truth). `rag_eval.py` = offline RAGAS benchmark with an LLM-synthesized golden set (`hit@k` / `hit_at_k_strict` / `mrr` / precision / recall / faithfulness / relevancy / correctness — ground-truth, LLM-judged). They live on different scales: out-题 relevance naturally ~0.45–0.65, RAGAS scores naturally higher. Color each metric against its own band via `frontend/src/lib/metrics.ts` `METRIC_SPEC`, never a global threshold. Don't reintroduce the old circular precision/recall on the question-gen path (chunks scored against the queries that retrieved them → pinned ~100%).
+- **Two distinct RAG-metric systems, never comparable.** `rag_metrics.py` = online, zero-LLM-cost retrieval health gauges on the question-gen path (`relevance` / `coverage` / `diversity` — embedding-only, no ground truth). `rag_eval.py` = offline RAGAS benchmark with an LLM-synthesized golden set (`hit@k` / `hit_at_k_strict` / `mrr` / precision / recall / faithfulness / relevancy / correctness — ground-truth, LLM-judged). They live on different scales: out-题 relevance naturally ~0.45–0.65, RAGAS scores naturally higher. Color each metric against its own band via `frontend/src/lib/metrics.ts` `METRIC_SPEC`, never a global threshold. Don't reintroduce the old circular precision/recall on the question-gen path (chunks scored against the queries that retrieved them → pinned ~100%).
 - **The simplification pass (commit `9a07107`) deliberately removed defensive layers** — don't reintroduce broad try/except, mock fallbacks, or feature-flag scaffolding without a concrete reason.
 - **Sync code in async paths is wrapped, not avoided.** LlamaIndex retrieval uses `asyncio.to_thread` + timeout; mirror this pattern for new sync-only dependencies rather than blocking the event loop.
 - **Hard limits encode design tradeoffs** (see `项目技术文档/04_记忆与个性化.md`): 500 vectors/user, 50 cached indices, 1h index TTL, 2h live-session TTL, 0.75 semantic-dedup threshold, 14-day decay half-life. Change them with care — they bound memory/cost.
@@ -109,5 +112,5 @@ data/
 ## Reference docs already in the repo
 
 - `README.md` / `README.en.md` — product pitch, quickstart, tech stack table.
-- `DEPLOYMENT.md` — Docker, ports (9000/9001), volume backup, healthcheck details.
+- `DEPLOYMENT.md` — Docker, port 9000 (front; backend stays internal), volume backup, healthcheck details.
 - `interview-docs/01..06_*.md` + `项目技术文档/01..11_*.md` — exhaustive architecture / data-flow / DB / prompt / frontend write-ups. When asked deep "how does X work" questions, prefer reading these over re-deriving from code.

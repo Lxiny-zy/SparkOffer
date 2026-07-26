@@ -62,7 +62,9 @@ export default function History() {
   }, [fetchSessions]);
 
   const handleModeChange = (mode: string) => {
-    if (mode === "resume") setTopicFilter("all");
+    // Topic dropdown is hidden for both of these modes — clear the filter so a
+    // stale selection doesn't silently constrain the query.
+    if (mode === "resume" || mode === "jd_prep") setTopicFilter("all");
     setModeFilter(mode);
   };
 

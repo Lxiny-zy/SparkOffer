@@ -1,5 +1,7 @@
 """JD-targeted prep routes — preview and start."""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Depends
 
 from backend.models import (
@@ -79,11 +81,11 @@ async def job_prep_start(req: JobPrepStartRequest, user_id: str = Depends(get_cu
             "preview": preview,
         }
 
-        create_session(
-            session_id, InterviewMode.JD_PREP.value,
+        await asyncio.to_thread(
+            create_session, session_id, InterviewMode.JD_PREP.value,
             questions=questions, meta=meta, user_id=user_id,
         )
-        save_live(job_prep_sessions, session_id, "job_prep", user_id, {
+        await asyncio.to_thread(save_live, job_prep_sessions, session_id, "job_prep", user_id, {
             "questions": questions, "preview": preview, "meta": meta, "user_id": user_id,
         })
 

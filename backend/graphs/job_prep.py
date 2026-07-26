@@ -352,6 +352,8 @@ async def stream_generate_job_prep_preview(
     async for kind, value in stream_llm_sse(lc_messages, progress_prefix="正在分析 JD"):
         if kind == "sse":
             yield ("sse", value)
+        elif kind == "error":
+            return  # error SSE already forwarded
         else:
             raw = value
 
@@ -401,6 +403,8 @@ async def stream_generate_job_prep_questions(
     async for kind, value in stream_llm_sse(lc_messages, progress_prefix="正在生成训练题目"):
         if kind == "sse":
             yield ("sse", value)
+        elif kind == "error":
+            return  # error SSE already forwarded
         else:
             raw = value
 

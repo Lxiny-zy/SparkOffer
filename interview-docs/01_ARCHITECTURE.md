@@ -23,14 +23,30 @@ SparkOffer/
 │   ├── spaced_repetition.py# SM-2 算法
 │   ├── knowledge_evolution.py # 知识库自我进化
 │   ├── live_store.py       # TTLDict + SQLite 持久化的 in-memory store
-│   ├── assistant.py        # FloatingAssistant Agent (14 工具)
+│   ├── assistant.py        # FloatingAssistant Agent (18 工具)
 │   ├── qa_arena.py         # 问答演练场（长期记忆 + 上下文压缩）
 │   ├── graph.py            # 题目关联图谱（语义相似度）
 │   ├── formatters.py       # Review Markdown 生成
 │   ├── migrate.py          # 单用户 → 多用户的一次性迁移脚本
-│   ├── graphs/             # LangGraph 工作流（4 个）
+│   ├── context_assembler.py# Token 预算上下文装配器
+│   ├── rag_metrics.py       # 在线 RAG 检索健康指标（relevance/coverage/diversity）
+│   ├── rag_eval.py          # 离线 RAGAS 基准评测
+│   ├── rag_eval_retrievers.py # 离线评测用检索器
+│   ├── rag_ids.py           # RAG chunk / doc ID 工具
+│   ├── reranker.py          # Cross-Encoder 重排（可降级）
+│   ├── redis_cache.py       # Redis 缓存（不可用回退内存 LRU）
+│   ├── rate_limit.py        # 接口限流
+│   ├── knowledge_training.py# 知识训练闪卡生成
+│   ├── user_vector_migration.py # 用户向量迁移脚本
+│   ├── graphs/             # LangGraph 工作流 + 出题/评估管道（10 个）
 │   │   ├── resume_interview.py  # ★ 5 阶段状态机 + 隐藏 EVAL
 │   │   ├── topic_drill.py       # 批量出题/评估（流式）
+│   │   ├── drill_pipeline.py    # 分阶段流式出题管道
+│   │   ├── rag_retrieval.py     # 多路召回 + RRF 融合 + 去重
+│   │   ├── seed_pool.py         # 种子题池（压首屏延迟）
+│   │   ├── difficulty_anchors.py# k-NN 难度锚点校准
+│   │   ├── decoupled_eval.py    # 解耦式评估
+│   │   ├── checkpointer.py      # 进程级 SqliteSaver 单例
 │   │   ├── job_prep.py          # JD 解析 + 备面四件套
 │   │   └── review.py            # 复盘报告生成
 │   ├── prompts/            # ★ 系统 Prompts 中心化
@@ -38,19 +54,26 @@ SparkOffer/
 │   │   ├── interviewer.py   # 简历面试 + Drill 出题 + 画像更新
 │   │   ├── job_prep.py      # JD 预览 / 出题 / 评估
 │   │   ├── reviewer.py      # 复盘评估
-│   │   └── algorithm.py     # 算法解题陪练
+│   │   ├── algorithm.py     # 算法解题陪练
+│   │   ├── knowledge.py     # 知识库问答
+│   │   ├── knowledge_training.py # 知识训练闪卡
+│   │   ├── rag_eval.py      # 离线评测金标准合成
+│   │   └── strategies.py    # 出题策略
 │   ├── routers/            # FastAPI 路由（15 个）
 │   │   ├── auth.py
 │   │   ├── interview.py     # ★ 面试主入口（start / chat / end）
 │   │   ├── job_prep.py
 │   │   ├── profile.py
 │   │   ├── knowledge.py     # 知识库 CRUD + 后台重建
+│   │   ├── knowledge_training.py # 知识训练闪卡
 │   │   ├── algorithm.py
 │   │   ├── favorites.py
 │   │   ├── assistant.py
 │   │   ├── graph_router.py
 │   │   ├── qa_arena.py
+│   │   ├── rag_eval.py      # 离线 RAG 评测任务
 │   │   ├── resume.py
+│   │   ├── debug.py         # 调试端点
 │   │   └── settings_router.py
 │   ├── storage/            # DAO 层（SQLite CRUD）
 │   │   ├── database.py      # 连接管理 + 表迁移
@@ -59,6 +82,10 @@ SparkOffer/
 │   │   ├── algorithm.py
 │   │   ├── assistant_chats.py
 │   │   ├── qa_sessions.py
+│   │   ├── knowledge_cards.py # 知识训练闪卡 + SM-2
+│   │   ├── rag_metrics_store.py # 在线 RAG 指标
+│   │   ├── rag_eval_store.py    # 离线评测结果
+│   │   ├── audit.py         # 安全审计日志
 │   │   └── live_sessions.py # 进行中会话持久化
 │   └── utils/
 │       ├── sse_helpers.py   # ★ SSE 流式响应工具
@@ -153,7 +180,7 @@ SparkOffer/
 
 | 文件 | 行数 | 模式 | 核心节点 / 函数 |
 |---|---|---|---|
-| `resume_interview.py` | 247 | **真正的 LangGraph 状态机** | init / ask / advance / wait + MemorySaver + interrupt_before |
+| `resume_interview.py` | 247 | **真正的 LangGraph 状态机** | init / ask / advance / wait + SqliteSaver（data/checkpoints.db，经 `graphs/checkpointer.py`）+ interrupt_before |
 | `topic_drill.py` | 308 | **批量调用（不用 LangGraph）** | `generate_drill_questions`, `stream_evaluate_drill_answers` |
 | `job_prep.py` | 454 | 批量调用 + 流式 | preview / questions / evaluate 三步 |
 | `review.py` | 148 | 单次 LLM 调用 | `generate_review`, `stream_generate_review` |
@@ -227,7 +254,7 @@ _local = threading.local()  # 每线程 SQLite 连接
 ```
 1. init_config()              加载 data/ai_config.json + 迁移老格式
    → _reload_channel_manager() 把渠道喂给 ChannelManager
-2. init_all_tables()           CREATE TABLE IF NOT EXISTS × 9
+2. init_all_tables()           CREATE TABLE IF NOT EXISTS × 16
 3. 检查 JWT_SECRET 默认值     未改提示警告
 4. get_embedding()             首次创建 embedding 实例（API 或 local）
 5. _init_llama_settings()      把 LLM + embedding 注入 LlamaIndex 全局

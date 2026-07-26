@@ -647,6 +647,13 @@ def invalidate_singletons():
     except Exception:
         pass
 
+    # 难度锚点矩阵缓存的是旧 embedding 维度，换通道后必须重载。
+    try:
+        from backend.graphs.difficulty_anchors import reset_anchor_cache
+        reset_anchor_cache()
+    except Exception:
+        pass
+
     try:
         from llama_index.core import Settings as LlamaSettings
         LlamaSettings.llm = get_llama_llm()

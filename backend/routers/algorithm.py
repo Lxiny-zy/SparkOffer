@@ -81,11 +81,13 @@ def algorithm_solve(req: AlgorithmSolveRequest, user_id: str = Depends(get_curre
         async for kind, value in stream_llm_sse(messages, progress_prefix="正在解题", stream_content=True):
             if kind == "sse":
                 yield value
+            elif kind == "error":
+                return  # LLM failed — don't create a session around an empty solution
             else:
                 solution = value
 
         session_id = new_session_id()
-        save_live(algorithm_sessions, session_id, "algorithm", user_id, {
+        await asyncio.to_thread(save_live, algorithm_sessions, session_id, "algorithm", user_id, {
             "user_id": user_id,
             "problem_text": req.problem_text,
             "language": req.language,
@@ -124,12 +126,15 @@ def algorithm_chat(req: AlgorithmChatRequest, user_id: str = Depends(get_current
             ):
                 if kind == "sse":
                     yield value
+                elif kind == "error":
+                    current["messages"].pop()  # roll back the unanswered user turn
+                    return
                 else:
                     ai_reply = value
 
             current["messages"].append(AIMessage(content=ai_reply))
-            save_live(
-                algorithm_sessions, req.session_id, "algorithm", user_id, current,
+            await asyncio.to_thread(
+                save_live, algorithm_sessions, req.session_id, "algorithm", user_id, current,
             )
             yield sse_event({"type": "complete", "data": {
                 "session_id": req.session_id, "message": ai_reply,

@@ -712,7 +712,11 @@ def get_topic_context_for_drill(topic: str, user_id: str) -> dict:
     profile = _load_profile(user_id)
 
     mastery = profile.get("topic_mastery", {}).get(topic, {})
-    mastery_score = mastery.get("score", mastery.get("level", 0) * 20)
+    # profile.json is hand-editable — "score": null must degrade to the level
+    # fallback, not flow None into downstream numeric comparisons.
+    mastery_score = mastery.get("score")
+    if mastery_score is None:
+        mastery_score = (mastery.get("level") or 0) * 20
     mastery_notes = mastery.get("notes", "新领域，暂无历史数据" if mastery_score == 0 else "")
     mastery_info = f"{mastery_score}/100 — {mastery_notes}"
 

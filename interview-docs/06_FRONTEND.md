@@ -51,9 +51,11 @@
                 <Route path="/profile" element={<Profile />} />
                 <Route path="/profile/topic/:topic" element={<TopicDetail />} />
                 <Route path="/knowledge" element={<Knowledge />} />
+                <Route path="/knowledge-training" element={<KnowledgeTraining />} />
                 <Route path="/graph" element={<Graph />} />
                 <Route path="/job-prep" element={<JobPrep />} />
                 <Route path="/qa-arena" element={<QAArena />} />
+                <Route path="/rag-dashboard" element={<RAGDashboard />} />
                 <Route path="/algorithm" element={<AlgorithmSolver />} />
                 <Route path="/algorithm/collection" element={<AlgorithmCollection />} />
                 <Route path="/favorites" element={<Favorites />} />
@@ -574,6 +576,8 @@ export interface Profile {
 | `Review.tsx` | ~400 | Markdown 复盘渲染、收藏按钮、参考答案再生 |
 | `Profile.tsx` | ~600 | 6 个图表、薄弱点 / 强项 / 偏好展示 |
 | `Knowledge.tsx` | ~600 | 多文件 markdown 编辑、自动沉淀展示、索引重建进度 |
+| `KnowledgeTraining.tsx` | — | 知识训练闪卡生成 + SM-2 复习 |
+| `RAGDashboard.tsx` | — | 在线 RAG 检索指标 + 离线评测结果可视化 |
 | `Graph.tsx` | ~300 | react-force-graph-2d 题目关联可视化 |
 | `JobPrep.tsx` | ~600 | JD 输入 / preview / 答题三步流 |
 | `QAArena.tsx` | ~700 | 会话列表 + 实时聊天 + 总结导出 |
@@ -645,4 +649,4 @@ A：**目前手动维护**。后端改了 schema 要去 `types/api.ts` 同步。
 
 ---
 
-下一章 → [07 部署与运维](07_DEPLOYMENT.md)
+下一章 → [部署与运维](../DEPLOYMENT.md)

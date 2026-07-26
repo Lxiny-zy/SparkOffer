@@ -731,8 +731,14 @@ async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get
             questions = await asyncio.to_thread(generate_drill_questions, req.topic, user_id)
         except RuntimeError as e:
             raise HTTPException(500, str(e))
-        create_session(session_id, req.mode.value, req.topic, questions=questions, user_id=user_id)
-        save_live(drill_sessions, session_id, "drill", user_id, {"topic": req.topic, "questions": questions, "user_id": user_id})
+        await asyncio.to_thread(
+            create_session, session_id, req.mode.value, req.topic,
+            questions=questions, user_id=user_id,
+        )
+        await asyncio.to_thread(
+            save_live, drill_sessions, session_id, "drill", user_id,
+            {"topic": req.topic, "questions": questions, "user_id": user_id},
+        )
         return {
             "session_id": session_id,
             "mode": req.mode.value,
@@ -1779,8 +1785,14 @@ async def generate_reference_answer(
         async for kind, value in stream_llm_sse(lc_messages, progress_prefix="正在生成参考答案"):
             if kind == "sse":
                 yield value
+            elif kind == "error":
+                return  # LLM failed — don't cache an empty answer
             else:
                 answer = value.strip()
+
+        if not answer:
+            yield sse_event({"type": "error", "message": "生成内容为空，请稍后重试。"})
+            return
 
         if session_id and cache_qid:
             save_reference_answer(session_id, cache_qid, answer, user_id=user_id)

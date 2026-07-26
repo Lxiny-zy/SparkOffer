@@ -27,6 +27,7 @@ export default function Graph() {
   const hoveredNodeRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<any>(null);
+  const loadGenerationRef = useRef(0);
   const [dimensions, setDimensions] = useState<{ width: number; height: number }>({ width: 800, height: 500 });
 
   useEffect(() => {
@@ -45,17 +46,20 @@ export default function Graph() {
   }, []);
 
   const handleSelectTopic = useCallback(async (key: string) => {
+    const generation = ++loadGenerationRef.current;
     setSelectedTopic(key);
     setGraphData(null);
     setLoading(true);
     try {
       const data = await getGraphData(key);
+      if (generation !== loadGenerationRef.current) return;
       setGraphData(data);
       setTimeout(() => fgRef.current?.zoomToFit(400, 40), 300);
     } catch {
+      if (generation !== loadGenerationRef.current) return;
       setGraphData({ nodes: [], links: [] });
     } finally {
-      setLoading(false);
+      if (generation === loadGenerationRef.current) setLoading(false);
     }
   }, []);
 

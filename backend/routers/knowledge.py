@@ -600,8 +600,14 @@ async def generate_core_knowledge(topic: str, user_id: str = Depends(get_current
         async for kind, value in stream_llm_sse(lc_messages, progress_prefix="正在生成知识库"):
             if kind == "sse":
                 yield value
+            elif kind == "error":
+                return  # LLM failed — keep the existing README.md untouched
             else:
                 content = value.strip()
+
+        if not content:
+            yield sse_event({"type": "error", "message": "生成内容为空，已保留原有知识库。"})
+            return
 
         topic_dir = settings.user_knowledge_path(user_id) / topics[topic]["dir"]
         await asyncio.to_thread(

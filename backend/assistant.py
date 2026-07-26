@@ -905,9 +905,9 @@ async def _stream_assistant_chat_unlocked(
     if final_content:
         save_message(user_id, "assistant", final_content[:MAX_RESPONSE_STORE_LENGTH])
 
-    # ── Lightweight preference extraction (async, non-blocking) ──
+    # ── Lightweight preference extraction (file lock + atomic write → thread) ──
     if message:
-        _extract_and_update_preferences(message, user_id)
+        await asyncio.to_thread(_extract_and_update_preferences, message, user_id)
 
 
 async def stream_assistant_chat(

@@ -228,6 +228,9 @@ async def stream_llm_sse(
     SSE event so the caller can render the answer live (真流式)。默认 False，保持
     其它端点依赖的"只推进度计数"行为不变。
     The final yield is ("result", accumulated_text) — NOT an SSE line.
+    On LLM failure the stream instead ends with ("error", message), emitted
+    right after an error SSE event has been forwarded; callers MUST abort
+    without persisting anything (an empty result here is a failure, not data).
     Caller is responsible for emitting the ``complete`` and ``done`` events
     after any post-processing.
 
@@ -277,6 +280,7 @@ async def stream_llm_sse(
     except Exception as e:
         logger.error("stream_llm_sse failed: %s", e)
         yield ("sse", sse_event({"type": "error", "message": "AI 服务暂时不可用，请稍后重试"}))
+        yield ("error", "AI 服务暂时不可用，请稍后重试")
         return
 
     yield ("result", accumulated)

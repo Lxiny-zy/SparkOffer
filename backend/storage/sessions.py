@@ -835,6 +835,17 @@ def delete_session(session_id: str, *, user_id: str) -> bool:
         "DELETE FROM sessions WHERE session_id = ? AND user_id = ?",
         (session_id, user_id),
     )
+    if cursor.rowcount > 0:
+        # No FK cascade — clean up companion rows so a deleted session can't be
+        # resumed from live_sessions and doesn't leave orphan metrics behind.
+        conn.execute(
+            "DELETE FROM live_sessions WHERE session_id = ? AND user_id = ?",
+            (session_id, user_id),
+        )
+        conn.execute(
+            "DELETE FROM rag_metrics WHERE session_id = ? AND user_id = ?",
+            (session_id, user_id),
+        )
     conn.commit()
     return cursor.rowcount > 0
 

@@ -26,6 +26,14 @@ _ANCHOR_CACHE: dict[str, dict] = {}   # topic → {"matrix": np.ndarray, "diffic
 _LOGGED_MISSING: set[str] = set()
 
 
+def reset_anchor_cache():
+    """Drop cached anchor matrices — called via invalidate_singletons after an
+    embedding-channel switch so stale-dimension matrices don't linger."""
+    with _CACHE_LOCK:
+        _ANCHOR_CACHE.clear()
+        _LOGGED_MISSING.clear()
+
+
 def _load_topic_anchors(topic: str) -> dict | None:
     """Lazy-load anchors for a topic on first use. Returns None if no file."""
     with _CACHE_LOCK:
@@ -104,6 +112,15 @@ def calibrate_difficulties(
             continue
         if emb is None:
             continue
+        if np.asarray(emb).shape[-1] != matrix.shape[1]:
+            # Anchors were embedded with a different model — calibration is
+            # meaningless until bootstrap_difficulty_anchors is re-run.
+            logger.warning(
+                "calibrate: embedding dim %d != anchor dim %d for topic=%s — "
+                "skipping (re-run scripts/bootstrap_difficulty_anchors)",
+                np.asarray(emb).shape[-1], matrix.shape[1], topic,
+            )
+            return calibrated, len(questions)
         sims = _cosine_similarity(emb, matrix)
         # Top-k indices by similarity (descending).
         top_idx = np.argsort(-sims)[:k]

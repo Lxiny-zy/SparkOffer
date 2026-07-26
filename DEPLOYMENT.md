@@ -128,7 +128,7 @@ ufw allow 80/tcp
 ufw allow 443/tcp
 ```
 
-不要在安全组或防火墙中放行 9000、9001、6333、6334、6379。
+不要在安全组或防火墙中放行 9000、6333、6334、6379。
 
 ---
 
@@ -189,10 +189,10 @@ volumes:
 |-----------------------|-------------------------------|
 | `data/interviews.db`  | SQLite 数据库（面试记录等）     |
 | `data/knowledge/`     | 知识库文档                     |
-| `data/.index_cache/`  | 向量索引缓存                   |
-| `data/resume/`        | 上传的简历文件                  |
-| `data/user_profile/`  | 用户画像数据                   |
-| `data/users/<user_id>/` | 每个用户的简历、知识库、画像、上传文件 |
+| `data/users/<user_id>/` | 每个用户的简历、知识库、画像、索引缓存（`resume/`、`profile/`、`.index_cache/` 等，当前布局） |
+| `data/.index_cache/`  | 向量索引缓存（legacy 根级路径，兼容保留） |
+| `data/resume/`        | 上传的简历文件（legacy 根级路径，兼容保留） |
+| `data/user_profile/`  | 用户画像数据（legacy 根级路径，兼容保留） |
 | `data/qa_notes/<user_id>/` | Q&A 总结文件                  |
 | `data/qdrant/`        | Qdrant 向量数据（仅启用 qdrant 时） |
 

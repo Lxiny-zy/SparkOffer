@@ -25,7 +25,7 @@
 | [04_记忆与个性化.md](04_记忆与个性化.md) | **Mem0 两阶段画像更新** · 自研向量记忆（SQLite BLOB + numpy）· 时间衰减 · 薄弱点语义匹配 · 掌握度 EWMA 算法 · **SM-2 间隔重复** · 文件即真相/原子写/文件锁 · 知识自进化 |
 | [05_工程鲁棒性.md](05_工程鲁棒性.md) | **多渠道 failover** · Key 轮询 · 冷却与 HALF_OPEN 探活 · **三态熔断器** · 后台任务队列（优先级/去重/指数退避）· `ResilientChatModel` 两阶段流式 failover · 超时/降级模式 · 连接池复用 · 配置热重载 |
 | [06_流式与上下文工程.md](06_流式与上下文工程.md) | SSE 原理 · 心跳/keepalive · reasoning 模型流式 · **增量 JSON 解析** · **Token 预算装配器**（tiktoken + CJK 启发式）· Prompt 前缀缓存 · 上下文压缩（map-reduce 摘要） |
-| [07_Web后端与存储.md](07_Web后端与存储.md) | FastAPI · 异步编程（asyncio/to_thread/gather/semaphore）· SQLite WAL · 9 张表 schema · JWT + bcrypt · 路径穿越防护 · 用户隔离目录 · ASGI/uvicorn |
+| [07_Web后端与存储.md](07_Web后端与存储.md) | FastAPI · 异步编程（asyncio/to_thread/gather/semaphore）· SQLite WAL · 16 张表 schema · JWT + bcrypt · 路径穿越防护 · 用户隔离目录 · ASGI/uvicorn |
 | [08_评测体系.md](08_评测体系.md) | 离线评测矩阵（persona × strategy × judge）· **LLM-as-Judge 多模型投票** · 确定性 judge（coverage / KL 散度 / diversity）· 基线对比方法论 · 在线 RAG 指标 |
 | [09_前端工程.md](09_前端工程.md) | React 19 · Hooks · Suspense/lazy 代码分割 · React Router v7 · Vite · Tailwind v4 + Radix（shadcn）· Recharts/力导向图 · SSE 客户端 · TypeScript |
 | [10_部署与可选能力.md](10_部署与可选能力.md) | Docker Compose · nginx 反代（流式调优）· 可选依赖策略（Redis/Qdrant/本地 embedding/reranker） |

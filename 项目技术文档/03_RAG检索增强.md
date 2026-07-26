@@ -219,7 +219,10 @@ weak_points ─┬─ q1 ─检索─┐
 | **MRR**（Mean Reciprocal Rank） | 命中 chunk 排名倒数的均值 | **排序好不好**（rerank 的 before/after 就看它） |
 | **Precision** | top-k 里相关 chunk 的比例 | 召回的准不准（少废料） |
 
-### 7.2 生成质量指标（RAGAS 家族，在线 `rag_metrics.py`）
+### 7.2 生成质量指标（RAGAS 家族，离线 `rag_eval.py`）
+
+> 注意区分：在线 `rag_metrics.py` 只算 **relevance / coverage / diversity** 三个纯 embedding、零 LLM 成本的检索健康指标（无 ground truth）；下表 Context Precision/Recall、Faithfulness 等 RAGAS 家族属于**离线基准**（`rag_eval.py`，LLM 合成金标准 + LLM 评判），两套指标量纲不同、不可直接比较。
+
 
 | 指标 | 衡量什么 |
 |---|---|

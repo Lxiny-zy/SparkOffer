@@ -1,6 +1,6 @@
 # 04 · 数据库与存储设计
 
-> 9 张表 + 文件系统布局。面试官问"你的数据怎么存的"时，能讲到字段、索引、迁移策略。
+> 16 张表 + 文件系统布局。面试官问"你的数据怎么存的"时，能讲到字段、索引、迁移策略。
 
 ---
 
@@ -19,7 +19,13 @@
 │   ├── memory_vectors (含 BLOB embedding)          │
 │   ├── question_embeddings (题目向量缓存)          │
 │   ├── qa_sessions                                 │
-│   └── qa_messages                                 │
+│   ├── qa_messages                                 │
+│   ├── qa_ingest_requests (入库幂等去重)           │
+│   ├── rag_metrics (在线 RAG 检索指标)             │
+│   ├── rag_eval_runs (离线 RAGAS 评测结果)         │
+│   ├── rag_eval_start_requests (评测启动幂等)      │
+│   ├── knowledge_cards (知识训练闪卡 + SM-2)       │
+│   └── audit_logs (安全审计流水)                   │
 ├─────────────────────────────────────────────────┤
 │ 文件系统                                          │
 │   ├── data/users/{uid}/profile/profile.json      │
@@ -292,6 +298,17 @@ CREATE INDEX idx_qa_messages_session ON qa_messages(session_id, id ASC);
 - 拆成两表：sessions 是元数据，messages 是细节
 - `context_summary` + `summary_msg_count` 实现摘要缓存，避免每次都让 LLM 重新摘要
 - 索引 `(session_id, id ASC)` 保证按时间顺序加载消息
+
+### 2.10 其余业务表（一句话用途）
+
+| 表 | 用途 |
+|---|---|
+| `qa_ingest_requests` | QA Arena 入库幂等去重：按 `(user_id, idempotency_marker)` 唯一，重复入库请求变 no-op |
+| `rag_metrics` | **在线** RAG 检索健康信号（relevance/coverage/diversity 等），随出题落库，供 RAG Dashboard 可视化 |
+| `rag_eval_runs` | **离线** RAGAS 基准评测结果（hit@k / mrr / precision / recall / faithfulness…），按 job_id 归档 |
+| `rag_eval_start_requests` | 离线评测启动幂等去重：缓存 `(user_id, idempotency_key)` 对应的 job 与 `response_json` |
+| `knowledge_cards` | 知识训练闪卡 + SM-2 复习态；id 为确定性 kt-hash（`topic\|title\|source`），重复生成 `INSERT OR IGNORE` 精确去重 |
+| `audit_logs` | 安全审计流水：鉴权事件（登录/注册/改密）与全局配置变更；append-only，仅 owner 端点查询 |
 
 ---
 

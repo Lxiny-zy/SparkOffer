@@ -1,7 +1,6 @@
 """Knowledge training routes."""
 
 import asyncio
-import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -134,21 +133,13 @@ async def generate_cards(
         topic_name = topics[body.topic].get("name", body.topic)
         messages = build_llm_messages(topic_name, body.depth, sections, body.count)
         raw = ""
-        llm_failed = False
         async for kind, value in stream_llm_sse(messages, progress_prefix="正在生成训练卡片"):
             if kind == "sse":
                 yield value
-                try:
-                    event = json.loads(value.removeprefix("data: ").strip())
-                    if event.get("type") == "error":
-                        llm_failed = True
-                except Exception:
-                    pass
+            elif kind == "error":
+                return
             else:
                 raw = value
-
-        if llm_failed:
-            return
 
         cards = normalize_training_cards(raw, topic=body.topic, sections=sections)[:body.count]
         if not cards:

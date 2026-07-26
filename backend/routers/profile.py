@@ -342,8 +342,14 @@ def generate_retrospective(topic: str, user_id: str = Depends(get_current_user))
         async for kind, value in stream_llm_sse(lc_messages, progress_prefix="正在生成回顾报告"):
             if kind == "sse":
                 yield value
+            elif kind == "error":
+                return  # LLM failed — keep the previously cached retrospective
             else:
                 retrospective = value.strip()
+
+        if not retrospective:
+            yield sse_event({"type": "error", "message": "生成内容为空，请稍后重试。"})
+            return
 
         # Re-read under the lock: the pre-stream `profile` snapshot is minutes
         # old by now and saving it would clobber any updates made meanwhile.
@@ -454,6 +460,11 @@ def delete_session_endpoint(session_id: str, user_id: str = Depends(get_current_
     deleted = delete_session(session_id, user_id=user_id)
     if not deleted:
         raise HTTPException(404, "Session not found.")
+    # Evict any in-memory live copy so the deleted session can't be continued
+    # from the process cache (the SQLite live_sessions row is already gone).
+    from backend.live_store import algorithm_sessions, drill_sessions, graphs, job_prep_sessions
+    for store in (graphs, drill_sessions, job_prep_sessions, algorithm_sessions):
+        store.pop(session_id, None)
     return {"ok": True}
 
 

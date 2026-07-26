@@ -475,7 +475,7 @@ def _normalize_overall(parsed: dict, topic: str) -> dict:
 2. **EVAL 标记**：提示词内不应再出现 `"brief"`；`resume_interview.py` 的 `_parse_inline_eval` 应包含 `brief ← observation` 回填。跑一轮简历面试的 technical 阶段，确认时光机/复盘页仍能显示每题 brief。
 3. **专项训练**：发起一轮 drill，确认出题正常（§1.2 只是措辞级改动）；答完后确认整体总结返回嵌套结构（`new_weak_points` 为 `[{point, topic}]` 对象数组、`topic_mastery` 无 `score` 键），画像页薄弱点/沟通观察正常更新。
 4. **QA 竞技场**：分别用短对话（走 `SUMMARY_USER_TEMPLATE` 单次总结）和长对话（走 `MAP_PROMPT`/`REDUCE_PROMPT` map-reduce）各生成一张知识卡片，确认：表格/代码出现在对应主题小节内部，没有集中的「横向对比 / 选型」「关键代码 / 实现要点」章节；每个主题小节以「一句话总结」收束。
-5. 冒烟入口：起服务后打 `http://localhost:8000/docs`（本项目无 pytest 套件；按项目约定，测试在服务器上执行）。
+5. 冒烟入口：起服务后打 `http://localhost:8000/docs`；并用 `python -m pytest tests/` 跑回归测试（按项目约定，测试在服务器上执行）。
 
 ---
 

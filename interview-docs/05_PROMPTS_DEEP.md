@@ -1,7 +1,7 @@
 # 05 · Prompt 工程深度
 
 > Agent 岗位面试官最爱深挖的方向。这章按「**为什么这么写、踩过什么坑、怎么测试、有什么替代方案**」展开。
-> 项目里共 17 个 Prompt 模板，分布在 `backend/prompts/*.py`。
+> 项目里共 20+ 个 Prompt 模板，分布在 `backend/prompts/*.py`。
 
 ---
 
@@ -91,7 +91,7 @@ DRILL_BATCH_EVAL_PROMPT = """你是「{topic_name}」领域的资深工程师，
 
 ---
 
-## 2. 17 个 Prompt 全景
+## 2. 20+ 个 Prompt 全景
 
 | Prompt 名 | 文件位置 | 用途 |
 |---|---|---|
@@ -109,6 +109,10 @@ DRILL_BATCH_EVAL_PROMPT = """你是「{topic_name}」领域的资深工程师，
 | `REVIEW_SYSTEM` | `reviewer.py` | 复盘报告 |
 | `ALGORITHM_SOLVE_SYSTEM/PROMPT` | `algorithm.py` | 算法解题 |
 | `ALGORITHM_CHAT_SYSTEM` | `algorithm.py` | 算法追问 |
+| `KNOWLEDGE_TRAINING_SYSTEM` + `build_knowledge_training_prompt` | `knowledge_training.py` | 知识训练闪卡生成 |
+| `QA_TOPIC_CLASSIFY_PROMPT` / `QA_KNOWLEDGE_CLEAN_PROMPT` | `knowledge.py` | QA 入库主题分类 / 收录审校 |
+| `GOLDEN_SYNTH_PROMPT` 等 RAGAS 系列 | `rag_eval.py` | 离线评测金标准合成 + context recall/precision / faithfulness / answer relevancy/correctness |
+| `render_strategy_block` / `ROLE_INSTRUCTION` | `strategies.py` | 出题策略块（角色指令 + 难度分配） |
 | `SYSTEM_PROMPT` | `assistant.py`（内联） | FloatingAssistant |
 | `QA_ARENA_SYSTEM` | `qa_arena.py`（内联） | 自由问答 |
 
