@@ -11,6 +11,7 @@ import {
   FileText,
   HelpCircle,
   Layers,
+  Lightbulb,
   Loader2,
   Play,
   RefreshCw,
@@ -559,6 +560,15 @@ export default function KnowledgeTraining() {
                 </div>
 
                 <div className="space-y-5">
+                  {currentCard.mnemonic && (
+                    <section className="flex items-start gap-2 rounded-md border border-primary/35 bg-primary/10 px-3 py-2.5">
+                      <Lightbulb size={15} className="mt-0.5 shrink-0 text-primary" />
+                      <div className="text-sm leading-6">
+                        <span className="mr-2 font-semibold">记忆口诀</span>
+                        <span className="text-text">{currentCard.mnemonic}</span>
+                      </div>
+                    </section>
+                  )}
                   <section>
                     <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
                       <Brain size={15} className="text-primary" />

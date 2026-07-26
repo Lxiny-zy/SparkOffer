@@ -105,7 +105,8 @@ def test_normalize_training_cards_fills_topic_id_and_source_refs():
         "knowledge": ["保护解释器内部状态", "同一时刻通常只有一个线程执行 Python 字节码"],
         "example": "CPU 密集型多线程不会线性加速。",
         "question": "GIL 主要解决什么问题？",
-        "answer": "它保护 CPython 解释器内部状态，避免多个线程同时执行字节码时破坏对象状态。",
+        "answer": "**结论**：GIL 保证同一时刻只有一个线程执行字节码。**机制**：它保护 CPython 解释器内部状态，避免多线程并发修改对象引用计数。**易错点**：GIL 不影响 IO 密集任务的线程并发收益。",
+        "mnemonic": "GIL 锁的是字节码执行权，不是锁掉所有并发",
         "tags": ["并发"]
       }
     ]"""
@@ -117,6 +118,7 @@ def test_normalize_training_cards_fills_topic_id_and_source_refs():
     assert card["topic"] == "python"
     assert card["id"].startswith("kt-")
     assert card["source_refs"] == [{"filename": "README.md", "header_path": "Python > GIL"}]
+    assert card["mnemonic"] == "GIL 锁的是字节码执行权，不是锁掉所有并发"
 
 
 def test_normalize_training_cards_rejects_fragmented_schedule_card():
@@ -164,7 +166,7 @@ def test_normalize_training_cards_formats_markdown_and_repairs_source_refs():
         ],
         "example": "```bash\\ndocker run --tmpfs /app/cache myapp\\n```",
         "question": "什么时候应该使用 Docker tmpfs，而不是 volume？",
-        "answer": "当数据只需要临时存在、希望放在内存中并避免磁盘持久化时适合使用 tmpfs；需要跨容器生命周期保存的数据应使用 volume。",
+        "answer": "**结论**：数据只需临时存在且希望避免落盘时用 tmpfs，需要跨容器生命周期保存时用 volume。**机制**：tmpfs 挂载在内存中，容器停止即消失；volume 由 Docker 管理并持久化到磁盘。**易错点**：把需要持久化的数据放进 tmpfs，重启后全部丢失。",
         "tags": ["Docker", "缓存"],
         "source_index": 2,
         "source_refs": [{"filename": "docker.md", "header_path": "Docker > volume"}]
@@ -206,7 +208,7 @@ def test_normalize_training_cards_preserves_valid_multi_source_refs():
         "knowledge": ["volume 持久化到磁盘，tmpfs 存在内存，bind mount 映射宿主目录。"],
         "example": "根据数据生命周期选择不同的存储方式。",
         "question": "Docker 的三种存储方式有什么区别？",
-        "answer": "volume 适合持久化，tmpfs 适合临时数据，bind mount 适合开发环境。",
+        "answer": "**结论**：三者按数据生命周期分工——volume 适合持久化，tmpfs 适合临时数据，bind mount 适合开发环境。**机制**：volume 由 Docker 管理落盘，tmpfs 只存在内存，bind mount 直接映射宿主目录。",
         "tags": ["Docker"],
         "source_refs": [
           {"filename": "docker.md", "header_path": "Docker > volume"},
@@ -262,8 +264,62 @@ docker system df
 - 适合数据库文件等需要长期保存的关键数据，不应用于临时缓存或日志文件。"""
     example = "docker volume create mydata"
     question = "如何创建和管理 Docker volume？"
-    answer = "使用 docker volume create 创建新卷，docker volume ls 列出所有卷，docker volume rm 删除指定卷。"
+    answer = "**结论**：volume 全生命周期都有对应子命令管理。**机制**：`docker volume create` 创建新卷，`ls` 列出所有卷，`rm` 删除指定卷。**易错点**：卷独立于容器生命周期，删容器不会删卷，要用 `prune` 清理悬空卷。"
 
     is_low = kt._looks_like_low_quality_card(title, knowledge, example, question, answer)
     assert not is_low, "包含代码块的高质量卡片不应被误判为低质量"
+
+
+def test_answer_without_layered_structure_is_rejected():
+    """单层结论（够 40 字但无 结论/机制/易错 分层、也不够长）没有回忆量，应被丢弃。"""
+    assert kt._answer_lacks_depth(
+        "它保护 CPython 解释器内部状态，避免多个线程同时执行字节码时破坏对象状态。"
+    )
+    assert not kt._answer_lacks_depth(
+        "**结论**：GIL 保证同一时刻只有一个线程执行字节码。"
+        "**机制**：保护解释器内部状态和引用计数。"
+    )
+
+
+def test_long_multi_segment_answer_passes_without_markers():
+    """换 LLM 通道后可能不按加粗标记输出——明显多层展开的长回答要放行。"""
+    answer = (
+        "GIL 的存在是因为 CPython 的内存管理不是线程安全的，引用计数的增减必须互斥。"
+        "线程执行字节码前要先拿到 GIL，每隔一定字节码指令数或遇到 IO 就释放，让其它线程有机会运行。"
+        "所以 IO 密集型任务用多线程仍然有收益，CPU 密集型应改用多进程；常见误区是以为 GIL 让 Python 完全无法并发。"
+    )
+    assert not kt._answer_lacks_depth(answer)
+
+
+def test_normalize_keeps_card_without_mnemonic_and_truncates_long_one():
+    """mnemonic 可选：缺失不丢卡；超长截断到 80 字符。"""
+    sections = [
+        kt.KnowledgeSection(
+            filename="README.md",
+            header_path="Python > GIL",
+            content=_long("GIL 相关知识"),
+        )
+    ]
+    base_card = {
+        "title": "GIL 的作用",
+        "knowledge": ["保护解释器内部状态", "同一时刻通常只有一个线程执行 Python 字节码"],
+        "example": "CPU 密集型多线程不会线性加速。",
+        "question": "GIL 主要解决什么问题？",
+        "answer": (
+            "**结论**：GIL 保证同一时刻只有一个线程执行字节码。"
+            "**机制**：保护 CPython 解释器内部状态与引用计数。"
+            "**易错点**：IO 密集任务的线程并发不受影响。"
+        ),
+        "tags": ["并发"],
+    }
+    import json
+
+    without = kt.normalize_training_cards(json.dumps([base_card], ensure_ascii=False), topic="python", sections=sections)
+    assert len(without) == 1
+    assert without[0]["mnemonic"] == ""
+
+    long_card = dict(base_card, mnemonic="口" * 200)
+    truncated = kt.normalize_training_cards(json.dumps([long_card], ensure_ascii=False), topic="python", sections=sections)
+    assert len(truncated) == 1
+    assert truncated[0]["mnemonic"] == "口" * 80
 

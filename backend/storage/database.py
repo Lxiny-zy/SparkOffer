@@ -496,6 +496,7 @@ def init_all_tables():
             example         TEXT DEFAULT '',
             question        TEXT DEFAULT '',
             answer          TEXT DEFAULT '',
+            mnemonic        TEXT DEFAULT '',
             tags            TEXT DEFAULT '[]',
             source_refs     TEXT DEFAULT '[]',
             source_file     TEXT DEFAULT '',
@@ -511,6 +512,10 @@ def init_all_tables():
             PRIMARY KEY (user_id, id)
         )
     """)
+    try:
+        conn.execute("SELECT mnemonic FROM knowledge_cards LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE knowledge_cards ADD COLUMN mnemonic TEXT DEFAULT ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_cards_topic ON knowledge_cards(user_id, topic, created_at DESC)")
     # Due-review queue lookup: cards whose next_review has elapsed, per (user, topic).
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_cards_due ON knowledge_cards(user_id, topic, next_review)")

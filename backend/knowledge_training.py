@@ -64,6 +64,10 @@ class KnowledgeTrainingCard:
     answer: str
     tags: list[str]
     source_refs: list[dict[str, str]]
+    # Optional memory hook (口诀/类比/数字锚点) — the only LLM-authored field
+    # exempt from the source-only rule; empty when the LLM couldn't produce a
+    # natural one.
+    mnemonic: str = ""
 
 
 def _knowledge_files(topic_dir: Path) -> list[Path]:
@@ -470,6 +474,21 @@ def _fallback_section(
     return positional, False
 
 
+def _answer_lacks_depth(answer: str) -> bool:
+    """讲清原理的硬校验：answer 必须呈现分层结构，不能是单层结论。
+
+    Prompt 强制要求 **结论**/**机制**(推导)/**易错点**(边界) 加粗标记；这里检查
+    宽松一档——只认关键词出现，不认加粗格式。对完全没按标记输出但明显多层展开
+    的长回答（≥120 字且 ≥3 个句段）放行，避免换 LLM 通道后整批卡片被误杀。
+    """
+    has_conclusion = "结论" in answer
+    has_depth = any(k in answer for k in ("机制", "推导", "边界", "易错", "原理"))
+    if has_conclusion and has_depth:
+        return False
+    segments = [s for s in re.split(r"\n+|(?<=[。；;])", answer) if s.strip()]
+    return not (len(answer) >= 120 and len(segments) >= 3)
+
+
 def _looks_like_low_quality_card(title: str, knowledge: str, example: str, question: str, answer: str) -> bool:
     text = "\n".join([title, knowledge, example, question, answer])
     if NON_KNOWLEDGE_HEADING_RE.search(title):
@@ -480,6 +499,8 @@ def _looks_like_low_quality_card(title: str, knowledge: str, example: str, quest
     # answers (~80-200 chars when the source supports it); a sub-40-char answer
     # is a bare conclusion with no recall value when reviewed against question.
     if len(answer) < 40 or len(question) < 10:
+        return True
+    if _answer_lacks_depth(answer):
         return True
 
     # 完整过滤代码块
@@ -562,6 +583,7 @@ def normalize_training_cards(
         example = _coerce_text(item.get("example"))
         question = _coerce_text(item.get("question"))
         answer = _coerce_text(item.get("answer"))
+        mnemonic = _coerce_text(item.get("mnemonic"))[:80]
         if not all([title, knowledge, example, question, answer]):
             continue
         if _looks_like_low_quality_card(title, knowledge, example, question, answer):
@@ -589,6 +611,7 @@ def normalize_training_cards(
             answer=answer,
             tags=tags,
             source_refs=source_refs,
+            mnemonic=mnemonic,
         ))
     return [asdict(card) for card in cards]
 

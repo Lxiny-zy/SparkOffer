@@ -19,6 +19,8 @@ export interface KnowledgeTrainingCard {
   example: string;
   question: string;
   answer: string;
+  // Optional memory hook (口诀/类比) — absent or empty when the LLM skipped it.
+  mnemonic?: string;
   tags: string[];
   source_refs: KnowledgeTrainingSourceRef[];
   // Present on persisted/reviewed cards (absent on freshly-streamed ones).

@@ -49,12 +49,13 @@ def upsert_cards(user_id: str, topic: str, depth: str, cards: list[dict]) -> lis
         conn.execute(
             "INSERT OR IGNORE INTO knowledge_cards "
             "(id, user_id, topic, title, knowledge, example, question, answer, "
-            " tags, source_refs, source_file, source_header, depth) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " mnemonic, tags, source_refs, source_file, source_header, depth) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 cid, user_id, topic,
                 card.get("title", ""), card.get("knowledge", ""),
                 card.get("example", ""), card.get("question", ""), card.get("answer", ""),
+                card.get("mnemonic", ""),
                 json.dumps(card.get("tags") or [], ensure_ascii=False),
                 json.dumps(card.get("source_refs") or [], ensure_ascii=False),
                 src_file, src_header, depth,
