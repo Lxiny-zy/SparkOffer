@@ -109,7 +109,10 @@ def save_live(store: dict, session_id: str, session_type: str, user_id: str, dat
 def get_live(store: dict, session_id: str, session_type: str, user_id: str):
     if session_id in store:
         return store[session_id]
-    data = load_live_session(session_id, user_id)
+    # Scope the persistent fallback to this store's type: the live_sessions table
+    # is shared across modes, so a type-blind read would return another mode's row
+    # (e.g. a resume row surfacing in the drill branch → KeyError on 'questions').
+    data = load_live_session(session_id, user_id, session_type)
     if data is None:
         return None
     if session_type == "algorithm" and "messages" in data:

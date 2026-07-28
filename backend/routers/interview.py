@@ -533,9 +533,21 @@ def _get_resume_graph(session_id: str, user_id: str) -> dict | None:
     """
     if session_id in graphs:
         return graphs[session_id]
-    meta = load_live_session(session_id, user_id)
+    # Prefer the live_sessions meta (type-scoped so a drill/JD row can never be
+    # mistaken for a resume one). Fall back to the durable `sessions` row when the
+    # live row has been TTL-cleaned (>24h) or was written by a different worker:
+    # the graph STATE lives in the checkpoint DB (never TTL'd), so a recompiled
+    # graph replays it. Recovery must not hinge on the 24h-expiring live row.
+    meta = load_live_session(session_id, user_id, "resume")
     if not meta:
-        return None
+        row = get_session(session_id, user_id=user_id)
+        if not row or row.get("mode") != InterviewMode.RESUME.value:
+            return None
+        meta = {
+            "mode": row.get("mode"),
+            "topic": row.get("topic"),
+            "user_id": user_id,
+        }
     entry = {
         "graph": compile_resume_interview(meta["user_id"]),
         "config": {"configurable": {"thread_id": session_id}},
@@ -1823,11 +1835,22 @@ def _match_resume_to_topics(messages: list, user_id: str) -> list[str]:
 
 
 def _match_jd_to_topics(meta: dict, user_id: str) -> list[str]:
-    """Match JD prep metadata to user's knowledge topics."""
+    """Match JD prep metadata to the user's knowledge topics.
+
+    Reads ``jd_excerpt`` — the key the JD session actually persists (see
+    ``routers/job_prep.py`` where meta is built) — alongside ``position``. An
+    earlier version read a non-existent ``jd_text`` key, so matching silently
+    collapsed to the position string alone and the knowledge / high-freq
+    writeback leg almost never fired. No fallback-to-arbitrary-topics on a miss:
+    writeback pushes the user's mistakes into a topic's knowledge base, so an
+    empty match must stay empty rather than pollute unrelated topics.
+    """
     topics = load_topics(user_id)
     if not topics:
         return []
-    jd_text = (meta.get("jd_text", "") + " " + meta.get("position", "")).lower()
+    jd_text = (
+        str(meta.get("jd_excerpt", "")) + " " + str(meta.get("position", ""))
+    ).lower()
     matched = []
     for key, info in topics.items():
         name = info.get("name", key).lower()

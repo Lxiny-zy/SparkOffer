@@ -17,12 +17,31 @@ def save_live_session(session_id: str, session_type: str, user_id: str, data: di
     conn.commit()
 
 
-def load_live_session(session_id: str, user_id: str) -> dict | None:
+def load_live_session(
+    session_id: str, user_id: str, session_type: str | None = None
+) -> dict | None:
+    """Load a live session's persisted data blob.
+
+    ``session_type`` scopes the lookup to one kind of live session. All live
+    stores (drill / job_prep / resume / algorithm) share this single table keyed
+    by ``session_id``, so a type-blind read lets one mode's ``get_live`` claim
+    another mode's row — e.g. the drill branch of ``end_interview`` grabbing a
+    ``resume`` row (which has no ``questions`` key → ``KeyError`` → HTTP 500).
+    Callers that know the expected type MUST pass it so a cross-type row is never
+    returned.
+    """
     conn = get_db()
-    row = conn.execute(
-        "SELECT data FROM live_sessions WHERE session_id = ? AND user_id = ?",
-        (session_id, user_id),
-    ).fetchone()
+    if session_type is None:
+        row = conn.execute(
+            "SELECT data FROM live_sessions WHERE session_id = ? AND user_id = ?",
+            (session_id, user_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT data FROM live_sessions "
+            "WHERE session_id = ? AND user_id = ? AND session_type = ?",
+            (session_id, user_id, session_type),
+        ).fetchone()
     if row:
         return json.loads(row["data"])
     return None
