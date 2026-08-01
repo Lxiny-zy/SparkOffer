@@ -54,6 +54,9 @@ DEFAULT_DATASET_PATH = (
 )
 DATASET_ID = "rag-keyword-regression"
 PRODUCTION_BUNDLE_SIZE = 5
+# Below this many samples a p95 is indistinguishable from max(); the frozen set
+# yields 2-3 bundle attempts per topic, so production_replay never clears it.
+_MIN_P95_SAMPLES = 20
 
 
 @dataclass(frozen=True)
@@ -104,7 +107,24 @@ def _chunk_hits(content: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword.lower() in low for keyword in keywords if keyword)
 
 
-def _ndcg(flags: list[bool]) -> float:
+def _ndcg(flags: list[bool], k: int) -> float:
+    """nDCG@k over binary relevance, normalized by a saturated ideal.
+
+    The ideal DCG is the one where all ``k`` returned slots are relevant, rather
+    than the one built from however many relevant chunks happened to be returned.
+    Normalizing by the observed count — ``idcg = sum(... for r in 1..sum(flags))``
+    — makes the metric non-monotone: with one relevant chunk at rank 1 it scores
+    1.000, and adding a *second* relevant chunk at rank 8 drops it to 0.807, so
+    strictly better retrieval scores strictly worse. A fixed ideal keeps the
+    metric monotone in relevance.
+
+    The dataset carries no chunk-level qrels, so the true relevant-chunk count
+    per case is unknown and the saturated ideal is the honest conservative
+    denominator: a case whose evidence genuinely spans fewer than k chunks cannot
+    reach 1.0. Read this as "how much of the top-k budget carried usable
+    evidence, discounted by position", and compare it only across runs of this
+    same dataset at the same k.
+    """
     if not flags or not any(flags):
         return 0.0
     dcg = sum(
@@ -112,8 +132,8 @@ def _ndcg(flags: list[bool]) -> float:
         for rank, relevant in enumerate(flags, start=1)
         if relevant
     )
-    ideal_relevant = sum(flags)
-    idcg = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal_relevant + 1))
+    ideal_slots = max(1, min(k, len(flags)))
+    idcg = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal_slots + 1))
     return dcg / idcg if idcg else 0.0
 
 
@@ -123,9 +143,30 @@ def score_frozen_case(
     k: int,
     *,
     bundle_id: str,
+    bundle_size: int = 1,
+    own_query_failed: bool = False,
 ) -> dict[str, Any]:
-    """Score one target against its atomic or shared production context."""
-    chunks = outcome.chunks[:k] if outcome.measured else []
+    """Score one target against its atomic or shared production context.
+
+    ``bundle_size`` is how many independent cases share ``outcome``'s context.
+    Under ``production_replay`` that is >1, and every rank-sensitive metric stops
+    measuring retrieval: B unrelated questions compete for one top-K list, so the
+    protocol alone caps them regardless of retriever quality. At B=5, K=8 the
+    ceilings are MRR 0.457, nDCG 0.590, precision 0.200 — and observed values sit
+    at those ceilings, i.e. they report the value of B, not of the retriever.
+    Rank position is also unattributable here: rank 1 may be rank 1 for a
+    *different* question in the bundle. MRR, nDCG and context_precision are
+    therefore ``None`` under shared context — a missing measurement, not a zero.
+    Hit@K and context_recall survive because they only ask whether this case's own
+    evidence appeared anywhere in the shared context. ``best_rank`` is retained as
+    a diagnostic, explicitly not a quality metric.
+    """
+    shared_context = bundle_size > 1
+    # This case's own sub-query never ran, so the surviving queries' chunks are
+    # not an observation about it: report it as an infrastructure failure rather
+    # than a zero-quality retrieval.
+    measurable = outcome.measured and not own_query_failed
+    chunks = outcome.chunks[:k] if measurable else []
     flags = [_chunk_hits(chunk.content, case.must_include_any) for chunk in chunks]
     first_rank = next((rank for rank, hit in enumerate(flags, start=1) if hit), None)
     union = "\n".join(chunk.content for chunk in chunks).lower()
@@ -141,23 +182,74 @@ def score_frozen_case(
         "type": case.query_type,
         "question": case.question,
         "bundle_id": bundle_id,
-        "outcome": outcome.status,
-        "error_code": outcome.error_code,
+        "bundle_size": bundle_size,
+        "outcome": "query_failed" if own_query_failed else outcome.status,
+        "error_code": (
+            "own_subquery_failed" if own_query_failed else outcome.error_code
+        ),
         "error": outcome.error,
         "hit_at_k": 1.0 if first_rank is not None else 0.0,
         "rank": first_rank,
-        "mrr": 1.0 / first_rank if first_rank else 0.0,
-        "ndcg_at_k": _ndcg(flags),
-        "context_precision": sum(flags) / len(chunks) if chunks else 0.0,
+        "best_rank": first_rank,
+        "mrr": None if shared_context else (1.0 / first_rank if first_rank else 0.0),
+        "ndcg_at_k": None if shared_context else _ndcg(flags, k),
+        "context_precision": (
+            None if shared_context
+            else (sum(flags) / len(chunks) if chunks else 0.0)
+        ),
         "context_recall": keyword_recall,
         "n_chunks": len(chunks),
         "n_relevant_chunks": sum(flags),
+        # latency_ms is the whole retrieval attempt. Under a shared context that
+        # attempt served `bundle_size` questions, so the per-question figure is
+        # the amortized one; both are emitted to keep the unit unambiguous.
         "latency_ms": outcome.latency_ms,
+        "bundle_latency_ms": outcome.latency_ms,
+        "latency_ms_per_question": round(outcome.latency_ms / bundle_size, 2),
     }
 
 
 def _mean(rows: list[dict], key: str) -> float:
     return sum(float(row.get(key) or 0.0) for row in rows) / len(rows) if rows else 0.0
+
+
+def _mean_defined(rows: list[dict], key: str) -> float | None:
+    """Average only the rows where the metric is defined.
+
+    A metric that is ``None`` was not measured for that row (e.g. precision under
+    a shared production context). Treating it as 0.0 would understate the metric
+    instead of omitting it, so those rows leave the denominator entirely and the
+    aggregate is ``None`` when no row defines the metric.
+    """
+    values = [row.get(key) for row in rows if row.get(key) is not None]
+    return sum(float(v) for v in values) / len(values) if values else None
+
+
+def _round_or_none(value: float | None, digits: int = 4) -> float | None:
+    return None if value is None else round(value, digits)
+
+
+def _wilson_interval(successes: int, total: int, z: float = 1.96) -> dict[str, float] | None:
+    """95% Wilson score interval for a binomial proportion.
+
+    The frozen set is deliberately small (single-digit cases per topic), so a
+    point estimate alone invites over-reading. Wilson is used rather than the
+    normal approximation because it stays valid at p=0 and p=1, which is exactly
+    where this dataset lands: 29/29 hits is consistent with a true rate near
+    0.88, not with a guaranteed 1.00.
+    """
+    if total <= 0:
+        return None
+    p = successes / total
+    denominator = 1 + z * z / total
+    center = (p + z * z / (2 * total)) / denominator
+    margin = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total)) / denominator
+    return {
+        "point": round(p, 4),
+        "low": round(max(0.0, center - margin), 4),
+        "high": round(min(1.0, center + margin), 4),
+        "n": total,
+    }
 
 
 def _percentile(values: list[float], fraction: float) -> float:
@@ -183,12 +275,25 @@ def aggregate_benchmark_results(
     fully_healthy = sum(1 for row in rows if row.get("outcome") in {"ok", "empty"})
     success_rate = measured / len(rows) if rows else 0.0
     valid = bool(rows) and success_rate >= 0.95
+    bundle_sizes = {int(row.get("bundle_size") or 1) for row in rows}
+    latency_unit = "bundle" if bundle_sizes - {1} else "query"
+    # A percentile over a handful of points is an order statistic wearing a
+    # percentile's name: production_replay yields one sample per bundle (2-3 per
+    # topic here), where "p95" puts 90-95% of its weight on a single observation
+    # and "p50" is just the mean of two. Emit the sample count either way and
+    # suppress the tail statistic when it cannot mean what it says.
+    latency_n = len(attempt_latencies)
+    p50 = round(_percentile(attempt_latencies, 0.50), 2) if attempt_latencies else 0.0
+    p95 = (
+        round(_percentile(attempt_latencies, 0.95), 2)
+        if latency_n >= _MIN_P95_SAMPLES else None
+    )
     return {
         "hit_at_k": round(_mean(rows, "hit_at_k"), 4),
         "hit_at_k_strict": None,
-        "mrr": round(_mean(rows, "mrr"), 4),
-        "ndcg_at_k": round(_mean(rows, "ndcg_at_k"), 4),
-        "context_precision": round(_mean(rows, "context_precision"), 4),
+        "mrr": _round_or_none(_mean_defined(rows, "mrr")),
+        "ndcg_at_k": _round_or_none(_mean_defined(rows, "ndcg_at_k")),
+        "context_precision": _round_or_none(_mean_defined(rows, "context_precision")),
         "context_recall": round(_mean(rows, "context_recall"), 4),
         "faithfulness": None,
         "answer_relevancy": None,
@@ -199,8 +304,14 @@ def aggregate_benchmark_results(
         "success_rate": round(success_rate, 4),
         "degraded_count": degraded,
         "fully_healthy_rate": round(fully_healthy / len(rows), 4) if rows else 0.0,
-        "latency_p50_ms": round(_percentile(attempt_latencies, 0.50), 2),
-        "latency_p95_ms": round(_percentile(attempt_latencies, 0.95), 2),
+        "latency_p50_ms": p50,
+        "latency_p95_ms": p95,
+        "latency_unit": latency_unit,
+        "n_latency_samples": latency_n,
+        "hit_at_k_ci95": _wilson_interval(
+            sum(1 for row in rows if float(row.get("hit_at_k") or 0.0) >= 1.0),
+            len(rows),
+        ),
         "valid": valid,
         "comparable": valid and degraded == 0,
     }
@@ -214,9 +325,9 @@ def _group_breakdown(rows: list[dict], key: str) -> dict[str, dict]:
         label: {
             "n": len(group),
             "hit_at_k": round(_mean(group, "hit_at_k"), 4),
-            "mrr": round(_mean(group, "mrr"), 4),
-            "ndcg_at_k": round(_mean(group, "ndcg_at_k"), 4),
-            "context_precision": round(_mean(group, "context_precision"), 4),
+            "mrr": _round_or_none(_mean_defined(group, "mrr")),
+            "ndcg_at_k": _round_or_none(_mean_defined(group, "ndcg_at_k")),
+            "context_precision": _round_or_none(_mean_defined(group, "context_precision")),
             "context_recall": round(_mean(group, "context_recall"), 4),
         }
         for label, group in groups.items()
@@ -264,10 +375,21 @@ async def _execute_cases(
                 retrieval_config=retrieval_config,
             )
             latencies.append(outcome.latency_ms)
-            rows.extend(
-                score_frozen_case(case, outcome, k, bundle_id=bundle_id)
-                for case in bundle
-            )
+            # queries[i] is bundle[i], so a sub-query failure is attributable to
+            # exactly one case. Without this the failed case gets scored against
+            # the *surviving* queries' chunks and its zero enters the quality
+            # denominator as if retrieval had genuinely returned nothing for it.
+            failed_indices = {
+                int(d.get("query_index"))
+                for d in (outcome.trace.get("failure_details") or [])
+                if d.get("query_index") is not None
+            }
+            for case_index, case in enumerate(bundle):
+                rows.append(score_frozen_case(
+                    case, outcome, k,
+                    bundle_id=bundle_id, bundle_size=len(bundle),
+                    own_query_failed=case_index in failed_indices,
+                ))
             bundle_details.append({
                 "bundle_id": bundle_id,
                 "case_ids": [case.case_id for case in bundle],
@@ -349,6 +471,14 @@ async def run_frozen_benchmark(
         )
         if not cases:
             raise ValueError(f"固定评测集中没有 topic={topic!r} 的 case")
+        if len(cases) < n:
+            # The frozen set is small and per-topic; asking for more cases than it
+            # holds is normal, but the shortfall must be visible in the report so a
+            # reader never assumes the requested sample size was the measured one.
+            logger.warning(
+                "frozen dataset holds %d case(s) for topic=%s — requested %d",
+                len(cases), topic, n,
+            )
 
         corpus_hash, corpus_file_count = await asyncio.to_thread(
             hash_topic_corpus, topic, user_id,
@@ -386,6 +516,9 @@ async def run_frozen_benchmark(
             "manifest": manifest,
             "updated_at": time.time(),
         })
+        # Warm the in-process index cache before the first measured retrieval so a
+        # cold process isn't scored as a retrieval failure. See _warm_topic_index.
+        await asyncio.to_thread(_warm_topic_index, topic, user_id)
         rows, bundles, latencies = await _execute_cases(
             cases,
             topic=topic,
@@ -553,6 +686,24 @@ def _bootstrap() -> None:
     init_config()
     init_all_tables()
     _init_llama_settings()
+
+
+def _warm_topic_index(topic: str, user_id: str) -> None:
+    """Load the topic index into this process before measuring anything.
+
+    The CLI runs in a fresh process that never executes the app lifespan, so the
+    in-process index cache starts empty. ``retrieve_for_evaluation`` deliberately
+    passes ``build_if_missing=False``, and ``build_topic_index`` treats a held
+    build lock as ``IndexNotReady`` rather than waiting — correct for the request
+    path, but under ``production_replay`` the bundle's concurrent sub-queries then
+    race: one acquires the lock and the rest fail instantly. That scores a cold
+    process rather than the retriever, so warm the cache with one blocking load
+    first. A topic with no built index still raises IndexNotReady here, which the
+    caller surfaces as an explicit infrastructure failure.
+    """
+    from backend.indexer import build_topic_index
+
+    build_topic_index(topic, user_id, build_if_missing=True)
 
 
 def main() -> None:

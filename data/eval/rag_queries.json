@@ -298,6 +298,266 @@
       "must_include_any": ["Episodic", "情景", "Procedural", "程序"],
       "expected_keywords": ["语义记忆", "情景记忆", "程序记忆"],
       "notes": "agent-04『按内容维度分类』：Semantic/Episodic/Procedural。长尾三分类术语"
+    },
+    {
+      "id": "hard-java-20",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "微服务里回滚请求比正向请求先到，服务收到一个自己从没处理过的取消通知，该怎么办",
+      "must_include_any": ["空回滚", "悬挂", "TCC"],
+      "expected_keywords": ["空回滚", "悬挂", "幂等", "Cancel"],
+      "notes": "extra-03 分布式事务 4.4 边界问题。症状描述网络乱序，不出现『空回滚』术语"
+    },
+    {
+      "id": "hard-java-21",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "长事务拆成多个本地事务、每步配一个反向补偿动作的模式，和两阶段提交有什么本质不同",
+      "must_include_any": ["Saga", "补偿", "Orchestration"],
+      "expected_keywords": ["Saga", "补偿事务", "编排式", "协作式"],
+      "notes": "extra-03 第 5 节 Saga。与 2PC/TCC 三个近义方案竞争，须选中 Saga 章节"
+    },
+    {
+      "id": "hard-java-22",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "用户在另一台设备登录后，希望前一台设备被自动挤下线，Spring Security 怎么配",
+      "must_include_any": ["maximumSessions", "maxSessionsPreventsLogin"],
+      "expected_keywords": ["maximumSessions", "会话", "sessionManagement"],
+      "notes": "spring-05 第 10 节 Session 管理。长尾配置项，被 JWT/OAuth 大段内容淹没"
+    },
+    {
+      "id": "hard-java-23",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "登录成功后如果还沿用登录前那个会话标识，会有什么安全隐患",
+      "must_include_any": ["Session Fixation", "session ID"],
+      "expected_keywords": ["Session Fixation", "登录", "防护"],
+      "notes": "spring-05『Session Fixation 防护』。描述攻击场景，不出现术语名"
+    },
+    {
+      "id": "hard-java-24",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "某个热点数据过期的瞬间大量请求同时打到数据库，这属于三大缓存问题里的哪一个",
+      "must_include_any": ["缓存击穿", "互斥锁", "逻辑过期"],
+      "expected_keywords": ["缓存击穿", "热点", "互斥锁"],
+      "notes": "extra-04 第 2.2 节。穿透/击穿/雪崩三个近义术语竞争，须区分『击穿』"
+    },
+    {
+      "id": "hard-java-25",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "cross_chapter",
+      "query": "不想让缓存和数据库的双写逻辑侵入业务代码，改为监听数据库变更日志来更新缓存",
+      "must_include_any": ["Binlog", "Canal", "最终一致"],
+      "expected_keywords": ["Binlog", "订阅", "缓存", "一致性"],
+      "notes": "extra-04 第 3.3 节 基于 Binlog。需连接『缓存一致性』与『变更数据捕获』两个概念"
+    },
+    {
+      "id": "hard-java-26",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "响应式接口里下游消费速度跟不上上游生产速度，导致内存里积压越来越多，框架提供了什么机制",
+      "must_include_any": ["背压", "backpressure", "Flux"],
+      "expected_keywords": ["背压", "Reactor", "Flux", "订阅"],
+      "notes": "spring-07 WebFlux 背压。描述生产消费失衡症状，不出现『背压』"
+    },
+    {
+      "id": "hard-java-27",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "全文检索引擎是靠什么数据结构做到不扫全表就能按关键词找到文档的",
+      "must_include_any": ["倒排索引", "分词", "Term"],
+      "expected_keywords": ["倒排索引", "分词", "文档", "检索"],
+      "notes": "db-05 Elasticsearch 倒排索引。java 域仅此一篇含该词"
+    },
+    {
+      "id": "hard-java-28",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "cross_chapter",
+      "query": "把领域模型按业务边界切开，每块内部术语自成一套、跨块通过防腐层通信的划分方法",
+      "must_include_any": ["限界上下文", "防腐层", "Bounded Context"],
+      "expected_keywords": ["限界上下文", "防腐层", "领域", "聚合"],
+      "notes": "arch-06 DDD。需命中同时讲限界上下文与防腐层的 chunk"
+    },
+    {
+      "id": "hard-java-29",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "消息中间件把数据从磁盘发到网卡时，怎么避免在用户态和内核态之间反复搬运",
+      "must_include_any": ["零拷贝", "sendfile", "mmap"],
+      "expected_keywords": ["零拷贝", "sendfile", "内核态"],
+      "notes": "extra-05 Kafka 零拷贝。零拷贝在 6/45 篇出现，须选中 MQ 选型语境"
+    },
+    {
+      "id": "hard-java-30",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "想让第三方 jar 包放进 classpath 就能被自动发现并加载实现类，不改一行代码",
+      "must_include_any": ["SPI", "ServiceLoader", "META-INF"],
+      "expected_keywords": ["SPI", "ServiceLoader", "扩展", "接口"],
+      "notes": "java-08 注解_SPI与反射。描述插件式加载场景，不出现 SPI 三字母"
+    },
+    {
+      "id": "hard-java-31",
+      "topic": "java",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "服务出故障后持续失败，希望调用方先快速失败一段时间再试探性放行少量请求",
+      "must_include_any": ["HALF_OPEN", "半开", "CircuitBreaker"],
+      "expected_keywords": ["熔断", "半开", "降级", "状态"],
+      "notes": "arch-05 高可用架构 Q5 熔断器状态转换。长尾 HALF_OPEN 状态"
+    },
+    {
+      "id": "hard-agent-20",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "用户在输入里夹带一句让模型忽略先前所有设定的话，模型照做了，怎么防",
+      "must_include_any": ["jailbreak", "注入模式", "越狱"],
+      "expected_keywords": ["检测", "校验", "防御", "输入"],
+      "notes": "extra-06 Agent安全 3.2 注入模式检测。描述攻击现象不点名；『注入』二字在 11/23 篇出现故不可用"
+    },
+    {
+      "id": "hard-agent-21",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "Agent 要执行模型生成的代码，用什么隔离手段防止它读到宿主机文件或联网",
+      "must_include_any": ["沙箱", "gVisor", "Firecracker"],
+      "expected_keywords": ["沙箱", "隔离", "容器", "超时"],
+      "notes": "extra-06 第 5 节 沙箱执行。长尾具体方案名"
+    },
+    {
+      "id": "hard-agent-22",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "多个 Agent 协作时，由一个中心角色拆解任务并分派给下属执行的组织形式",
+      "must_include_any": ["Supervisor", "主管", "层级"],
+      "expected_keywords": ["Supervisor", "编排", "协作", "子 Agent"],
+      "notes": "extra-07 Multi-Agent 编排。Supervisor/Swarm/Pipeline 多模式竞争"
+    },
+    {
+      "id": "hard-agent-23",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "全量微调显存扛不住，只训练一小部分新增参数、原权重冻结的做法叫什么",
+      "must_include_any": ["LoRA", "低秩", "适配器"],
+      "expected_keywords": ["LoRA", "微调", "冻结", "参数"],
+      "notes": "ai-02 大模型训练与微调 LoRA。描述做法不点名"
+    },
+    {
+      "id": "hard-agent-24",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "推理服务把多个用户的请求凑在一起算，但又不想让先到的请求一直等，用什么调度",
+      "must_include_any": ["continuous batching", "连续批处理", "vLLM"],
+      "expected_keywords": ["批处理", "吞吐", "调度", "推理"],
+      "notes": "ai-03 大模型推理与部署。长尾调度策略"
+    },
+    {
+      "id": "hard-agent-25",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "cross_chapter",
+      "query": "向量库里存了几千万条，精确算距离太慢，用什么索引换来亚秒级近似检索",
+      "must_include_any": ["HNSW", "IVF", "近似最近邻"],
+      "expected_keywords": ["HNSW", "索引", "召回", "近似"],
+      "notes": "ai-04 Embedding与向量数据库 ANN 索引。需连接『规模』与『索引结构』"
+    },
+    {
+      "id": "hard-agent-26",
+      "topic": "agent",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "评估 Agent 时既要看最终答案对不对，也要看中间调用工具的步骤走得对不对",
+      "must_include_any": ["轨迹", "trajectory", "过程"],
+      "expected_keywords": ["轨迹", "评估", "结果", "工具"],
+      "notes": "agent-05 Agent评估与可观测性。结果评估 vs 轨迹评估两个维度竞争"
+    },
+    {
+      "id": "hard-python-20",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "想让一段资源清理逻辑在代码块结束时自动执行，即使中间抛异常也要执行",
+      "must_include_any": ["contextmanager", "__exit__", "with"],
+      "expected_keywords": ["contextmanager", "上下文管理", "yield", "finally"],
+      "notes": "py-06 异常处理与上下文管理。描述需求不点名 with 语句协议"
+    },
+    {
+      "id": "hard-python-21",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "接口返回的数据结构想在运行时自动校验类型并给出清晰错误，用什么库",
+      "must_include_any": ["field_validator", "model_validator", "BaseModel"],
+      "expected_keywords": ["Pydantic", "校验", "类型", "模型"],
+      "notes": "extra-04 类型系统与Pydantic。锚定校验器 API 名（Pydantic 一词在 8/23 篇出现，过泛）"
+    },
+    {
+      "id": "hard-python-22",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "测试时想把外部 HTTP 调用替换成假的返回值，不真的发请求",
+      "must_include_any": ["MagicMock", "pytest-mock", "mocker.patch"],
+      "expected_keywords": ["mock", "测试", "patch", "fixture"],
+      "notes": "extra-05 测试与工程化 第 2 节 Mock。mock/stub/fake 近义词竞争，锚定实际出现的 API 名"
+    },
+    {
+      "id": "hard-python-23",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "semantic_gap",
+      "query": "本地提交历史太乱，想把多个零碎提交合成一个再推上去",
+      "must_include_any": ["rebase", "squash", "interactive"],
+      "expected_keywords": ["rebase", "squash", "提交", "历史"],
+      "notes": "cs-04 Git深度。描述场景不出现 rebase"
+    },
+    {
+      "id": "hard-python-24",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "cross_chapter",
+      "query": "同一台机器上跑两个项目，它们依赖同一个库的不同版本，怎么互不干扰",
+      "must_include_any": ["虚拟环境", "venv", "隔离"],
+      "expected_keywords": ["虚拟环境", "venv", "依赖", "版本"],
+      "notes": "py-07 模块包与虚拟环境。需连接『依赖冲突』与『环境隔离』"
+    },
+    {
+      "id": "hard-python-25",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "long_tail",
+      "query": "异步框架里想在返回响应之后再做一些收尾工作，不让用户等",
+      "must_include_any": ["BackgroundTasks", "后台任务"],
+      "expected_keywords": ["BackgroundTasks", "异步", "响应", "任务"],
+      "notes": "extra-03 Web框架对比与FastAPI实战。长尾特性"
+    },
+    {
+      "id": "hard-python-26",
+      "topic": "python",
+      "difficulty": "hard",
+      "type": "term_ambiguity",
+      "query": "进程之间要传数据，用管道、共享内存还是消息队列，各自代价是什么",
+      "must_include_any": ["共享内存", "管道", "进程间通信"],
+      "expected_keywords": ["进程间通信", "管道", "共享内存", "信号"],
+      "notes": "cs-02 操作系统 IPC。多种 IPC 机制竞争"
     }
   ]
 }
