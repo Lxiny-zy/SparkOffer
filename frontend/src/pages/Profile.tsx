@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { ChevronRight, TrendingUp, Download, BarChart3, Target, Brain } from "lucide-react";
+import { toast } from "sonner";
 import { getProfile, exportProfile } from "../api/interview";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -124,7 +125,7 @@ export default function Profile() {
               a.click();
               URL.revokeObjectURL(url);
             } catch (err: any) {
-              alert("导出失败: " + err.message);
+              toast.error("导出失败: " + err.message);
             }
           }}
         >
@@ -144,7 +145,7 @@ export default function Profile() {
         <div className="grid grid-cols-2 gap-3 mb-3">
           <Card hoverLift>
             <CardContent className="p-4 text-center">
-              <div className="text-[28px] sig-stat text-primary">{stats.total_sessions}</div>
+              <div className="text-[28px] sig-stat text-primary">{stats.total_sessions ?? 0}</div>
               <div className="text-xs text-dim mt-1">总练习次数</div>
             </CardContent>
           </Card>
@@ -210,7 +211,7 @@ export default function Profile() {
             <TrendingUp size={18} className="text-primary" />
             成长趋势
           </div>
-          <Card variant="tech">
+          <Card>
             <CardContent className="p-4 md:p-6">
               <ScoreTrendChart history={stats.score_history} />
             </CardContent>
@@ -224,7 +225,7 @@ export default function Profile() {
             <BarChart3 size={18} className="text-primary" />
             维度评分趋势
           </div>
-          <Card variant="tech">
+          <Card>
             <CardContent className="p-4 md:p-6">
               <DimensionTrendChart history={stats.score_history} />
             </CardContent>
@@ -238,7 +239,7 @@ export default function Profile() {
             <BarChart3 size={18} className="text-primary" />
             学习热力图
           </div>
-          <Card variant="tech">
+          <Card>
             <CardContent className="p-4 md:p-6">
               <LearningHeatmap history={stats.score_history} />
             </CardContent>
@@ -252,13 +253,13 @@ export default function Profile() {
             <Target size={18} className="text-primary" />
             领域掌握度
           </div>
-          <Card variant="tech" className="mb-4">
+          <Card className="mb-4">
             <CardContent className="p-4 md:p-6">
               <TopicRadarChart mastery={profile!.topic_mastery} previousMastery={profile!.previous_topic_mastery} />
             </CardContent>
           </Card>
           {Object.keys(profile!.topic_mastery || {}).length >= 2 && (
-            <Card variant="tech" className="mb-4">
+            <Card className="mb-4">
               <CardContent className="p-4 md:p-6">
                 <div className="text-sm font-medium text-dim mb-2">知识掌握全景</div>
                 <KnowledgeTreemap mastery={profile!.topic_mastery} />

@@ -19,6 +19,8 @@ export default defineConfig({
     },
   },
   build: {
+    // 与 tsconfig 的 ES2020 对齐，避免 Vite 默认 target 输出更新语法
+    target: "es2020",
     // gzip 体积统计在 syntax-highlighter/three 这类大依赖上又慢又吃内存，仅用于日志，关掉
     reportCompressedSize: false,
     chunkSizeWarningLimit: 1500,

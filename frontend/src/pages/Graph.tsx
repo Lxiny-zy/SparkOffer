@@ -4,17 +4,16 @@ import { RefreshCw, ArrowRight } from "lucide-react";
 import ForceGraph2D from "react-force-graph-2d";
 import { getTopics, getGraphData } from "../api/interview";
 import { getTopicIcon } from "../utils/topicIcons";
+import { getScoreBand } from "@/lib/badge-presets";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { TopicInfo } from "../types/api";
 
 const SIMILARITY_THRESHOLD = 0.65;
 
+// Single source of truth for score colors (theme-aware sig tokens).
 function scoreToColor(score: number): string {
-  if (score >= 8) return "#22C55E";
-  if (score >= 6) return "#FBBF24";
-  if (score >= 4) return "#FB923C";
-  return "#EF4444";
+  return getScoreBand(score).color;
 }
 
 export default function Graph() {
@@ -24,10 +23,14 @@ export default function Graph() {
   const [graphData, setGraphData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [hoveredNode, setHoveredNode] = useState<any>(null);
+  // Touch devices have no hover: first tap pins the detail card, second tap
+  // (on the same node) navigates to the review page.
+  const [tappedNode, setTappedNode] = useState<any>(null);
   const hoveredNodeRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<any>(null);
   const loadGenerationRef = useRef(0);
+  const zoomTimerRef = useRef<number | null>(null);
   const [dimensions, setDimensions] = useState<{ width: number; height: number }>({ width: 800, height: 500 });
 
   useEffect(() => {
@@ -49,18 +52,26 @@ export default function Graph() {
     const generation = ++loadGenerationRef.current;
     setSelectedTopic(key);
     setGraphData(null);
+    setTappedNode(null);
     setLoading(true);
     try {
       const data = await getGraphData(key);
       if (generation !== loadGenerationRef.current) return;
       setGraphData(data);
-      setTimeout(() => fgRef.current?.zoomToFit(400, 40), 300);
+      if (zoomTimerRef.current) window.clearTimeout(zoomTimerRef.current);
+      zoomTimerRef.current = window.setTimeout(() => fgRef.current?.zoomToFit(400, 40), 300);
     } catch {
       if (generation !== loadGenerationRef.current) return;
       setGraphData({ nodes: [], links: [] });
     } finally {
       if (generation === loadGenerationRef.current) setLoading(false);
     }
+  }, []);
+
+  // Cancel a pending zoomToFit on unmount — firing it on a dead canvas is a noop
+  // at best and a console error at worst.
+  useEffect(() => () => {
+    if (zoomTimerRef.current) window.clearTimeout(zoomTimerRef.current);
   }, []);
 
   // Auto-refresh when user returns (e.g. after training).
@@ -215,7 +226,16 @@ export default function Graph() {
               linkCanvasObject={paintLink}
               onNodeHover={handleNodeHover}
               onNodeClick={(node: any) => {
-                if (node?.session_id) navigate(`/review/${node.session_id}`);
+                if (!node) return;
+                const isTouch = window.matchMedia?.("(hover: none)").matches;
+                if (isTouch && tappedNode !== node) {
+                  // First tap on touch: pin the detail card instead of navigating.
+                  setTappedNode(node);
+                  hoveredNodeRef.current = node;
+                  fgRef.current?.refresh?.();
+                  return;
+                }
+                if (node.session_id) navigate(`/review/${node.session_id}`);
               }}
               cooldownTicks={80}
               d3AlphaDecay={0.03}
@@ -223,30 +243,38 @@ export default function Graph() {
             />
           )}
 
-          {hoveredNode && (
-            <div className="absolute top-3 right-3 bg-secondary border border-border rounded-lg px-4 py-3 max-w-[280px] text-sm pointer-events-none animate-fade-in z-10 shadow-lg">
-              <div className="font-medium text-text leading-snug mb-2">{hoveredNode.question}</div>
-              <div className="flex items-center gap-3 text-[13px] text-dim">
-                <span style={{ color: scoreToColor(hoveredNode.score) }}>{hoveredNode.score}/10</span>
-                {hoveredNode.focus_area && <span>{hoveredNode.focus_area}</span>}
-                {hoveredNode.date && <span>{hoveredNode.date}</span>}
+          {(() => {
+            const activeNode = hoveredNode || tappedNode;
+            if (!activeNode) return null;
+            return (
+              <div className="absolute top-3 right-3 bg-secondary border border-border rounded-lg px-4 py-3 max-w-[280px] text-sm pointer-events-none animate-fade-in z-10 shadow-lg">
+                <div className="font-medium text-text leading-snug mb-2">{activeNode.question}</div>
+                <div className="flex items-center gap-3 text-[13px] text-dim">
+                  <span style={{ color: scoreToColor(activeNode.score) }}>{activeNode.score}/10</span>
+                  {activeNode.focus_area && <span>{activeNode.focus_area}</span>}
+                  {activeNode.date && <span>{activeNode.date}</span>}
+                </div>
+                {activeNode.session_id && (
+                  <div className="mt-1.5 text-[11px] text-primary flex items-center gap-1">
+                    {tappedNode === activeNode ? "再次点击打开本题回顾" : "点击查看本题回顾"} <ArrowRight size={11} aria-hidden="true" />
+                  </div>
+                )}
               </div>
-              {hoveredNode.session_id && <div className="mt-1.5 text-[11px] text-primary flex items-center gap-1">点击查看本题回顾 <ArrowRight size={11} aria-hidden="true" /></div>}
-            </div>
-          )}
+            );
+          })()}
         </CardContent>
       </Card>
 
       {selectedTopic && graphData && graphData.nodes.length > 0 && (
         <div className="flex items-center gap-5 mt-4 text-[13px] text-dim animate-fade-in">
           {[
-            { color: "#22C55E", label: "8+" },
-            { color: "#FBBF24", label: "6-8" },
-            { color: "#FB923C", label: "4-6" },
-            { color: "#EF4444", label: "<4" },
+            { score: 9, label: "8+" },
+            { score: 7, label: "6-8" },
+            { score: 5, label: "4-6" },
+            { score: 2, label: "<4" },
           ].map((item) => (
             <div key={item.label} className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: item.color }} />
+              <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: scoreToColor(item.score) }} />
               <span>{item.label}</span>
             </div>
           ))}

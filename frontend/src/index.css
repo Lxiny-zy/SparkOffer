@@ -179,6 +179,7 @@
   --animate-fade-in-up: fade-in-up 0.4s cubic-bezier(0.2, 0, 0, 1) both;
   --animate-slide-up: slide-up 0.4s cubic-bezier(0.2, 0, 0, 1) both;
   --animate-slide-in-right: slide-in-right 0.3s cubic-bezier(0.2, 0, 0, 1) both;
+  --animate-slide-in-left: slide-in-left 0.3s cubic-bezier(0.2, 0, 0, 1) both;
   --animate-pulse-dot: pulse-dot 1.4s infinite;
   --animate-shimmer: shimmer 2s linear infinite;
   --animate-float: float 3s cubic-bezier(0.2, 0, 0, 1) infinite;
@@ -292,6 +293,11 @@
 
 @keyframes slide-in-right {
   from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes slide-in-left {
+  from { transform: translateX(-100%); }
   to { transform: translateX(0); }
 }
 
@@ -1929,7 +1935,7 @@
   background: color-mix(in srgb, var(--sig-bg) 94%, var(--sig-fg));
   color: var(--sig-faint);
   font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.16em;
   line-height: 1;
   text-transform: uppercase;

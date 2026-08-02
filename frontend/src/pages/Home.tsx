@@ -259,6 +259,10 @@ export default function Home() {
     const topTopics = Object.entries(mastery)
       .sort((a, b) => (b[1].score || 0) - (a[1].score || 0))
       .slice(0, 3);
+    // The hero console already shows SESSIONS / AVG SCORE — this card only carries
+    // signals the console doesn't (topic mastery, last score). If neither exists
+    // the card would duplicate the console, so render nothing.
+    if (topTopics.length === 0 && !lastEntry) return null;
     return (
       <Card hoverLift className="w-full max-w-[700px] mb-10">
         <CardContent className="p-5 md:p-6">
@@ -275,8 +279,6 @@ export default function Home() {
             </button>
           </div>
           <div className="flex flex-wrap gap-4 md:gap-6">
-            <StatBox value={s.total_sessions} label="总练习" color="text-primary" />
-            <StatBox value={s.avg_score || "-"} label="综合平均" color="text-green" />
             {topTopics.length > 0 && (
               <div className="flex-1 min-w-[120px]">
                 <div className="text-[11px] text-dim mb-2">领域掌握</div>
@@ -345,8 +347,10 @@ export default function Home() {
           const Icon = card.icon;
           const isActive = mode === card.mode;
           return (
-            <div
+            <button
+              type="button"
               key={card.mode}
+              aria-pressed={isActive}
               data-spotlight={isActive ? undefined : ""}
               style={isActive ? { borderColor: "var(--sig-accent)", background: "color-mix(in srgb, var(--sig-accent) 6%, transparent)" } : undefined}
               className={cn(
@@ -387,7 +391,7 @@ export default function Home() {
               <div className="relative px-6 pb-6">
                 <div className="text-sm text-dim leading-relaxed">{card.desc}</div>
               </div>
-            </div>
+            </button>
           );
         })}
       </div>
@@ -444,7 +448,7 @@ export default function Home() {
       {mode === "resume" && (
         <div className="w-full max-w-[700px] mb-8 animate-fade-in">
           {resumeFile ? (
-            <Card className="hover:shadow-md transition-shadow">
+            <Card hoverLift>
               <CardContent className="p-4 md:p-5 flex items-center justify-between">
                 <div className="flex items-center gap-2.5 text-sm text-text">
                   <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
@@ -465,7 +469,7 @@ export default function Home() {
             </Card>
           ) : (
             <label className={cn(
-              "flex flex-col items-center gap-3 px-5 py-8 bg-card border-2 border-dashed border-border rounded-xl cursor-pointer transition-all text-sm text-dim hover:border-primary/50 hover:bg-card/80",
+              "flex flex-col items-center gap-3 px-5 py-8 bg-card border-2 border-dashed border-[color:var(--sig-line-2)] rounded-xl cursor-pointer transition-all text-sm text-dim hover:border-primary/50 hover:bg-card/80",
               uploading && "opacity-50 pointer-events-none"
             )}>
               <div className="w-12 h-12 rounded-xl bg-secondary flex items-center justify-center">

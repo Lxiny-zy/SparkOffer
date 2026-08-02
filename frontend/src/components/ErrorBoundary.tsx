@@ -21,7 +21,10 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
     if (!this.state.error) return this.props.children;
 
     return (
-      <div className="flex flex-col items-center justify-center p-10 md:p-15 gap-4 min-h-[60vh]">
+      // sig-root is required here: this boundary sits OUTSIDE AppShell/Landing
+      // (which normally provide it), so without it the fallback renders in the
+      // legacy purple base theme instead of the sig blueprint language.
+      <div className="sig-root bg-bg text-text flex flex-col items-center justify-center p-10 md:p-15 gap-4 min-h-screen">
         <div className="text-2xl font-bold text-text">出了点问题</div>
         <div className="text-sm text-dim max-w-[400px] text-center break-words">
           {this.state.error?.message || "未知错误"}

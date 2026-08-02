@@ -5,6 +5,12 @@ const WEEKS = 26;
 const DAYS = 7;
 const DAY_LABELS = ["", "一", "", "三", "", "五", ""];
 
+/** Local YYYY-MM-DD. toISOString() is UTC — east of UTC it keys cells one day
+ *  behind the server-provided local date strings in `history`. */
+function localDateKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 function getColor(count: number): string {
   if (count === 0) return "var(--border)";
   if (count === 1) return "color-mix(in srgb, var(--sig-accent) 38%, transparent)";
@@ -51,7 +57,7 @@ export default function LearningHeatmap({ history }: LearningHeatmapProps) {
       for (let d = 0; d < DAYS; d++) {
         const current = new Date(startDay);
         current.setDate(startDay.getDate() + w * 7 + d);
-        const key = current.toISOString().slice(0, 10);
+        const key = localDateKey(current);
         const info = dayMap.get(key);
         const isFuture = current > today;
         week.push({

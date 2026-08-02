@@ -137,8 +137,9 @@ export default function Login() {
             <form onSubmit={handleSubmit} className="space-y-5">
               {isRegister && (
                 <div className="space-y-2">
-                  <label className="sig-kicker block">昵称 / Name</label>
+                  <label htmlFor="login-name" className="sig-kicker block">昵称 / Name</label>
                   <input
+                    id="login-name"
                     type="text" className="sig-field" placeholder="你的称呼（选填）"
                     value={name} onChange={(e) => setName(e.target.value)}
                   />
@@ -146,16 +147,18 @@ export default function Login() {
               )}
 
               <div className="space-y-2">
-                <label className="sig-kicker block">邮箱 / Email</label>
+                <label htmlFor="login-email" className="sig-kicker block">邮箱 / Email</label>
                 <input
+                  id="login-email"
                   type="email" className="sig-field" placeholder="your@email.com"
                   value={email} onChange={(e) => setEmail(e.target.value)} required
                 />
               </div>
 
               <div className="space-y-2">
-                <label className="sig-kicker block">密码 / Password</label>
+                <label htmlFor="login-password" className="sig-kicker block">密码 / Password</label>
                 <input
+                  id="login-password"
                   type="password" className="sig-field"
                   placeholder={isRegister ? "至少 6 个字符" : "输入密码"}
                   value={password} onChange={(e) => setPassword(e.target.value)} required
@@ -164,8 +167,9 @@ export default function Login() {
 
               {isRegister && inviteRequired && (
                 <div className="space-y-2">
-                  <label className="sig-kicker block">邀请码 / Invite Code</label>
+                  <label htmlFor="login-invite" className="sig-kicker block">邀请码 / Invite Code</label>
                   <input
+                    id="login-invite"
                     type="text" className="sig-field" placeholder="向管理员索取"
                     value={inviteCode} onChange={(e) => setInviteCode(e.target.value)} required
                   />

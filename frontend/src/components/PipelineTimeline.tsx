@@ -109,21 +109,21 @@ function StageRow({ label, state, bottleneck }: StageRowProps) {
       className={cn(
         "flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] transition-colors",
         isRunning && "bg-primary/8",
-        bottleneck && "border border-orange-400/40 bg-orange-500/5",
+        bottleneck && "border border-orange/40 bg-orange/5",
       )}
     >
       <span className="shrink-0">
         {isPending && <Circle size={14} className="text-muted-fg/60" />}
         {isRunning && <Loader2 size={14} className="text-primary animate-spin" />}
-        {isOk && <CheckCircle2 size={14} className="text-green-500" />}
-        {isError && <XCircle size={14} className="text-red-500" />}
+        {isOk && <CheckCircle2 size={14} className="text-green" />}
+        {isError && <XCircle size={14} className="text-red" />}
       </span>
 
       <span
         className={cn(
           "shrink-0 font-medium",
           isPending && "text-muted-fg/70",
-          isError && "text-red-500",
+          isError && "text-red",
         )}
       >
         {label}
@@ -135,7 +135,7 @@ function StageRow({ label, state, bottleneck }: StageRowProps) {
       {!state.detail && <span className="flex-1" />}
 
       {bottleneck && (
-        <Badge variant="outline" className="border-orange-400/50 text-orange-500 gap-1 text-[10px] font-mono">
+        <Badge variant="outline" className="border-orange/50 text-orange gap-1 text-[10px] font-mono">
           <AlertTriangle size={10} /> 瓶颈
         </Badge>
       )}
@@ -144,8 +144,8 @@ function StageRow({ label, state, bottleneck }: StageRowProps) {
         <span
           className={cn(
             "shrink-0 font-mono text-[11px] tabular-nums",
-            isError ? "text-red-500" : "text-muted-fg",
-            bottleneck && "text-orange-500 font-semibold",
+            isError ? "text-red" : "text-muted-fg",
+            bottleneck && "text-orange font-semibold",
           )}
         >
           {formatMs(state.duration_ms)}

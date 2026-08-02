@@ -93,7 +93,9 @@ function AppShell({ children }: { children: ReactNode }) {
   })();
 
   return (
-    <div className="sig-root sig-app-shell flex flex-col md:flex-row h-screen">
+    // h-dvh (dynamic viewport height) tracks the mobile browser chrome expanding/
+    // collapsing — plain 100vh clips the composer on mobile when the URL bar shows.
+    <div className="sig-root sig-app-shell flex flex-col md:flex-row h-dvh">
       <Sidebar />
       <main className="sig-app-main flex-1 overflow-hidden flex flex-col relative">
         <div className="sig-system-bar hidden md:flex shrink-0" aria-label="系统状态">
@@ -167,6 +169,25 @@ function AppRoutes() {
   );
 }
 
+// Tracks the .dark class on <html> (toggled by Sidebar) so sonner toasts follow
+// the active theme instead of always rendering light.
+function useIsDark() {
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+  useEffect(() => {
+    const observer = new MutationObserver(() =>
+      setDark(document.documentElement.classList.contains("dark"))
+    );
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+  return dark;
+}
+
+function ThemedToaster() {
+  const dark = useIsDark();
+  return <Toaster position="top-right" richColors closeButton expand={false} duration={3500} theme={dark ? "dark" : "light"} />;
+}
+
 function SessionExpiredModal() {
   const [show, setShow] = useState(false);
   const { logout } = useAuth();
@@ -209,7 +230,7 @@ function App() {
           <PointerFX />
           <SessionExpiredModal />
           <AppRoutes />
-          <Toaster position="top-right" richColors closeButton expand={false} duration={3500} />
+          <ThemedToaster />
         </ErrorBoundary>
       </BrowserRouter>
     </AuthProvider>

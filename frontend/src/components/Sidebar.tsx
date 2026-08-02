@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
   Home, User, BookOpen, GitFork, Clock, Star, BriefcaseBusiness, Code2,
@@ -65,6 +65,18 @@ export default function Sidebar() {
   const [openForLocation, setOpenForLocation] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("sidebar-collapsed") === "true");
   const open = openForLocation === location.key;
+  const drawerRef = useRef<HTMLDivElement>(null);
+
+  // Mobile drawer is modal: close on Escape, move focus into it on open.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenForLocation(null);
+    };
+    document.addEventListener("keydown", onKey);
+    drawerRef.current?.querySelector("button")?.focus();
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -260,9 +272,15 @@ export default function Sidebar() {
       <div className="hidden md:flex shrink-0">{nav}</div>
 
       {open && (
-        <div className="fixed inset-0 z-50 md:hidden flex">
-          <div className="animate-fade-in">{nav}</div>
-          <div className="flex-1" style={{ background: "var(--sig-overlay)" }} onClick={() => setOpenForLocation(null)} />
+        <div
+          ref={drawerRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="站点导航"
+          className="fixed inset-0 z-50 md:hidden flex"
+        >
+          <div className="animate-slide-in-left">{nav}</div>
+          <div className="flex-1 animate-fade-in" style={{ background: "var(--sig-overlay)" }} onClick={() => setOpenForLocation(null)} aria-hidden="true" />
         </div>
       )}
     </>

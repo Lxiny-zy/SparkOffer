@@ -66,8 +66,13 @@ export default function AdminAuditPanel() {
 
   useEffect(() => {
     load(eventFilter, 0);
-    getAdminUsers().then((d) => setUsers(d.users || [])).catch(() => {});
   }, [eventFilter, load]);
+
+  // User list is filter-independent — fetch once on mount, not on every
+  // event-filter change (it used to ride along in the effect above).
+  useEffect(() => {
+    getAdminUsers().then((d) => setUsers(d.users || [])).catch(() => {});
+  }, []);
 
   return (
     <>
@@ -142,7 +147,7 @@ export default function AdminAuditPanel() {
 
           <div className="space-y-1">
             {items.map((it) => (
-              <div key={it.id} className="flex items-center gap-3 text-[12.5px] py-1.5 border-b border-border/40 last:border-0">
+              <div key={it.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] py-1.5 border-b border-border/40 last:border-0">
                 <span className="sig-mono text-[11px] text-dim w-[130px] shrink-0">{it.created_at}</span>
                 <span
                   className="text-[11px] font-medium px-1.5 py-0.5 rounded shrink-0"

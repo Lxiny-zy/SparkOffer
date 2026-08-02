@@ -13,22 +13,19 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { getScoreBand } from "@/lib/badge-presets";
 import type { Favorite } from "../types/api";
-
-function getScoreColor(score: number) {
-  if (score >= 8) return { color: "var(--green)", bg: "var(--green)" };
-  if (score >= 6) return { color: "var(--blue)", bg: "var(--blue)" };
-  if (score >= 4) return { color: "var(--orange)", bg: "var(--orange)" };
-  return { color: "var(--red)", bg: "var(--red)" };
-}
 
 function ScorePill({ score }: { score: number | null | undefined }) {
   if (score == null) return null;
-  const { color } = getScoreColor(score);
+  // getScoreBand is the single source of truth for score colors. (The old local
+  // getScoreColor referenced var(--blue)/var(--orange), which were never defined —
+  // the 4-8 bands rendered with no color at all.)
+  const band = getScoreBand(score);
   return (
     <span
       className="inline-flex items-center gap-0.5 text-sm font-bold px-2 py-0.5 rounded"
-      style={{ color, background: `color-mix(in srgb, ${color} 12%, transparent)` }}
+      style={{ color: band.color, background: band.bg }}
     >
       {score}<span className="text-xs font-normal opacity-60">/10</span>
     </span>
@@ -153,7 +150,7 @@ export default function Favorites() {
       <div className="mb-8 animate-fade-in">
         <div className="sig-kicker mb-2">// 收藏夹 / FAVORITES</div>
         <div className="flex items-center gap-2 mb-1">
-          <Star size={20} className="text-yellow-400 fill-yellow-400" />
+          <Star size={20} className="text-orange fill-orange" />
           <h1 className="sig-display text-2xl md:text-[28px]">宝藏夹<span className="sig-accent-c">.</span></h1>
           <Badge variant="secondary" className="ml-2">{total} 题</Badge>
         </div>

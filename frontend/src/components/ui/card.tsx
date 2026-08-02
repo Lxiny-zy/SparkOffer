@@ -1,9 +1,7 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-type CardVariant = "tech" | "glass";
 interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
-  variant?: CardVariant;
   /** Cursor-following radial highlight on hover. On by default — set false to opt out. */
   interactive?: boolean;
   /** Lift + glow on hover. Off by default; enable for tile-like / clickable cards. */
@@ -11,18 +9,12 @@ interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
 }
 
 const Card = React.forwardRef<HTMLDivElement, CardProps>(
-  ({ className, variant, interactive = false, hoverLift = false, ...props }, ref) => {
-    const variantClass =
-      variant === "glass"
-        ? "sig-card text-text transition-all duration-200 ease-[cubic-bezier(0.2,0,0,1)]"
-        : variant === "tech"
-        ? "sig-card text-text transition-all duration-200 ease-[cubic-bezier(0.2,0,0,1)]"
-        : "sig-card text-text transition-all duration-200 ease-[cubic-bezier(0.2,0,0,1)]";
+  ({ className, interactive = false, hoverLift = false, ...props }, ref) => {
     return (
       <div
         ref={ref}
         data-spotlight={interactive ? "" : undefined}
-        className={cn(variantClass, interactive && "spotlight", hoverLift && "sig-card-hover", className)}
+        className={cn("sig-card text-text transition-all duration-200 ease-[cubic-bezier(0.2,0,0,1)]", interactive && "spotlight", hoverLift && "sig-card-hover", className)}
         {...props}
       />
     );

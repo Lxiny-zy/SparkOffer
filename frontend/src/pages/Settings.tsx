@@ -186,24 +186,24 @@ function AccountSection() {
               <User className="w-5 h-5 text-secondary" />
             </div>
             <div>
-              <CardTitle className="text-base">Account</CardTitle>
-              <CardDescription>Your profile information</CardDescription>
+              <CardTitle className="text-base">账户</CardTitle>
+              <CardDescription>你的基本信息</CardDescription>
             </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-1.5">
-            <Label className="text-sm font-medium">Name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
+            <Label className="text-sm font-medium">昵称</Label>
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="你的称呼" />
           </div>
           <div className="space-y-1.5">
-            <Label className="text-sm font-medium">Email</Label>
+            <Label className="text-sm font-medium">邮箱</Label>
             <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
           </div>
           <div className="flex justify-end">
             <Button onClick={handleSaveProfile} disabled={savingProfile} size="sm" className="gap-2">
               {savingProfile ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-              Save Profile
+              保存资料
             </Button>
           </div>
         </CardContent>
@@ -216,28 +216,28 @@ function AccountSection() {
               <Lock className="w-5 h-5 text-orange" />
             </div>
             <div>
-              <CardTitle className="text-base">Change Password</CardTitle>
-              <CardDescription>Update your login password</CardDescription>
+              <CardTitle className="text-base">修改密码</CardTitle>
+              <CardDescription>更新你的登录密码</CardDescription>
             </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-1.5">
-            <Label className="text-sm font-medium">Current Password</Label>
-            <SecretInput value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="Enter current password" />
+            <Label className="text-sm font-medium">当前密码</Label>
+            <SecretInput value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="输入当前密码" />
           </div>
           <div className="space-y-1.5">
-            <Label className="text-sm font-medium">New Password</Label>
-            <SecretInput value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 6 characters" />
+            <Label className="text-sm font-medium">新密码</Label>
+            <SecretInput value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="至少 6 个字符" />
           </div>
           <div className="space-y-1.5">
-            <Label className="text-sm font-medium">Confirm New Password</Label>
-            <SecretInput value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Repeat new password" />
+            <Label className="text-sm font-medium">确认新密码</Label>
+            <SecretInput value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="重复输入新密码" />
           </div>
           <div className="flex justify-end">
             <Button onClick={handleChangePassword} disabled={savingPassword} size="sm" variant="outline" className="gap-2">
               {savingPassword ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5" />}
-              Change Password
+              修改密码
             </Button>
           </div>
         </CardContent>
@@ -290,7 +290,7 @@ export default function Settings() {
         <div className="sig-kicker mb-1">// 设置 / SETTINGS</div>
         <h1 className="sig-display text-2xl md:text-[28px]">设置<span className="sig-accent-c">.</span></h1>
         <p className="text-dim text-sm">
-          {isOwner ? "Manage your account and AI provider configuration." : "Manage your account."}
+          {isOwner ? "管理你的账号与 AI 渠道配置。" : "管理你的账号。"}
         </p>
       </div>
 
@@ -307,8 +307,8 @@ export default function Settings() {
               <Bot className="w-5 h-5 text-primary" />
             </div>
             <div>
-              <CardTitle className="text-base">LLM Channels</CardTitle>
-              <CardDescription>Multi-channel chat model with auto-failover</CardDescription>
+              <CardTitle className="text-base">LLM 渠道</CardTitle>
+              <CardDescription>多渠道对话模型，故障自动切换</CardDescription>
             </div>
           </div>
         </CardHeader>
@@ -325,8 +325,8 @@ export default function Settings() {
               <Database className="w-5 h-5 text-tertiary" />
             </div>
             <div>
-              <CardTitle className="text-base">Embedding Channels</CardTitle>
-              <CardDescription>Vector model — all channels must use the same model</CardDescription>
+              <CardTitle className="text-base">Embedding 渠道</CardTitle>
+              <CardDescription>向量模型 — 所有渠道必须使用同一模型</CardDescription>
             </div>
           </div>
         </CardHeader>
@@ -343,8 +343,8 @@ export default function Settings() {
               <ListOrdered className="w-5 h-5 text-secondary" />
             </div>
             <div>
-              <CardTitle className="text-base">Reranker Channels</CardTitle>
-              <CardDescription>Cross-Encoder re-ranking — Cohere-compatible /rerank (optional)</CardDescription>
+              <CardTitle className="text-base">Reranker 渠道</CardTitle>
+              <CardDescription>Cross-Encoder 重排序 — 兼容 Cohere /rerank（可选）</CardDescription>
             </div>
           </div>
         </CardHeader>

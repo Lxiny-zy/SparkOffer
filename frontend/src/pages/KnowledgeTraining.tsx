@@ -94,7 +94,7 @@ function familiarityLabel(value?: Familiarity) {
 
 function familiarityClass(value?: Familiarity) {
   if (value === "known") return "border-green/40 bg-green/10 text-green";
-  if (value === "uncertain") return "border-yellow-500/40 bg-yellow-500/10 text-yellow-600 dark:text-yellow-400";
+  if (value === "uncertain") return "border-orange/40 bg-orange/10 text-orange";
   if (value === "unknown") return "border-red/40 bg-red/10 text-red";
   return "border-border bg-secondary/40 text-dim";
 }
@@ -652,7 +652,7 @@ export default function KnowledgeTraining() {
                   <div className="font-mono text-base">{markedStats.known}</div>
                   <div>已掌握</div>
                 </div>
-                <div className="rounded-md border border-yellow-500/30 bg-yellow-500/10 px-2 py-2 text-yellow-600 dark:text-yellow-400">
+                <div className="rounded-md border border-orange/30 bg-orange/10 px-2 py-2 text-orange">
                   <div className="font-mono text-base">{markedStats.uncertain}</div>
                   <div>模糊</div>
                 </div>

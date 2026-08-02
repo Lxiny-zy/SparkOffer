@@ -5,6 +5,7 @@ import {
   Library, Trash2, Download, Tag, ChevronDown, ChevronUp,
   Filter, X, Check, Code2, ExternalLink, Search,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   getAlgorithmCards, deleteAlgorithmCard, updateAlgorithmCard,
   getAlgorithmTags, exportAlgorithmCards,
@@ -18,7 +19,8 @@ import type { AlgorithmCard } from "../types/api";
 
 const DIFFICULTY_MAP: Record<string, { label: string; color: string }> = {
   easy: { label: "Easy", color: "var(--green)" },
-  medium: { label: "Medium", color: "var(--orange)" },
+  // var(--orange) was never defined — Medium badges rendered uncolored.
+  medium: { label: "Medium", color: "var(--warning)" },
   hard: { label: "Hard", color: "var(--red)" },
 };
 
@@ -43,6 +45,9 @@ export default function AlgorithmCollection() {
   const [difficultyFilter, setDifficultyFilter] = useState("");
   const [tagFilter, setTagFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  // Server-side search runs on the debounced copy — one request per pause
+  // instead of one per keystroke.
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [sortBy, setSortBy] = useState("created_at");
   const [allTags, setAllTags] = useState<string[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -50,6 +55,11 @@ export default function AlgorithmCollection() {
   const [editingTags, setEditingTags] = useState<string | null>(null);
   const [tagInput, setTagInput] = useState("");
   const loadGenerationRef = useRef(0);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedQuery(searchQuery), 300);
+    return () => window.clearTimeout(t);
+  }, [searchQuery]);
 
   const loadData = useCallback(async () => {
     const generation = ++loadGenerationRef.current;
@@ -59,7 +69,7 @@ export default function AlgorithmCollection() {
         getAlgorithmCards({
           difficulty: difficultyFilter || undefined,
           tag: tagFilter || undefined,
-          search: searchQuery || undefined,
+          search: debouncedQuery || undefined,
           sort_by: sortBy,
         }),
         getAlgorithmTags(),
@@ -73,7 +83,7 @@ export default function AlgorithmCollection() {
       console.error("加载算法收藏失败:", e);
     }
     if (generation === loadGenerationRef.current) setLoading(false);
-  }, [difficultyFilter, searchQuery, sortBy, tagFilter]);
+  }, [difficultyFilter, debouncedQuery, sortBy, tagFilter]);
 
   useEffect(() => {
     // Loading filtered server data is the external synchronization performed by this effect.
@@ -82,23 +92,32 @@ export default function AlgorithmCollection() {
   }, [loadData]);
 
   const handleDelete = async (id: string) => {
+    if (!window.confirm("确定删除这张卡片吗？")) return;
     try {
       await deleteAlgorithmCard(id);
       setItems((prev) => prev.filter((it) => it.id !== id));
       setTotal((prev) => prev - 1);
       setSelected((prev) => { const s = new Set(prev); s.delete(id); return s; });
+      toast.success("已删除");
     } catch (e) {
       console.error("删除失败:", e);
+      toast.error("删除失败");
     }
   };
 
   const handleBulkDelete = async () => {
-    for (const id of selected) {
-      await deleteAlgorithmCard(id);
-    }
-    setItems((prev) => prev.filter((it) => !selected.has(it.id)));
-    setTotal((prev) => prev - selected.size);
+    if (!window.confirm(`确定删除选中的 ${selected.size} 张卡片吗？`)) return;
+    const ids = [...selected];
+    // Parallel + per-item outcome: a single failure no longer aborts the batch
+    // or silently drops the remaining cards (the old serial for…await did both).
+    const results = await Promise.allSettled(ids.map((id) => deleteAlgorithmCard(id)));
+    const failedIds = new Set(ids.filter((_, i) => results[i].status === "rejected"));
+    const succeeded = ids.length - failedIds.size;
+    setItems((prev) => prev.filter((it) => !selected.has(it.id) || failedIds.has(it.id)));
+    setTotal((prev) => prev - succeeded);
     setSelected(new Set());
+    if (failedIds.size > 0) toast.error(`${failedIds.size} 张删除失败，其余 ${succeeded} 张已删除`);
+    else toast.success(`已删除 ${succeeded} 张卡片`);
   };
 
   const handleExport = async (format: string, ids?: string[] | null) => {

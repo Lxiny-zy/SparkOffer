@@ -147,16 +147,17 @@ export function metricColorVar(v: number, metricKey?: string): string {
   return tier === "good" ? "var(--green)" : tier === "fair" ? "var(--warning)" : "var(--red)";
 }
 
-/** Tailwind text-color class. */
+/** Tailwind text-color class. Token utilities (text-green/text-orange/text-red)
+ *  — NOT the native *-500 scale, which ignores the sig theme. */
 export function metricColorClass(v: number, metricKey?: string): string {
   const tier = metricTier(v, metricKey);
-  return tier === "good" ? "text-green-500" : tier === "fair" ? "text-yellow-500" : "text-red-500";
+  return tier === "good" ? "text-green" : tier === "fair" ? "text-orange" : "text-red";
 }
 
 /** Tailwind background class, for progress-bar fills. */
 export function metricBarClass(v: number, metricKey?: string): string {
   const tier = metricTier(v, metricKey);
-  return tier === "good" ? "bg-green-500" : tier === "fair" ? "bg-yellow-500" : "bg-red-500";
+  return tier === "good" ? "bg-green" : tier === "fair" ? "bg-orange" : "bg-red";
 }
 
 /** Qualitative label (优秀/正常/偏低) so a healthy-but-low cosine (e.g. relevance

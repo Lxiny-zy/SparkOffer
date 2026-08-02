@@ -4,7 +4,7 @@ import { useAuth } from "../contexts/AuthContext";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, RadarChart, PolarGrid, PolarAngleAxis,
-  PolarRadiusAxis, Radar, BarChart, Bar,
+  PolarRadiusAxis, Radar, BarChart, Bar, Legend,
 } from "recharts";
 import { BarChart3, RefreshCw, ExternalLink, FlaskConical, Loader2, ChevronDown, ChevronUp, AlertTriangle, Database, GitBranch, History } from "lucide-react";
 import { getRAGMetrics, getTopics, type RAGMetricsRecord } from "../api/interview";
@@ -23,7 +23,7 @@ import {
   type RagEvalManifest,
 } from "../api/ragEval";
 import { cn } from "@/lib/utils";
-import { fmtPct01, metricColorVar } from "@/lib/metrics";
+import { fmtPct01, metricColorVar, METRIC_SPEC } from "@/lib/metrics";
 import { MetricInfoTooltip } from "@/components/MetricInfoTooltip";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -59,7 +59,7 @@ function MetricCard({ label, value, delta, metricKey }: { label: string; value: 
       <div className="text-[11px] text-muted-fg mb-1">{label}</div>
       <div className="text-2xl font-bold font-mono tabular-nums" style={{ color }}>{p}%</div>
       {deltaPct != null && deltaPct !== 0 && (
-        <div className={cn("text-[11px] font-mono", deltaPct > 0 ? "text-green-500" : "text-red-500")}>
+        <div className={cn("text-[11px] font-mono", deltaPct > 0 ? "text-green" : "text-red")}>
           {deltaPct > 0 ? "+" : ""}{deltaPct}%
         </div>
       )}
@@ -94,7 +94,7 @@ function GenTrendTooltip({ active, payload }: { active?: boolean; payload?: any[
       <div className="mt-1 space-y-0.5">
         {d.faithfulness != null && <div style={{ color: "var(--sig-chart-2)" }}>依据一致性: {fmtPct01(d.faithfulness)}</div>}
         {d.answer_relevance != null && <div style={{ color: "var(--sig-chart-1)" }}>切题度: {fmtPct01(d.answer_relevance)}</div>}
-        {d.correctness != null && <div style={{ color: "var(--primary)" }}>综合依据质量: {fmtPct01(d.correctness)}</div>}
+        {d.correctness != null && <div style={{ color: "var(--sig-chart-3)" }}>综合依据质量: {fmtPct01(d.correctness)}</div>}
       </div>
     </div>
   );
@@ -949,14 +949,17 @@ export default function RAGDashboard() {
     }));
   }, [retrievalRecords, topics]);
 
-  // Quality distribution
+  // Quality distribution — buckets follow the relevance metric's own band
+  // (METRIC_SPEC: normal starts at 0.45, excellent ≥0.7). The old 0.7/0.5/0.3
+  // global thresholds mislabeled healthy retrieval (0.45-0.65) as "一般".
   const qualityDist = useMemo(() => {
+    const spec = METRIC_SPEC.relevance;
     const byTopic: Record<string, { excellent: number; good: number; fair: number; poor: number }> = {};
     for (const r of retrievalRecords) {
       if (!byTopic[r.topic]) byTopic[r.topic] = { excellent: 0, good: 0, fair: 0, poor: 0 };
       const v = r.relevance ?? 0;
-      if (v >= 0.7) byTopic[r.topic].excellent++;
-      else if (v >= 0.5) byTopic[r.topic].good++;
+      if (v >= spec.excellent) byTopic[r.topic].excellent++;
+      else if (v >= spec.normal[0]) byTopic[r.topic].good++;
       else if (v >= 0.3) byTopic[r.topic].fair++;
       else byTopic[r.topic].poor++;
     }
@@ -1245,8 +1248,8 @@ export default function RAGDashboard() {
         <>
           {/* Summary cards */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <MetricCard label="在线平均检索相关度" value={avgRelevance} delta={relevanceDelta} />
-            <MetricCard label="平均作答依据一致性" value={avgFaithfulness} delta={faithfulnessDelta} />
+            <MetricCard label="在线平均检索相关度" value={avgRelevance} delta={relevanceDelta} metricKey="relevance" />
+            <MetricCard label="平均作答依据一致性" value={avgFaithfulness} delta={faithfulnessDelta} metricKey="faithfulness" />
             <div className="rounded-xl border border-border/40 bg-card/60 px-4 py-3 text-center">
               <div className="text-[11px] text-muted-fg mb-1">检索 Sessions</div>
               <div className="text-2xl font-bold font-mono tabular-nums text-foreground">{retrievalRecords.length}</div>
@@ -1269,6 +1272,7 @@ export default function RAGDashboard() {
                       <XAxis dataKey="date" tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <YAxis domain={[0, 1]} tickFormatter={(v: number) => `${Math.round(v * 100)}%`} tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <Tooltip content={<RetrievalTrendTooltip />} />
+                      <Legend wrapperStyle={{ fontSize: 10 }} iconSize={8} />
                       <Line type="monotone" dataKey="relevance" stroke="var(--primary)" strokeWidth={2} dot={false} name="相关度" />
                       <Line type="monotone" dataKey="coverage" stroke="var(--green)" strokeWidth={1.5} dot={false} name="覆盖度" />
                       <Line type="monotone" dataKey="diversity" stroke="var(--warning)" strokeWidth={1.5} dot={false} name="多样性" />
@@ -1289,7 +1293,7 @@ export default function RAGDashboard() {
                   <ResponsiveContainer width="100%" height={240}>
                     <RadarChart data={radarData} cx="50%" cy="50%" outerRadius="70%">
                       <PolarGrid stroke="var(--border)" />
-                      <PolarAngleAxis dataKey="topic" tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
+                      <PolarAngleAxis dataKey="topic" tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} tickFormatter={(v: string) => (v.length > 5 ? `${v.slice(0, 5)}…` : v)} />
                       <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 9, fill: "var(--muted-foreground)" }} />
                       <Radar dataKey="relevance" stroke="var(--primary)" fill="var(--primary)" fillOpacity={0.2} strokeWidth={2} />
                     </RadarChart>
@@ -1315,9 +1319,10 @@ export default function RAGDashboard() {
                       <XAxis dataKey="topic" tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <YAxis tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <Tooltip />
-                      <Bar dataKey="excellent" stackId="a" fill="var(--green)" name="优秀 (>=70%)" radius={[0, 0, 0, 0]} />
-                      <Bar dataKey="good" stackId="a" fill="var(--sig-chart-2)" name="良好 (50-70%)" />
-                      <Bar dataKey="fair" stackId="a" fill="var(--warning)" name="一般 (30-50%)" />
+                      <Legend wrapperStyle={{ fontSize: 10 }} iconSize={8} />
+                      <Bar dataKey="excellent" stackId="a" fill="var(--green)" name="优秀 (≥70%)" radius={[0, 0, 0, 0]} />
+                      <Bar dataKey="good" stackId="a" fill="var(--sig-chart-2)" name="正常 (45-70%)" />
+                      <Bar dataKey="fair" stackId="a" fill="var(--warning)" name="偏低 (30-45%)" />
                       <Bar dataKey="poor" stackId="a" fill="var(--red)" name="差 (<30%)" radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
@@ -1338,9 +1343,12 @@ export default function RAGDashboard() {
                       <XAxis dataKey="date" tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <YAxis domain={[0, 1]} tickFormatter={(v: number) => `${Math.round(v * 100)}%`} tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
                       <Tooltip content={<GenTrendTooltip />} />
+                      <Legend wrapperStyle={{ fontSize: 10 }} iconSize={8} />
                       <Line type="monotone" dataKey="faithfulness" stroke="var(--sig-chart-2)" strokeWidth={2} dot={false} name="依据一致性" />
                       <Line type="monotone" dataKey="answer_relevance" stroke="var(--sig-chart-1)" strokeWidth={1.5} dot={false} name="回答切题度" />
-                      <Line type="monotone" dataKey="correctness" stroke="var(--primary)" strokeWidth={1.5} dot={false} name="综合依据质量" />
+                      {/* var(--primary) remaps to the same hue as --sig-chart-1 inside
+                          sig-root — the two lines were indistinguishable. */}
+                      <Line type="monotone" dataKey="correctness" stroke="var(--sig-chart-3)" strokeWidth={1.5} dot={false} name="综合依据质量" />
                     </LineChart>
                   </ResponsiveContainer>
                 ) : (
@@ -1360,7 +1368,7 @@ export default function RAGDashboard() {
                 <div className="py-8 text-center text-sm text-muted-fg">暂无数据</div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full text-[12px]">
+                  <table className="w-full min-w-[720px] text-[12px]">
                     <thead>
                       <tr className="border-b border-border/50 text-muted-fg">
                         <th className="text-left py-2 px-2 font-medium">Session</th>
@@ -1580,7 +1588,7 @@ function RagEvalHistory({
                       <td className="py-2 px-2 text-center"><MetricPill value={run.success_rate} metricKey="success_rate" /></td>
                       <td className="py-2 px-2 text-center font-mono tabular-nums">{formatRunMetric(run.latency_p95_ms, "ms")}</td>
                       <td className="py-2 px-2 text-center">
-                        <span className={cn("text-[10px]", comparable ? "text-green-500" : "text-muted-fg")} title={comparisonReason}>
+                        <span className={cn("text-[10px]", comparable ? "text-green" : "text-muted-fg")} title={comparisonReason}>
                           {comparisonLabel}
                         </span>
                       </td>
@@ -1806,7 +1814,7 @@ function RagEvalResultCard({ status, topicName }: { status: RagEvalStatus; topic
         <ResponsiveContainer width="100%" height={240}>
           <RadarChart data={radarData} cx="50%" cy="50%" outerRadius="70%">
             <PolarGrid stroke="var(--border)" />
-            <PolarAngleAxis dataKey="metric" tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} />
+            <PolarAngleAxis dataKey="metric" tick={{ fontSize: 10, fill: "var(--muted-foreground)" }} tickFormatter={(v: string) => (v.length > 6 ? `${v.slice(0, 6)}…` : v)} />
             <PolarRadiusAxis domain={[0, 100]} tick={{ fontSize: 9, fill: "var(--muted-foreground)" }} />
             <Radar dataKey="value" stroke="var(--primary)" fill="var(--primary)" fillOpacity={0.2} strokeWidth={2} />
           </RadarChart>
@@ -1867,7 +1875,7 @@ function RagEvalResultCard({ status, topicName }: { status: RagEvalStatus; topic
                       <td className="py-1.5 px-2 text-center">
                         <span className={cn(
                           "text-[10px]",
-                          outcome === "ok" ? "text-green-500" : ["empty", "degraded"].includes(outcome) ? "text-yellow-500" : "text-red-500",
+                          outcome === "ok" ? "text-green" : ["empty", "degraded"].includes(outcome) ? "text-orange" : "text-red",
                         )} title={q.error || q.retrieval_error || q.error_code || outcome}>
                           {outcome}
                         </span>

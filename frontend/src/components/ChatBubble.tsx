@@ -128,7 +128,7 @@ export default function ChatBubble({ role, content }: ChatBubbleProps) {
 
   return (
     <div className="flex flex-col animate-fade-in">
-      <div className="h-px bg-border mb-6" />
+      <div className="h-px bg-muted mb-6" />
       <div className="max-w-full md:max-w-[720px] leading-[1.8] text-[15px] text-text">
         <div className="md-content">
           <Markdown>{content}</Markdown>

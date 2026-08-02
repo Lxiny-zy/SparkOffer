@@ -563,6 +563,32 @@ export default function Interview() {
     );
   }
 
+  // End confirmation dialog — shared by both mode branches. It must be rendered
+  // from each branch's tree; it previously lived only in the resume branch, so in
+  // batch mode the "结束训练/结束备面" button set showEndConfirm but nothing appeared.
+  const endConfirmDialog = showEndConfirm && (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "var(--sig-overlay)" }}>
+      <Card className="w-full max-w-sm mx-4 animate-fade-in">
+        <CardContent className="p-5 text-center space-y-4">
+          <h3 className="text-lg font-semibold">
+            {isBatchMode ? (isJobPrep ? "确定结束备面？" : "确定结束训练？") : "确定结束面试？"}
+          </h3>
+          <p className="text-sm text-dim">
+            {isBatchMode
+              ? `已完成 ${Object.keys(answers).filter((k) => answers[k as any]).length}/${questions.length} 题，结束后将进入 AI 评估。`
+              : "结束后将生成面试复盘报告。"}
+          </p>
+          <div className="flex justify-center gap-3 pt-2">
+            <Button variant="outline" onClick={() => setShowEndConfirm(false)}>继续答题</Button>
+            <Button variant="destructive" onClick={isBatchMode ? handleEndBatch : handleEndResume}>
+              确认结束
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+
   if (isBatchMode) {
     return (
       <div className="sig-page sig-workspace flex-1 flex flex-col h-full">
@@ -734,7 +760,7 @@ export default function Interview() {
                     {content && (
                       <div className={`rounded-xl px-4 py-3 text-sm leading-relaxed animate-fade-in ${
                         hintState.stage === "hint"
-                          ? "bg-yellow-500/8 border border-yellow-500/20 text-dim"
+                          ? "bg-orange/8 border border-orange/20 text-dim"
                           : "bg-primary/8 border border-primary/20"
                       }`}>
                         <div className="flex items-center gap-1.5 text-xs font-semibold mb-1.5 opacity-70">
@@ -757,7 +783,7 @@ export default function Interview() {
                 <div className="flex-1 relative">
                   <textarea
                     ref={textareaRef}
-                    className="sig-textarea w-full min-h-[100px] md:min-h-[80px] pl-12 text-[15px] md:text-sm resize-none"
+                    className="sig-textarea w-full min-h-[100px] md:min-h-[80px] text-[15px] md:text-sm resize-none"
                     value={drillInput}
                     onChange={(e) => setDrillInput(e.target.value)}
                     onKeyDown={handleKeyDown}
@@ -785,6 +811,7 @@ export default function Interview() {
             </>
           ) : null}
         </div>
+        {endConfirmDialog}
       </div>
     );
   }
@@ -826,7 +853,7 @@ export default function Interview() {
           <div className="relative w-full max-w-3xl">
             <textarea
               ref={textareaRef}
-              className="sig-textarea w-full pl-12 min-h-[72px] md:min-h-[80px] max-h-[200px] md:max-h-[240px] text-[15px]"
+              className="sig-textarea w-full min-h-[72px] md:min-h-[80px] max-h-[200px] md:max-h-[240px] text-[15px]"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -836,29 +863,7 @@ export default function Interview() {
             />
           </div>
         </div>
-    {/* End confirmation dialog */}
-    {showEndConfirm && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "var(--sig-overlay)" }}>
-        <Card className="w-full max-w-sm mx-4 animate-fade-in">
-          <CardContent className="p-5 text-center space-y-4">
-            <h3 className="text-lg font-semibold">
-              {isBatchMode ? (isJobPrep ? "确定结束备面？" : "确定结束训练？") : "确定结束面试？"}
-            </h3>
-            <p className="text-sm text-dim">
-              {isBatchMode
-                ? `已完成 ${Object.keys(answers).filter((k) => answers[k as any]).length}/${questions.length} 题，结束后将进入 AI 评估。`
-                : "结束后将生成面试复盘报告。"}
-            </p>
-            <div className="flex justify-center gap-3 pt-2">
-              <Button variant="outline" onClick={() => setShowEndConfirm(false)}>继续答题</Button>
-              <Button variant="destructive" onClick={isBatchMode ? handleEndBatch : handleEndResume}>
-                确认结束
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    )}
+    {endConfirmDialog}
     </div>
   );
 }

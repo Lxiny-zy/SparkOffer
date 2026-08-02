@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from "react";
 import { Menu, X, Plus, Sparkles, ChevronRight, ChevronDown, Activity, Clock, FileText, RefreshCw, Loader2, CheckCircle2, XCircle, CircleDashed, Upload, Layers, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { getTopicIcon, ICON_OPTIONS } from "../utils/topicIcons";
@@ -317,11 +317,16 @@ export default function Knowledge() {
     isEmpty: () => !hfDirty,
   });
 
-  const handleSaveCore = async (filename: string) => {
+  // The live draft arrives from CoreFileEditor (which owns it locally); the
+  // debounced onSync copy in editContent is only for badge + draft persistence.
+  const handleSyncDraft = useCallback((filename: string, value: string) => {
+    setEditContent((prev) => ({ ...prev, [filename]: value }));
+  }, []);
+
+  const handleSaveCore = async (filename: string, content: string) => {
     const topic = selected;
     const generation = topicGenerationRef.current;
-    const content = editContent[filename];
-    if (!topic || content === undefined) {
+    if (!topic) {
       toast.error("文件内容尚未加载");
       return;
     }
@@ -1061,28 +1066,14 @@ export default function Knowledge() {
                               )}
                             </div>
                           ) : (
-                            <>
-                              <textarea
-                                className="w-full min-h-[300px] p-3 rounded-lg border border-border bg-bg text-text text-[13px] font-mono leading-relaxed resize-y focus:outline-none focus:border-primary transition-colors"
-                                value={editContent[f.filename] ?? f.content}
-                                onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditContent((prev) => ({ ...prev, [f.filename]: e.target.value }))}
-                              />
-                              <div className="flex gap-2 mt-3 justify-end items-center">
-                                {fileDirty && coreSaving !== f.filename && (
-                                  <Button variant="ghost" size="sm" onClick={() => setEditContent((prev) => ({ ...prev, [f.filename]: f.content! }))}>
-                                    撤销修改
-                                  </Button>
-                                )}
-                                <Button
-                                  variant={fileDirty ? "default" : "outline"}
-                                  size="sm"
-                                  onClick={() => handleSaveCore(f.filename)}
-                                  disabled={!fileDirty || coreSaving !== null}
-                                >
-                                  {coreSaving === f.filename ? <><Loader2 size={14} className="animate-spin" /> 保存中</> : "保存"}
-                                </Button>
-                              </div>
-                            </>
+                            <CoreFileEditor
+                              filename={f.filename}
+                              savedContent={f.content}
+                              initialDraft={hasOwnContent(editContent, f.filename) ? editContent[f.filename] : undefined}
+                              saving={coreSaving}
+                              onSync={handleSyncDraft}
+                              onSave={handleSaveCore}
+                            />
                           )}
                         </div>
                       )}
@@ -1141,3 +1132,80 @@ export default function Knowledge() {
     </div>
   );
 }
+
+interface CoreFileEditorProps {
+  filename: string;
+  savedContent: string;
+  initialDraft: string | undefined;
+  saving: string | null;
+  onSync: (filename: string, value: string) => void;
+  onSave: (filename: string, content: string) => void;
+}
+
+/** Core-knowledge file editor. Owns the draft locally so each keystroke
+ *  rerenders only this card instead of the whole page; the parent is synced on
+ *  a 400ms debounce (for the "未保存" badge + draft persistence) and once more
+ *  on unmount so the typing tail is never lost. */
+const CoreFileEditor = memo(function CoreFileEditor({ filename, savedContent, initialDraft, saving, onSync, onSave }: CoreFileEditorProps) {
+  const [draft, setDraft] = useState(initialDraft ?? savedContent);
+  // Mirror of the latest draft, written only inside event handlers (never
+  // during render) so the unmount-flush can read it from a cleanup closure.
+  const draftRef = useRef(draft);
+  const syncTimerRef = useRef<number | null>(null);
+
+  const cancelPendingSync = () => {
+    if (syncTimerRef.current) {
+      window.clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => () => {
+    if (syncTimerRef.current) {
+      window.clearTimeout(syncTimerRef.current);
+      onSync(filename, draftRef.current);
+    }
+  }, [filename, onSync]);
+
+  const dirty = draft !== savedContent;
+
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const v = e.target.value;
+    setDraft(v);
+    draftRef.current = v;
+    cancelPendingSync();
+    syncTimerRef.current = window.setTimeout(() => onSync(filename, v), 400);
+  };
+
+  const handleReset = () => {
+    cancelPendingSync();
+    setDraft(savedContent);
+    draftRef.current = savedContent;
+    onSync(filename, savedContent);
+  };
+
+  return (
+    <>
+      <textarea
+        className="w-full min-h-[300px] p-3 rounded-lg border border-border bg-bg text-text text-[13px] font-mono leading-relaxed resize-y focus:outline-none focus:border-primary transition-colors"
+        value={draft}
+        onChange={handleChange}
+      />
+      <div className="flex gap-2 mt-3 justify-end items-center">
+        {dirty && saving !== filename && (
+          <Button variant="ghost" size="sm" onClick={handleReset}>
+            撤销修改
+          </Button>
+        )}
+        <Button
+          variant={dirty ? "default" : "outline"}
+          size="sm"
+          onClick={() => { cancelPendingSync(); onSync(filename, draftRef.current); onSave(filename, draftRef.current); }}
+          disabled={!dirty || saving !== null}
+        >
+          {saving === filename ? <><Loader2 size={14} className="animate-spin" /> 保存中</> : "保存"}
+        </Button>
+      </div>
+    </>
+  );
+});

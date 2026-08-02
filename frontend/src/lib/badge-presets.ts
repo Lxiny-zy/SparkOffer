@@ -34,13 +34,17 @@ export interface ScoreBand {
 }
 
 export function getScoreBand(score: number | null | undefined): ScoreBand {
+  // bg derives from the same token as color via color-mix — theme-aware in both
+  // light and dark sig (the old hardcoded light-theme rgba() tints were not).
+  // This is the single source of truth for score coloring; page-local
+  // getScoreColor/scoreToColor reimplementations should migrate here.
   if (score == null) {
-    return { bg: "rgba(120,120,120,0.10)", color: "var(--muted-fg)", label: "--", level: "empty" };
+    return { bg: "color-mix(in srgb, var(--muted-fg) 10%, transparent)", color: "var(--muted-fg)", label: "--", level: "empty" };
   }
-  if (score >= 8) return { bg: "rgba(56,106,32,0.15)",  color: "var(--green)",  label: "卓越", level: "excellent" };
-  if (score >= 6) return { bg: "rgba(125,82,96,0.15)",  color: "var(--tertiary)", label: "良好", level: "good" };
-  if (score >= 4) return { bg: "rgba(253,203,110,0.20)", color: "var(--warning)", label: "待提升", level: "fair" };
-  return            { bg: "rgba(179,38,30,0.15)",   color: "var(--red)",    label: "需重练", level: "poor" };
+  if (score >= 8) return { bg: "color-mix(in srgb, var(--green) 15%, transparent)",   color: "var(--green)",   label: "卓越", level: "excellent" };
+  if (score >= 6) return { bg: "color-mix(in srgb, var(--tertiary) 15%, transparent)", color: "var(--tertiary)", label: "良好", level: "good" };
+  if (score >= 4) return { bg: "color-mix(in srgb, var(--warning) 18%, transparent)",  color: "var(--warning)",  label: "待提升", level: "fair" };
+  return            { bg: "color-mix(in srgb, var(--red) 15%, transparent)",      color: "var(--red)",      label: "需重练", level: "poor" };
 }
 
 // ── Channel health → dot color + tooltip ──
@@ -51,11 +55,13 @@ export interface HealthInfo {
 }
 
 export function getHealthInfo(health: { healthy?: boolean; error_count?: number } | undefined): HealthInfo {
-  if (!health)              return { className: "bg-dim/30",              pulse: false, label: "未知" };
-  if (!health.healthy)      return { className: "bg-red-500",              pulse: true,  label: "冷却中" };
+  // Token-based utilities (bg-red/bg-orange/bg-green → --color-red/orange/green
+  // → sig status tokens), not the native *-500 scale that ignores the theme.
+  if (!health)              return { className: "bg-dim/30",  pulse: false, label: "未知" };
+  if (!health.healthy)      return { className: "bg-red",     pulse: true,  label: "冷却中" };
   if ((health.error_count ?? 0) > 0)
-                            return { className: "bg-yellow-500",           pulse: false, label: `${health.error_count} 次错误` };
-  return                            { className: "bg-green-500",           pulse: false, label: "健康" };
+                            return { className: "bg-orange",  pulse: false, label: `${health.error_count} 次错误` };
+  return                            { className: "bg-green",  pulse: false, label: "健康" };
 }
 
 // ── Reasoning effort → estimated latency hint ──

@@ -61,6 +61,15 @@ export default function AlgorithmSolver() {
   const [saveTags, setSaveTags] = useState("");
   const [saveNote, setSaveNote] = useState("");
 
+  // Save dialog is modal: close on Escape (backdrop click + role/aria live on
+  // the JSX below).
+  useEffect(() => {
+    if (!showSave) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setShowSave(false); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [showSave]);
+
   // Pre-fill from navigation state (re-open from collection)
   useEffect(() => {
     const s = location.state as any;
@@ -337,8 +346,18 @@ export default function AlgorithmSolver() {
 
       {/* Save Dialog */}
       {showSave && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "var(--sig-overlay)" }}>
-          <Card className="w-full max-w-md mx-4 animate-fade-in">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: "var(--sig-overlay)" }}
+          onClick={() => setShowSave(false)}
+        >
+          <Card
+            role="dialog"
+            aria-modal="true"
+            aria-label="保存到算法收藏"
+            className="w-full max-w-md mx-4 animate-fade-in"
+            onClick={(e) => e.stopPropagation()}
+          >
             <CardContent className="p-5 space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-semibold">保存到算法收藏</h3>
@@ -353,6 +372,7 @@ export default function AlgorithmSolver() {
                     value={saveTitle}
                     onChange={(e) => setSaveTitle(e.target.value)}
                     placeholder="例: 两数之和"
+                    autoFocus
                   />
                 </div>
                 <div>

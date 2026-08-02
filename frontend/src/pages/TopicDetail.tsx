@@ -2,7 +2,9 @@ import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Markdown } from "../components/ChatBubble";
 import { ArrowLeft } from "lucide-react";
+import { toast } from "sonner";
 import { getTopicIcon } from "../utils/topicIcons";
+import { getScoreBand } from "@/lib/badge-presets";
 import { getProfile, getTopics, getTopicRetrospective, getTopicHistory } from "../api/interview";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -42,7 +44,7 @@ export default function TopicDetail() {
       const res = await getTopicRetrospective(topic, { onProgress: (msg) => setRetroProgress(msg) });
       setRetrospective(res.retrospective);
     } catch (err: any) {
-      alert("生成失败: " + err.message);
+      toast.error("生成失败: " + err.message);
     } finally {
       setGenerating(false);
     }
@@ -97,6 +99,16 @@ export default function TopicDetail() {
         </Card>
       )}
 
+      {sessions.length === 0 ? (
+        // One merged empty state — previously both the 回顾 and 历史 sections
+        // rendered an identical "该领域暂无训练记录" card.
+        <Card className="mb-7 animate-fade-in-up [animation-delay:0.1s]">
+          <CardContent className="p-5 md:p-10 text-center text-dim">
+            该领域暂无训练记录，完成一次专项训练后，这里会生成领域回顾与历史。
+          </CardContent>
+        </Card>
+      ) : (
+        <>
       <div className="mb-7 animate-fade-in-up [animation-delay:0.1s]">
         <div className="text-base font-semibold mb-3 flex items-center justify-between">
           <span>领域回顾</span>
@@ -118,12 +130,10 @@ export default function TopicDetail() {
         ) : (
           <Card>
             <CardContent className="p-5 md:p-10 text-center text-dim">
-              <p>{sessions.length === 0 ? "该领域暂无训练记录" : "还没有生成领域回顾"}</p>
-              {sessions.length > 0 && (
-                <Button variant="default" className="mt-4" onClick={handleGenerate} disabled={generating}>
-                  {generating ? (retroProgress || "正在分析历史记录...") : "生成领域回顾"}
-                </Button>
-              )}
+              <p>还没有生成领域回顾</p>
+              <Button variant="default" className="mt-4" onClick={handleGenerate} disabled={generating}>
+                {generating ? (retroProgress || "正在分析历史记录...") : "生成领域回顾"}
+              </Button>
             </CardContent>
           </Card>
         )}
@@ -131,16 +141,12 @@ export default function TopicDetail() {
 
       <div className="mb-7 animate-fade-in-up [animation-delay:0.15s]">
         <div className="text-base font-semibold mb-3">训练历史</div>
-        {sessions.length === 0 ? (
-          <Card>
-            <CardContent className="p-5 md:p-10 text-center text-dim">该领域暂无训练记录</CardContent>
-          </Card>
-        ) : (
-          <div className="flex flex-col gap-2 stagger-children">
+        <div className="flex flex-col gap-2 stagger-children">
             {[...sessions].reverse().map((s) => {
               const scores = s.scores || [];
               const validScores = scores.map((sc: any) => sc.score).filter((v: any) => typeof v === "number");
               const avg = validScores.length ? (validScores.reduce((a: number, b: number) => a + b, 0) / validScores.length).toFixed(1) : null;
+              const band = avg != null ? getScoreBand(Number(avg)) : null;
 
               return (
                 <Card
@@ -152,30 +158,17 @@ export default function TopicDetail() {
                   <CardContent className="p-3.5 md:p-4 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <span className="text-sm font-medium">{s.created_at?.slice(0, 10)}</span>
-                      {avg && <Badge variant="outline" style={{ color: getScoreColor(Number(avg)), borderColor: "transparent", background: getScoreBg(Number(avg)) }}>{avg}/10</Badge>}
+                      {band && <Badge variant="outline" style={{ color: band.color, borderColor: "transparent", background: band.bg }}>{avg}/10</Badge>}
                     </div>
                     <span className="text-xs text-dim">#{s.session_id}</span>
                   </CardContent>
                 </Card>
               );
             })}
-          </div>
-        )}
+        </div>
       </div>
+        </>
+      )}
     </div>
   );
-}
-
-function getScoreColor(score: number): string {
-  if (score >= 8) return "var(--green)";
-  if (score >= 6) return "var(--ai-glow)";
-  if (score >= 4) return "#e2b93b";
-  return "var(--red)";
-}
-
-function getScoreBg(score: number): string {
-  if (score >= 8) return "rgba(34,197,94,0.15)";
-  if (score >= 6) return "rgba(245,158,11,0.15)";
-  if (score >= 4) return "rgba(253,203,110,0.2)";
-  return "rgba(239,68,68,0.15)";
 }

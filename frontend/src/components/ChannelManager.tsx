@@ -60,9 +60,9 @@ function SecretInput({ value, onChange, placeholder }: { value: string; onChange
 
 function HealthDot({ health }: { health?: ChannelHealth }) {
   if (!health) return <span className="w-2.5 h-2.5 rounded-full bg-dim/30" />;
-  if (!health.healthy) return <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" title="Cooldown" />;
-  if (health.error_count > 0) return <span className="w-2.5 h-2.5 rounded-full bg-yellow-500" title={`${health.error_count} errors`} />;
-  return <span className="w-2.5 h-2.5 rounded-full bg-green-500" title="Healthy" />;
+  if (!health.healthy) return <span className="w-2.5 h-2.5 rounded-full bg-red animate-pulse" title="Cooldown" />;
+  if (health.error_count > 0) return <span className="w-2.5 h-2.5 rounded-full bg-orange" title={`${health.error_count} errors`} />;
+  return <span className="w-2.5 h-2.5 rounded-full bg-green" title="Healthy" />;
 }
 
 export default function ChannelManager({ section, onDirty }: ChannelManagerProps) {
@@ -342,7 +342,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                           />
                         </div>
                         {(ch.keys || []).length > 1 && (
-                          <Button variant="ghost" size="sm" className="h-9 w-9 p-0 text-dim hover:text-red-500" onClick={() => removeKey(idx, ki)}>
+                          <Button variant="ghost" size="sm" className="h-9 w-9 p-0 text-dim hover:text-red" onClick={() => removeKey(idx, ki)}>
                             <Trash2 size={14} />
                           </Button>
                         )}
@@ -434,7 +434,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                     <select
                       value={ch.reasoning_effort || ""}
                       onChange={(e) => updateChannel(idx, { reasoning_effort: e.target.value })}
-                      className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 transition-colors hover:border-primary/40"
+                      className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 ring-offset-[color:var(--sig-bg)] transition-colors hover:border-primary/40"
                     >
                       <option value="">Off — 不发送 reasoning_effort 字段</option>
                       <option value="minimal">Minimal — 极轻思考</option>
@@ -456,7 +456,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                     <select
                       value={ch.tier || "large"}
                       onChange={(e) => updateChannel(idx, { tier: e.target.value })}
-                      className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 transition-colors hover:border-primary/40"
+                      className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 ring-offset-[color:var(--sig-bg)] transition-colors hover:border-primary/40"
                     >
                       <option value="large">Large — 主模型 (出题 / 整体评估)</option>
                       <option value="small">Small — 便宜小模型 (per-question 并发评分)</option>
@@ -469,7 +469,7 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="text-xs text-red-500 hover:text-red-600 hover:bg-red-500/10"
+                    className="text-xs text-red hover:bg-red/10"
                     onClick={() => removeChannel(idx)}
                   >
                     <Trash2 size={13} className="mr-1" /> Remove
@@ -482,8 +482,8 @@ export default function ChannelManager({ section, onDirty }: ChannelManagerProps
                     disabled={testState === "loading"}
                   >
                     {testState === "loading" ? <Loader2 size={13} className="mr-1 animate-spin" /> :
-                     testState === "ok" ? <CheckCircle2 size={13} className="mr-1 text-green-500" /> :
-                     testState === "error" ? <XCircle size={13} className="mr-1 text-red-500" /> :
+                     testState === "ok" ? <CheckCircle2 size={13} className="mr-1 text-green" /> :
+                     testState === "error" ? <XCircle size={13} className="mr-1 text-red" /> :
                      <FlaskConical size={13} className="mr-1" />}
                     Test
                   </Button>

@@ -200,7 +200,8 @@ export default function History() {
                             >
                               评估未完成
                             </Badge>
-                          )}                          <span className="text-sm text-text font-medium truncate">{title}</span>
+                          )}
+                          <span className="text-sm text-text font-medium truncate">{title}</span>
                           {subtitle && <span className="text-xs text-dim truncate">· {subtitle}</span>}
                         </div>
                         {/* L2 — Meta */}
@@ -230,7 +231,7 @@ export default function History() {
                           <Button
                             variant="outline"
                             size="sm"
-                            className="h-7 px-2 text-[11px] gap-1"
+                            className="h-8 sm:h-7 px-2.5 sm:px-2 text-[11px] gap-1"
                             style={{
                               borderColor: "color-mix(in srgb, var(--sig-warning) 42%, transparent)",
                               color: "var(--sig-warning)",
@@ -245,7 +246,7 @@ export default function History() {
                           </Button>
                         )}
                         <button
-                          className="p-1.5 rounded-md text-dim opacity-0 group-hover:opacity-100 hover:text-[color:var(--sig-danger)] hover:bg-secondary transition-all cursor-pointer"
+                          className="p-1.5 rounded-md text-dim sm:opacity-0 sm:group-hover:opacity-100 hover:text-[color:var(--sig-danger)] hover:bg-secondary transition-all cursor-pointer"
                           title="删除"
                           onClick={(e) => handleDelete(e, s.session_id)}
                         >

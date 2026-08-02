@@ -16,8 +16,6 @@ const buttonVariants = cva(
           "border border-[color:var(--sig-line-2)] bg-transparent text-text hover:border-[color:var(--sig-fg)] hover:bg-secondary",
         secondary:
           "bg-secondary text-secondary-foreground hover:bg-secondary/70",
-        "filled-tonal":
-          "bg-secondary text-secondary-foreground hover:bg-secondary/70",
         ghost:
           "text-muted-fg hover:bg-secondary hover:text-text",
         link:

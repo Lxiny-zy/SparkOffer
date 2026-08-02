@@ -7,18 +7,15 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { formatQuestionLabel } from "@/lib/question";
 import { metricColorVar } from "@/lib/metrics";
+import { getScoreBand } from "@/lib/badge-presets";
 import { MetricInfoTooltip } from "@/components/MetricInfoTooltip";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import type { Question, Score, Overall } from "../types/api";
 
-function getScoreColor(score: number): { bg: string; color: string } {
-  if (score >= 8) return { bg: "rgba(56,106,32,0.15)", color: "var(--green)" };
-  if (score >= 6) return { bg: "rgba(103,80,164,0.15)", color: "var(--primary)" };
-  if (score >= 4) return { bg: "rgba(125,88,0,0.15)", color: "var(--warning)" };
-  return { bg: "rgba(179,38,30,0.15)", color: "var(--red)" };
-}
+// Score colors come from getScoreBand (lib/badge-presets.ts) — the single
+// source of truth shared with History / Favorites / Graph / TopicDetail.
 
 function getScoreLevel(score: number): { label: string; color: string } {
   if (score >= 9) return { label: "卓越", color: "var(--green)" };
@@ -49,7 +46,7 @@ interface ScorePillProps {
 
 function ScorePill({ score }: ScorePillProps) {
   if (score == null) return <Badge variant="secondary">--</Badge>;
-  const sc = getScoreColor(score);
+  const sc = getScoreBand(score);
   return (
     <Badge variant="outline" className="min-w-[52px] justify-center font-semibold text-[13px]" style={{ background: sc.bg, borderColor: "transparent", color: sc.color }}>
       {score}/10
@@ -74,7 +71,7 @@ interface HeroOverviewProps {
 function HeroOverview({ eyebrow, title, subtitle, summary, avgScore, rightExtra, icon, accent = "primary" }: HeroOverviewProps) {
   const numScore = typeof avgScore === "number" ? avgScore : null;
   const level = numScore != null ? getScoreLevel(numScore) : null;
-  const sc = numScore != null ? getScoreColor(numScore) : { bg: "var(--muted)", color: "var(--muted-fg)" };
+  const sc = getScoreBand(numScore);
   const accentVar = accent === "tertiary" ? "var(--tertiary)" : "var(--primary)";
 
   return (
@@ -177,7 +174,7 @@ interface TimelineNodeProps {
 }
 
 function TimelineNode({ index, score, isSkipped, isLast, children }: TimelineNodeProps) {
-  const sc = score != null && !isSkipped ? getScoreColor(score) : { bg: "var(--muted)", color: "var(--muted-fg)" };
+  const sc = score != null && !isSkipped ? getScoreBand(score) : getScoreBand(null);
   return (
     <div className="relative pl-14 md:pl-16 pb-6 last:pb-0">
       {/* 竖线（最后一项不画） */}
@@ -259,11 +256,12 @@ function DimensionScores({ dimensionScores, avgScore, labels }: DimensionScoresP
         </div>
         {entries.map(([key, label], idx) => {
           const score = dimensionScores[key];
-          const color = score >= 8 ? "var(--green)" : score >= 6 ? "var(--ai-glow)" : score >= 4 ? "#e2b93b" : "var(--red)";
+          // Same banding as every other score display — one score-color language.
+          const color = getScoreBand(score).color;
           return (
-            <div key={key} className="flex items-center gap-3 mb-2.5" style={{ animationDelay: `${idx * 0.1}s` }}>
+            <div key={key} className="flex items-center gap-3 mb-2.5 animate-fade-in-up" style={{ animationDelay: `${idx * 0.1}s` }}>
               <div className="w-[90px] md:w-[110px] text-[13px] text-dim text-right shrink-0">{label}</div>
-              <div className="flex-1 h-2.5 bg-border overflow-hidden relative">
+              <div className="flex-1 h-2.5 bg-muted overflow-hidden relative">
                 <div
                   className="h-full transition-[width] duration-700 ease-out"
                   style={{ width: `${score * 10}%`, background: color }}
@@ -679,11 +677,11 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
                       <Button
                         variant="ghost"
                         size="sm"
-                        className={favorited[q.id] ? "text-yellow-500" : "text-dim"}
+                        className={favorited[q.id] ? "text-orange" : "text-dim"}
                         onClick={() => handleFavorite(q, s)}
                         disabled={favLoading[q.id] || favorited[q.id]}
                       >
-                        <Star size={13} className={favorited[q.id] ? "fill-yellow-400" : ""} />
+                        <Star size={13} className={favorited[q.id] ? "fill-orange" : ""} />
                         {favorited[q.id] ? "已收藏" : "收藏"}
                       </Button>
                     </div>
@@ -753,7 +751,7 @@ function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepRev
               )}
             </div>
             <div className="text-right">
-              <div className="text-[32px] font-bold" style={{ color: typeof avgScore === "number" ? getScoreColor(avgScore).color : "var(--text)" }}>
+              <div className="text-[32px] font-bold" style={{ color: typeof avgScore === "number" ? getScoreBand(avgScore).color : "var(--text)" }}>
                 {avgScore}
               </div>
               <div className="text-sm text-dim">/10</div>

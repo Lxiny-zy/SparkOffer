@@ -2,10 +2,11 @@ import { ResponsiveContainer, Treemap, Tooltip } from "recharts";
 import { TopicMastery } from "../../types/api";
 
 function scoreToColor(score: number): string {
-  if (score >= 70) return "#22c55e";
-  if (score >= 50) return "#eab308";
-  if (score >= 30) return "#f97316";
-  return "#ef4444";
+  // sig status tokens instead of hardcoded hex — follows the active theme.
+  if (score >= 70) return "var(--green)";
+  if (score >= 50) return "var(--info)";
+  if (score >= 30) return "var(--warning)";
+  return "var(--red)";
 }
 
 interface TreemapCellProps {

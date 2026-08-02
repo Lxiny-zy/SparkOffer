@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, KeyboardEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { Markdown } from "./ChatBubble";
 import { X, Send, Trash2 } from "lucide-react";
 import { streamAssistantChat, fetchAssistantHistory, clearAssistantHistory, fetchWelcomeMessage } from "../api/assistant";
@@ -82,6 +82,9 @@ export default function FloatingAssistant() {
   const dragStartRef = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
   const didDragRef = useRef(false);
   const hasOpenedOnceRef = useRef(false);
+  // Flips true once the user drags the bubble this session — their chosen spot
+  // then wins over the route-based auto-peek below.
+  const userMovedRef = useRef(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -90,6 +93,13 @@ export default function FloatingAssistant() {
   const abortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // On mobile answer pages (interview / review / arena / card training) the 64px
+  // bubble sits right on top of the composer & send button. Retreat to the slim
+  // edge-peek strip there, unless the user has dragged the bubble this session.
+  const isAnswerRoute = /^\/(interview|review|qa-arena|knowledge-training)/.test(location.pathname);
+  const effectivePeeking = isPeeking || (isMobile && isAnswerRoute && !userMovedRef.current);
 
   // Detect mobile
   useEffect(() => {
@@ -219,6 +229,7 @@ export default function FloatingAssistant() {
     setIsDragging(false);
 
     if (wasDrag) {
+      userMovedRef.current = true;
       // Snap to right edge → peek mode. Use functional update so we read latest pos.
       setBtnPos((prev) => {
         if (prev.x < SNAP_THRESHOLD) {
@@ -478,9 +489,9 @@ export default function FloatingAssistant() {
         </div>
       )}
 
-      {/* Peeking Cat (hidden edge state on mobile) */}
+      {/* Peeking Cat (hidden edge state on mobile / answer routes) */}
       {/* Clamp the bottom so a stale btnPos from a larger viewport doesn't push the peek off-screen. */}
-      {isPeeking && !isOpen && (() => {
+      {effectivePeeking && !isOpen && (() => {
         const vh = typeof window !== "undefined" ? window.innerHeight : 800;
         const peekBottom = Math.max(0, Math.min(vh - 80, btnPos.y + 16));
         return (
@@ -526,7 +537,7 @@ export default function FloatingAssistant() {
       })()}
 
       {/* Floating Cat Bubble (normal / draggable) */}
-      {!isOpen && !isPeeking && (
+      {!isOpen && !effectivePeeking && (
         <button
           onClick={handleButtonClick}
           onPointerDown={handlePointerDown}

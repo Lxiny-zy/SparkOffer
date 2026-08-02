@@ -962,67 +962,22 @@ export default function QAArena() {
             <Plus className="w-4 h-4" /> 新对话
           </Button>
         </div>
-        <div className="sig-workspace-sidebar-list flex-1 overflow-y-auto">
-          {sessions.map((s) => (
-            <div
-              key={s.id}
-              data-active={s.id === activeId}
-              className={cn(
-                "sig-workspace-row group flex items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors border-b border-border/50",
-                s.id === activeId ? "bg-secondary" : "hover:bg-secondary/50",
-              )}
-              onClick={() => {
-                if (
-                  s.id !== activeId
-                  && !sessionLoadingRef.current
-                  && !sessionListBusyRef.current
-                ) void switchSession(s.id);
-              }}
-            >
-              <MessageSquare className="w-4 h-4 shrink-0 text-dim" />
-              {editingId === s.id ? (
-                <div className="flex-1 flex items-center gap-1">
-                  <input
-                    className="flex-1 bg-transparent border-b border-primary text-sm outline-none"
-                    value={editTitle}
-                    onChange={(e) => setEditTitle(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") handleRename(s.id); if (e.key === "Escape") setEditingId(null); }}
-                    autoFocus
-                    disabled={sessionLoading || sessionListBusy}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                  <button disabled={sessionLoading || sessionListBusy} onClick={(e) => { e.stopPropagation(); handleRename(s.id); }} className="text-primary"><Check className="w-3.5 h-3.5" /></button>
-                  <button onClick={(e) => { e.stopPropagation(); setEditingId(null); }} className="text-dim"><X className="w-3.5 h-3.5" /></button>
-                </div>
-              ) : (
-                <>
-                  <span className="flex-1 text-sm truncate">{s.title}</span>
-                  <div className="hidden group-hover:flex items-center gap-0.5">
-                    <button
-                      disabled={sessionLoading || sessionListBusy}
-                      onClick={(e) => { e.stopPropagation(); setEditingId(s.id); setEditTitle(s.title); }}
-                      className="p-0.5 rounded hover:bg-muted text-dim"
-                    >
-                      <Pencil className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      disabled={sessionLoading || sessionListBusy}
-                      onClick={(e) => { e.stopPropagation(); handleDeleteSession(s.id); }}
-                      className="p-0.5 rounded hover:bg-destructive/10 text-dim hover:text-destructive"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          ))}
-          {sessions.length === 0 && (
-            <div className="p-6 text-center text-dim text-sm">
-              {sessionListError || "还没有对话，开始一个吧"}
-            </div>
-          )}
-        </div>
+        <SessionList
+          sessions={sessions}
+          activeId={activeId}
+          editingId={editingId}
+          editTitle={editTitle}
+          busy={sessionLoading || sessionListBusy}
+          listError={sessionListError}
+          onSelect={(id) => {
+            if (id !== activeId && !sessionLoadingRef.current && !sessionListBusyRef.current) void switchSession(id);
+          }}
+          onEditTitleChange={setEditTitle}
+          onRename={handleRename}
+          onCancelEdit={() => setEditingId(null)}
+          onStartEdit={(id, title) => { setEditingId(id); setEditTitle(title); }}
+          onDelete={handleDeleteSession}
+        />
       </aside>
 
       {/* Mobile sidebar overlay */}
@@ -1041,66 +996,26 @@ export default function QAArena() {
                   <Plus className="w-4 h-4" /> 新对话
                 </Button>
               </div>
-              <div className="sig-workspace-sidebar-list flex-1 overflow-y-auto">
-                {sessions.map((s) => (
-                  <div
-                    key={s.id}
-                    data-active={s.id === activeId}
-                    className={cn(
-                      "sig-workspace-row group flex items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors border-b border-border/50",
-                      s.id === activeId ? "bg-secondary" : "hover:bg-secondary/50",
-                    )}
-                    onClick={() => {
-                      if (!sessionLoadingRef.current && !sessionListBusyRef.current) {
-                        if (s.id !== activeId) void switchSession(s.id);
-                        setSidebarOpen(false);
-                      }
-                    }}
-                  >
-                    <MessageSquare className="w-4 h-4 shrink-0 text-dim" />
-                    {editingId === s.id ? (
-                      <div className="flex-1 flex items-center gap-1">
-                        <input
-                          className="flex-1 bg-transparent border-b border-primary text-sm outline-none"
-                          value={editTitle}
-                          onChange={(e) => setEditTitle(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") handleRename(s.id); if (e.key === "Escape") setEditingId(null); }}
-                          autoFocus
-                          disabled={sessionLoading || sessionListBusy}
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                        <button disabled={sessionLoading || sessionListBusy} onClick={(e) => { e.stopPropagation(); handleRename(s.id); }} className="text-primary"><Check className="w-3.5 h-3.5" /></button>
-                        <button onClick={(e) => { e.stopPropagation(); setEditingId(null); }} className="text-dim"><X className="w-3.5 h-3.5" /></button>
-                      </div>
-                    ) : (
-                      <>
-                        <span className="flex-1 text-sm truncate">{s.title}</span>
-                        <div className="hidden group-hover:flex items-center gap-0.5">
-                          <button
-                            disabled={sessionLoading || sessionListBusy}
-                            onClick={(e) => { e.stopPropagation(); setEditingId(s.id); setEditTitle(s.title); }}
-                            className="p-0.5 rounded hover:bg-muted text-dim"
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            disabled={sessionLoading || sessionListBusy}
-                            onClick={(e) => { e.stopPropagation(); handleDeleteSession(s.id); }}
-                            className="p-0.5 rounded hover:bg-destructive/10 text-dim hover:text-destructive"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))}
-                {sessions.length === 0 && (
-                  <div className="p-6 text-center text-dim text-sm">
-                    {sessionListError || "还没有对话，开始一个吧"}
-                  </div>
-                )}
-              </div>
+              <SessionList
+                sessions={sessions}
+                activeId={activeId}
+                editingId={editingId}
+                editTitle={editTitle}
+                busy={sessionLoading || sessionListBusy}
+                listError={sessionListError}
+                touch
+                onSelect={(id) => {
+                  if (!sessionLoadingRef.current && !sessionListBusyRef.current) {
+                    if (id !== activeId) void switchSession(id);
+                    setSidebarOpen(false);
+                  }
+                }}
+                onEditTitleChange={setEditTitle}
+                onRename={handleRename}
+                onCancelEdit={() => setEditingId(null)}
+                onStartEdit={(id, title) => { setEditingId(id); setEditTitle(title); }}
+                onDelete={handleDeleteSession}
+              />
             </div>
           </aside>
           <div className="flex-1 bg-black/50" style={{ background: "var(--sig-overlay)" }} onClick={() => setSidebarOpen(false)} />
@@ -1149,10 +1064,12 @@ export default function QAArena() {
                 disabled={sessionLoading || isStreaming || isSummarizing}
                 title="知识卡片思考强度：低档更快，高档更精炼（简单对话用低档即可）"
               >
-                <option value="" style={{ color: "#000" }}>不思考·默认</option>
-                <option value="low" style={{ color: "#000" }}>low·快</option>
-                <option value="medium" style={{ color: "#000" }}>medium·均衡</option>
-                <option value="high" style={{ color: "#000" }}>high·最精</option>
+                {/* No inline color here — index.css styles .dark select option so the
+                    native dropdown stays readable in dark mode (inline #000 broke it). */}
+                <option value="">不思考·默认</option>
+                <option value="low">low·快</option>
+                <option value="medium">medium·均衡</option>
+                <option value="high">high·最精</option>
               </select>
               <Button
                 variant="outline"
@@ -1237,7 +1154,7 @@ export default function QAArena() {
           <div className="sig-workspace-composer px-3 md:px-8 py-3 border-t border-border/50 safe-area-bottom" style={{ background: "var(--sig-bg)" }}>
             {streamError && !isStreaming && (
               <div className="max-w-3xl mx-auto mb-2 flex items-center gap-1.5 text-xs text-dim">
-                <AlertCircle className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--sig-accent)" }} />
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--sig-danger)" }} />
                 <span>{streamError}</span>
               </div>
             )}
@@ -1553,6 +1470,89 @@ function EmptyChat({ onSend }: { onSend: (q: string) => void }) {
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+interface SessionListProps {
+  sessions: QASession[];
+  activeId: string | null;
+  editingId: string | null;
+  editTitle: string;
+  busy: boolean;
+  listError: string | null;
+  /** Touch layout: row actions stay visible (there is no hover on touch). */
+  touch?: boolean;
+  onSelect: (id: string) => void;
+  onEditTitleChange: (v: string) => void;
+  onRename: (id: string) => void;
+  onCancelEdit: () => void;
+  onStartEdit: (id: string, title: string) => void;
+  onDelete: (id: string) => void;
+}
+
+/** Shared desktop/mobile session list — previously ~80 lines of near-identical
+    JSX in each sidebar. The only differences were onSelect behavior and action
+    visibility (hover-reveal on desktop, always-visible on touch). */
+function SessionList({
+  sessions, activeId, editingId, editTitle, busy, listError, touch,
+  onSelect, onEditTitleChange, onRename, onCancelEdit, onStartEdit, onDelete,
+}: SessionListProps) {
+  return (
+    <div className="sig-workspace-sidebar-list flex-1 overflow-y-auto">
+      {sessions.map((s) => (
+        <div
+          key={s.id}
+          data-active={s.id === activeId}
+          className={cn(
+            "sig-workspace-row group flex items-center gap-2 px-3 py-2.5 cursor-pointer transition-colors border-b border-border/50",
+            s.id === activeId ? "bg-secondary" : "hover:bg-secondary/50",
+          )}
+          onClick={() => onSelect(s.id)}
+        >
+          <MessageSquare className="w-4 h-4 shrink-0 text-dim" />
+          {editingId === s.id ? (
+            <div className="flex-1 flex items-center gap-1">
+              <input
+                className="flex-1 bg-transparent border-b border-primary text-sm outline-none"
+                value={editTitle}
+                onChange={(e) => onEditTitleChange(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") onRename(s.id); if (e.key === "Escape") onCancelEdit(); }}
+                autoFocus
+                disabled={busy}
+                onClick={(e) => e.stopPropagation()}
+              />
+              <button disabled={busy} onClick={(e) => { e.stopPropagation(); onRename(s.id); }} className="text-primary"><Check className="w-3.5 h-3.5" /></button>
+              <button onClick={(e) => { e.stopPropagation(); onCancelEdit(); }} className="text-dim"><X className="w-3.5 h-3.5" /></button>
+            </div>
+          ) : (
+            <>
+              <span className="flex-1 text-sm truncate">{s.title}</span>
+              <div className={cn("items-center gap-0.5", touch ? "flex" : "hidden group-hover:flex")}>
+                <button
+                  disabled={busy}
+                  onClick={(e) => { e.stopPropagation(); onStartEdit(s.id, s.title); }}
+                  className="p-0.5 rounded hover:bg-muted text-dim"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={(e) => { e.stopPropagation(); onDelete(s.id); }}
+                  className="p-0.5 rounded hover:bg-destructive/10 text-dim hover:text-destructive"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      ))}
+      {sessions.length === 0 && (
+        <div className="p-6 text-center text-dim text-sm">
+          {listError || "还没有对话，开始一个吧"}
+        </div>
+      )}
     </div>
   );
 }
