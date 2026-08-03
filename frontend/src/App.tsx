@@ -1,4 +1,4 @@
-import { lazy, Suspense, ReactNode, useState, useEffect, useCallback } from "react";
+﻿import { lazy, Suspense, ReactNode, useState, useEffect, useCallback } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { Loader2, AlertTriangle, Activity, Cpu } from "lucide-react";
 import { Toaster } from "sonner";
@@ -119,13 +119,19 @@ function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
         <div className="sig-app-content relative z-[1] flex-1 flex flex-col min-h-0">
-          <Suspense fallback={
-            <div className="flex-1 flex items-center justify-center">
-              <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--sig-accent)" }} />
-            </div>
-          }>
-            {children}
-          </Suspense>
+          {/* Route transition: keying the wrapper on location.key remounts the
+              page subtree each navigation, replaying the fade-in-up entrance.
+              Pure CSS (GPU transform/opacity), zero-dependency, and the global
+              reduced-motion media query flattens it for motion-averse users. */}
+          <div key={location.key} className="sig-page-enter flex-1 flex flex-col min-h-0">
+            <Suspense fallback={
+              <div className="flex-1 flex items-center justify-center">
+                <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--sig-accent)" }} />
+              </div>
+            }>
+              {children}
+            </Suspense>
+          </div>
         </div>
       </main>
       <FloatingAssistant />

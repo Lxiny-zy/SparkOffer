@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+﻿import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { ChevronRight, TrendingUp, Download, BarChart3, Target, Brain } from "lucide-react";
 import { toast } from "sonner";
@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import CountUp from "@/components/CountUp";
 import ScoreTrendChart from "@/components/charts/ScoreTrendChart";
 import TopicRadarChart from "@/components/charts/TopicRadarChart";
 import DimensionTrendChart from "@/components/charts/DimensionTrendChart";
@@ -145,13 +146,13 @@ export default function Profile() {
         <div className="grid grid-cols-2 gap-3 mb-3">
           <Card hoverLift>
             <CardContent className="p-4 text-center">
-              <div className="text-[28px] sig-stat text-primary">{stats.total_sessions ?? 0}</div>
+              <div className="text-[28px] sig-stat text-primary"><CountUp value={stats.total_sessions ?? 0} /></div>
               <div className="text-xs text-dim mt-1">总练习次数</div>
             </CardContent>
           </Card>
           <Card hoverLift>
             <CardContent className="p-4 text-center">
-              <div className="text-[32px] sig-stat text-green">{stats.avg_score || "-"}</div>
+              <div className="text-[32px] sig-stat text-green">{typeof stats.avg_score === "number" ? <CountUp value={stats.avg_score} decimals={1} /> : (stats.avg_score || "-")}</div>
               <div className="text-xs text-dim mt-1">综合平均分</div>
             </CardContent>
           </Card>
@@ -162,7 +163,7 @@ export default function Profile() {
               <div className="text-[13px] font-semibold text-primary mb-2.5">简历面试</div>
               <div className="flex gap-3">
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] sig-stat text-primary">{stats.resume_sessions || 0}</div>
+                  <div className="text-[22px] sig-stat text-primary"><CountUp value={stats.resume_sessions || 0} /></div>
                   <div className="text-[11px] text-dim mt-0.5">次数</div>
                 </div>
                 <div className="flex-1 text-center">
@@ -177,7 +178,7 @@ export default function Profile() {
               <div className="text-[13px] font-semibold text-green mb-2.5">专项训练</div>
               <div className="flex gap-3">
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] sig-stat text-green">{stats.drill_sessions || 0}</div>
+                  <div className="text-[22px] sig-stat text-green"><CountUp value={stats.drill_sessions || 0} /></div>
                   <div className="text-[11px] text-dim mt-0.5">次数</div>
                 </div>
                 <div className="flex-1 text-center">
@@ -192,7 +193,7 @@ export default function Profile() {
               <div className="text-[13px] font-semibold text-tertiary mb-2.5">JD 备面</div>
               <div className="flex gap-3">
                 <div className="flex-1 text-center">
-                  <div className="text-[22px] sig-stat text-tertiary">{stats.job_prep_sessions || 0}</div>
+                  <div className="text-[22px] sig-stat text-tertiary"><CountUp value={stats.job_prep_sessions || 0} /></div>
                   <div className="text-[11px] text-dim mt-0.5">次数</div>
                 </div>
                 <div className="flex-1 text-center">

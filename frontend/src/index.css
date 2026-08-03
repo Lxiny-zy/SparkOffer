@@ -1,4 +1,4 @@
-@import "tailwindcss";
+﻿@import "tailwindcss";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -532,6 +532,14 @@
 
 .stagger-children > * {
   animation: fade-in-up 0.4s cubic-bezier(0.2, 0, 0, 1) backwards;
+}
+
+/* Route-change page entrance. Applied to the AppShell content wrapper, which
+   remounts on every navigation (key={location.key}), so this replays per page.
+   `backwards` fills the from-state during any delay; the global reduced-motion
+   media query flattens it to an instant swap for motion-averse users. */
+.sig-page-enter {
+  animation: fade-in-up 0.35s cubic-bezier(0.2, 0, 0, 1) backwards;
 }
 .stagger-children > *:nth-child(1) { animation-delay: 0.05s; }
 .stagger-children > *:nth-child(2) { animation-delay: 0.1s; }
