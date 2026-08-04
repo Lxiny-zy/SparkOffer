@@ -278,27 +278,33 @@ export default function Home() {
               查看画像 <ChevronRight size={14} />
             </button>
           </div>
-          <div className="flex flex-wrap gap-4 md:gap-6">
+          {/* 掌握度条占主列、得分靠右对齐成一个窄列。用 items-start 让两列顶部对齐，
+              否则单个 StatBox 会被 flex 拉伸居中，在条目少时留下大片空白。 */}
+          <div className="flex flex-wrap items-start gap-x-6 gap-y-4">
             {topTopics.length > 0 && (
-              <div className="flex-1 min-w-[120px]">
+              <div className="flex-1 min-w-[200px]">
                 <div className="text-[11px] text-dim mb-2">领域掌握</div>
                 {topTopics.map(([t, d]) => (
-                  <div key={t} className="flex items-center gap-2 mb-1.5">
-                    <span className="text-xs w-[70px] text-text truncate">{profile.topic_names?.[t] ?? t}</span>
-                    <div className="sig-progress flex-1">
+                  <div key={t} className="flex items-center gap-2.5 mb-2 last:mb-0">
+                    <span className="text-xs w-[88px] shrink-0 text-text truncate" title={profile.topic_names?.[t] ?? t}>
+                      {profile.topic_names?.[t] ?? t}
+                    </span>
+                    <div className="sig-progress flex-1 min-w-[60px]">
                       <div className="sig-progress-fill" style={{ width: `${d.score || 0}%` }} />
                     </div>
-                    <span className="text-[11px] text-dim w-7 text-right sig-num">{d.score || 0}</span>
+                    <span className="text-[11px] text-dim w-8 text-right sig-num shrink-0">{d.score || 0}</span>
                   </div>
                 ))}
               </div>
             )}
             {lastEntry && (
-              <StatBox
-                value={lastEntry.avg_score}
-                label="上次得分"
-                color={lastEntry.avg_score >= 6 ? "text-green" : "text-orange"}
-              />
+              <div className="shrink-0 ml-auto">
+                <StatBox
+                  value={lastEntry.avg_score}
+                  label="上次得分"
+                  color={lastEntry.avg_score >= 6 ? "text-green" : "text-orange"}
+                />
+              </div>
             )}
           </div>
         </CardContent>
@@ -419,9 +425,11 @@ export default function Home() {
                 立即复习 <ChevronRight size={14} />
               </button>
             </div>
-            <div className="flex flex-col gap-2">
-              {dueReviews.slice(0, 6).map((wp, i) => (
-                <div key={i} className="flex items-start gap-2.5 text-[13px] animate-fade-in-up" style={{ animationDelay: `${0.05 * i}s`, color: "color-mix(in srgb, var(--sig-warning) 85%, var(--sig-fg))" }}>
+            {/* 到期项可能有几十条：给一个固定视口高度 + 内部滚动，避免整张卡把整页顶长。
+                max-h 用 rem 而不是条数，条目换行高度不定。 */}
+            <div className="sig-scroll-list flex flex-col gap-2 max-h-[13.5rem] overflow-y-auto pr-1.5">
+              {dueReviews.map((wp, i) => (
+                <div key={i} className="flex items-start gap-2.5 text-[13px] animate-fade-in-up" style={{ animationDelay: `${0.05 * Math.min(i, 5)}s`, color: "color-mix(in srgb, var(--sig-warning) 85%, var(--sig-fg))" }}>
                   <span className="sig-num font-semibold text-[11px] shrink-0 mt-0.5 w-5 text-right" style={{ color: "color-mix(in srgb, var(--sig-warning) 55%, transparent)" }}>
                     {String(i + 1).padStart(2, "0")}
                   </span>
@@ -431,11 +439,6 @@ export default function Home() {
                   </span>
                 </div>
               ))}
-              {dueReviews.length > 6 && (
-                <div className="text-[12px] text-dim pt-1 flex items-center justify-center gap-1">
-                  还有 {dueReviews.length - 6} 个薄弱点 <ArrowRight size={12} aria-hidden="true" />
-                </div>
-              )}
             </div>
           </CardContent>
         </Card>

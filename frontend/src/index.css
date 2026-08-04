@@ -1948,12 +1948,31 @@
   box-shadow: 10px 10px 0 color-mix(in srgb, var(--sig-accent) 14%, transparent);
 }
 
-/* 顶部滚动进度条 */
-.sig-progress {
+/* 卡片内可滚动列表（首页到期复习等）——细滚动条，颜色跟随卡片的警示色调，
+   免得默认 10px 滚动条在一张小卡里显得笨重。 */
+.sig-scroll-list {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--sig-warning) 35%, transparent) transparent;
+  overscroll-behavior: contain;
+}
+.sig-scroll-list::-webkit-scrollbar { width: 6px; }
+.sig-scroll-list::-webkit-scrollbar-track { background: transparent; }
+.sig-scroll-list::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--sig-warning) 30%, transparent);
+  border-radius: 3px;
+}
+.sig-scroll-list::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--sig-warning) 55%, transparent);
+}
+
+/* 顶部滚动进度条 —— 独立类名：`.sig-progress` 已被行内掌握度/流式进度条占用
+   （见上方"功能性进度条"），同名会因后定义而把那些行内条改成 position:fixed，
+   使它们脱离文档流并在原位留下空白。 */
+.sig-scrollbar {
   position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 60;
   pointer-events: none;
 }
-.sig-progress > span {
+.sig-scrollbar > span {
   display: block; height: 100%; width: 100%;
   background: var(--sig-accent);
   transform-origin: 0 50%; transform: scaleX(0);

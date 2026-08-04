@@ -350,7 +350,7 @@ export default function Landing() {
   return (
     <div className="sig-root min-h-screen relative overflow-hidden">
       {/* 顶部滚动进度 */}
-      <div className="sig-progress" aria-hidden="true"><span ref={progressRef} /></div>
+      <div className="sig-scrollbar" aria-hidden="true"><span ref={progressRef} /></div>
       {/* Aurora 氛围光晕 */}
       <div className="sig-aurora" aria-hidden="true" />
       {/* Blueprint grid */}
