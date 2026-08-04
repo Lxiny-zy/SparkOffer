@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import CatAvatar from "@/components/CatAvatar";
 import GeometricNetwork from "@/components/GeometricNetwork";
+import ParticleField from "@/components/ParticleField";
 import { scrollToElement } from "@/lib/utils";
 
 /* ─────────────────────────────────────────────────────────────
@@ -146,6 +147,26 @@ function useScrollReveal() {
   }, []);
 }
 
+/** 顶部滚动进度条：监听 scroll，0..1 写入 ref（不触发重渲染）。 */
+function useScrollProgress(ref: RefObject<HTMLSpanElement | null>) {
+  useEffect(() => {
+    let raf = 0;
+    const update = () => {
+      raf = 0;
+      const doc = document.documentElement;
+      const max = doc.scrollHeight - window.innerHeight;
+      const ratio = max > 0 ? Math.min(1, window.scrollY / max) : 0;
+      if (ref.current) ref.current.style.transform = `scaleX(${ratio})`;
+    };
+    const onScroll = () => { if (raf === 0) raf = requestAnimationFrame(update); };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    update();
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      if (raf !== 0) cancelAnimationFrame(raf);
+    };
+  }, [ref]);
+}
 /* ── 闭环信号流 ──
    phase 0..11：偶数 = 节点点亮驻留（0,2,…,10 → 节点 0-5），奇数 = 连接线通流
    （1,3,…,9 → conn 0-4），11 = 回环虚线（右→左），之后清零重来。 */
@@ -323,9 +344,15 @@ export default function Landing() {
   }, [theme]);
 
   useScrollReveal();
+  const progressRef = useRef<HTMLSpanElement>(null);
+  useScrollProgress(progressRef);
 
   return (
     <div className="sig-root min-h-screen relative overflow-hidden">
+      {/* 顶部滚动进度 */}
+      <div className="sig-progress" aria-hidden="true"><span ref={progressRef} /></div>
+      {/* Aurora 氛围光晕 */}
+      <div className="sig-aurora" aria-hidden="true" />
       {/* Blueprint grid */}
       <div className="sig-grid fixed inset-0 pointer-events-none" aria-hidden />
 
@@ -353,6 +380,7 @@ export default function Landing() {
 
       {/* Hero */}
       <section className="relative z-10 mx-auto max-w-[1200px] px-6 md:px-8 pt-16 md:pt-28 pb-16 md:pb-24">
+        <ParticleField density={16000} max={120} parallax={18} />
         <div className="sig-landing-field hidden lg:block" aria-hidden="true">
           <GeometricNetwork />
           <span className="sig-mono">MEMORY FIELD / LIVE</span>
@@ -364,14 +392,14 @@ export default function Landing() {
             </div>
             <h1 className="sig-display mt-6 text-[clamp(2.75rem,8.5vw,6.5rem)]">
               <span className="sig-linemask"><span style={{ animationDelay: "0.05s" }}>越练越懂你的</span></span>
-              <span className="sig-linemask"><span style={{ animationDelay: "0.18s" }}>AI 面试<span className="sig-accent-c">教练</span></span></span>
+              <span className="sig-linemask"><span style={{ animationDelay: "0.18s" }}>AI 面试<span className="sig-shine">教练</span></span></span>
             </h1>
             <p className="sig-rise mt-8 max-w-xl text-[15px] md:text-base leading-relaxed text-[color:var(--sig-dim)]" style={{ animationDelay: "0.35s" }}>
               不是一次性问答，而是跨会话的训练闭环 —— 作答、评估、画像更新、复习调度自动完成。
               你练得越多，AI 越懂你；下一道题，永远来自你此刻真实的薄弱点。
             </p>
             <div className="sig-rise mt-10 flex flex-col sm:flex-row items-stretch sm:items-center gap-3" style={{ animationDelay: "0.45s" }}>
-              <button onClick={() => navigate("/login")} className="sig-cta justify-center">
+              <button onClick={() => navigate("/login")} className="sig-cta btn-sheen justify-center">
                 立即开始训练 <ArrowRight size={16} />
               </button>
               <button
@@ -385,6 +413,7 @@ export default function Landing() {
 
           {/* Spec sheet */}
           <div className="lg:col-span-4 sig-rise" style={{ animationDelay: "0.55s" }}>
+            <div className="sig-spec-panel">
             <div className="sig-kicker mb-4">规格 / SPEC</div>
             <div className="sig-hr" />
             {SPECS.map((s) => (
@@ -396,6 +425,7 @@ export default function Landing() {
                 <div className="sig-hr" />
               </div>
             ))}
+            </div>
           </div>
         </div>
       </section>
@@ -538,7 +568,8 @@ export default function Landing() {
       <div className="sig-hr" />
 
       {/* Final CTA */}
-      <section className="relative z-10 mx-auto max-w-[1200px] px-6 md:px-8 py-24 md:py-32 text-center">
+      <section className="sig-final relative z-10 mx-auto max-w-[1200px] px-6 md:px-8 py-24 md:py-32 text-center overflow-hidden">
+        <ParticleField density={24000} max={64} parallax={10} />
         <div className="sig-reveal sig-kicker mb-6">// 免费 · 无广告 · 数据归你</div>
         <h2 className="sig-reveal sig-display text-[clamp(2.25rem,7vw,5.5rem)]" style={{ transitionDelay: "80ms" }}>
           成为下一个 <span className="sig-stroke">OFFER</span>
@@ -546,7 +577,7 @@ export default function Landing() {
           <span className="sig-accent-c">holder</span> 了吗？
         </h2>
         <div className="sig-reveal mt-12 flex justify-center" style={{ transitionDelay: "160ms" }}>
-          <button onClick={() => navigate("/login")} className="sig-cta">
+          <button onClick={() => navigate("/login")} className="sig-cta btn-sheen">
             免费开始 <ArrowRight size={16} />
           </button>
         </div>

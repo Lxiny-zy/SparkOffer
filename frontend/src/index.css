@@ -1,4 +1,4 @@
-﻿@import "tailwindcss";
+@import "tailwindcss";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -1878,6 +1878,110 @@
 }
 .sig-stack-layer.sig-on { border-color: var(--sig-line-2); background: color-mix(in srgb, var(--sig-accent) 5%, var(--sig-bg)); }
 .sig-stack-layer.sig-on::before { transform: scaleY(1); }
+
+
+/* ── 高级感氛围层 ─────────────────────────────────────────────
+   Aurora 光晕、标题流光、spec 玻璃背板、滚动进度条、结尾 CTA。
+   全部用 var(--sig-accent) 单色 + color-mix，亮暗双主题自动适配；
+   动效统一收敛到下方的 prefers-reduced-motion 查询里降级。 */
+
+/* Aurora —— 两团巨大的 accent 色径向雾，缓慢漂移呼吸 */
+.sig-aurora {
+  position: absolute; inset: 0; overflow: hidden; pointer-events: none;
+}
+.sig-aurora::before,
+.sig-aurora::after {
+  content: ""; position: absolute; border-radius: 50%;
+  filter: blur(70px); will-change: transform, opacity;
+}
+.sig-aurora::before {
+  width: 55vw; height: 55vw; left: -12vw; top: -18vh;
+  background: radial-gradient(circle, color-mix(in srgb, var(--sig-accent) 38%, transparent), transparent 62%);
+  animation: sig-aurora-a 18s ease-in-out infinite alternate;
+}
+.sig-aurora::after {
+  width: 48vw; height: 48vw; right: -14vw; top: 4vh;
+  background: radial-gradient(circle, color-mix(in srgb, var(--sig-accent) 30%, transparent), transparent 62%);
+  animation: sig-aurora-b 22s ease-in-out infinite alternate;
+}
+@keyframes sig-aurora-a {
+  from { transform: translate(0, 0) scale(1); opacity: 0.85; }
+  to   { transform: translate(7vw, 5vh) scale(1.18); opacity: 0.55; }
+}
+@keyframes sig-aurora-b {
+  from { transform: translate(0, 0) scale(1.1); opacity: 0.6; }
+  to   { transform: translate(-6vw, 7vh) scale(0.92); opacity: 0.9; }
+}
+
+/* 标题关键词流光 —— accent → 前景色 渐变缓慢扫过 */
+.sig-shine {
+  background: linear-gradient(
+    100deg,
+    var(--sig-accent) 20%,
+    color-mix(in srgb, var(--sig-fg) 88%, var(--sig-accent)) 40%,
+    var(--sig-accent) 60%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+  animation: sig-shine-sweep 5.5s linear infinite;
+}
+@keyframes sig-shine-sweep {
+  from { background-position: 200% 0; }
+  to   { background-position: -20% 0; }
+}
+
+/* Hero 右侧 spec 面板 —— 细边框玻璃背板 + hover 微抬 */
+.sig-spec-panel {
+  position: relative;
+  border: 1px solid var(--sig-line);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--sig-surface) 62%, transparent);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  padding: 1.35rem 1.35rem 0.35rem;
+  transition: transform 0.3s var(--sig-ease-out, cubic-bezier(0.16,1,0.3,1)),
+              border-color 0.25s, box-shadow 0.3s;
+}
+.sig-spec-panel:hover {
+  transform: translateY(-3px);
+  border-color: var(--sig-line-2);
+  box-shadow: 10px 10px 0 color-mix(in srgb, var(--sig-accent) 14%, transparent);
+}
+
+/* 顶部滚动进度条 */
+.sig-progress {
+  position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 60;
+  pointer-events: none;
+}
+.sig-progress > span {
+  display: block; height: 100%; width: 100%;
+  background: var(--sig-accent);
+  transform-origin: 0 50%; transform: scaleX(0);
+  transition: transform 0.1s linear;
+}
+
+/* 结尾 CTA —— 底部收拢光晕，把视线压向按钮 */
+.sig-final { position: relative; }
+.sig-final::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background:
+    radial-gradient(ellipse 62% 46% at 50% 88%,
+      color-mix(in srgb, var(--sig-accent) 15%, transparent),
+      transparent 70%);
+  filter: blur(8px);
+}
+
+/* 减动效：氛围层静止/隐藏，保留可读性与静态层次 */
+@media (prefers-reduced-motion: reduce) {
+  .sig-aurora::before, .sig-aurora::after { animation: none !important; }
+  .sig-shine {
+    animation: none !important;
+    background: none;
+    -webkit-text-fill-color: var(--sig-accent);
+    color: var(--sig-accent);
+  }
+  .sig-progress > span { transition: none !important; }
+}
 
 /* 减动效：reveal 直接可见，信号线全部静态填充，闭环/堆叠停止轮播由 JS 侧处理 */
 @media (prefers-reduced-motion: reduce) {
