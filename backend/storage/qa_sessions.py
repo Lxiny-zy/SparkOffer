@@ -60,6 +60,27 @@ def get_session(session_id: str, user_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def get_message_version(session_id: str, user_id: str) -> int | None:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT message_version FROM qa_sessions WHERE id = ? AND user_id = ?",
+        (session_id, user_id),
+    ).fetchone()
+    return int(row["message_version"] or 0) if row else None
+
+
+def message_version_is_current(
+    session_id: str, user_id: str, expected_message_version: int,
+) -> bool:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT 1 FROM qa_sessions "
+        "WHERE id = ? AND user_id = ? AND message_version = ?",
+        (session_id, user_id, expected_message_version),
+    ).fetchone()
+    return row is not None
+
+
 def update_session_title(session_id: str, user_id: str, title: str) -> bool:
     conn = get_db()
     cur = conn.execute(
@@ -357,18 +378,44 @@ def abandon_ingest_request(
     return cur.rowcount > 0
 
 
-def save_message(session_id: str, user_id: str, role: str, content: str, images: list[str] | None = None):
+def save_message(
+    session_id: str,
+    user_id: str,
+    role: str,
+    content: str,
+    images: list[str] | None = None,
+    *,
+    expected_message_version: int | None = None,
+) -> bool:
     conn = get_db()
     images_json = json.dumps(images) if images else None
-    conn.execute(
-        "INSERT INTO qa_messages (session_id, user_id, role, content, images) VALUES (?, ?, ?, ?, ?)",
-        (session_id, user_id, role, content, images_json),
+    version_clause = "" if expected_message_version is None else " AND message_version = ?"
+    params = [
+        session_id,
+        user_id,
+        role,
+        content,
+        images_json,
+        session_id,
+        user_id,
+    ]
+    if expected_message_version is not None:
+        params.append(expected_message_version)
+    cur = conn.execute(
+        "INSERT INTO qa_messages (session_id, user_id, role, content, images) "
+        "SELECT ?, ?, ?, ?, ? FROM qa_sessions "
+        f"WHERE id = ? AND user_id = ?{version_clause}",
+        params,
     )
+    if cur.rowcount == 0:
+        conn.rollback()
+        return False
     conn.execute(
         "UPDATE qa_sessions SET updated_at = ? WHERE id = ? AND user_id = ?",
         (datetime.now(timezone.utc).isoformat(), session_id, user_id),
     )
     conn.commit()
+    return True
 
 
 def load_messages(session_id: str, user_id: str, limit: int | None = 100) -> list[dict]:
@@ -401,12 +448,34 @@ def load_messages(session_id: str, user_id: str, limit: int | None = 100) -> lis
 
 def clear_messages(session_id: str, user_id: str) -> bool:
     conn = get_db()
-    conn.execute("DELETE FROM qa_messages WHERE session_id = ? AND user_id = ?", (session_id, user_id))
-    conn.commit()
-    return True
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE qa_sessions SET message_version = message_version + 1, "
+            "context_summary = NULL, summary_msg_count = 0, updated_at = ? "
+            "WHERE id = ? AND user_id = ?",
+            (datetime.now(timezone.utc).isoformat(), session_id, user_id),
+        )
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False
+        conn.execute(
+            "DELETE FROM qa_messages WHERE session_id = ? AND user_id = ?",
+            (session_id, user_id),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
 
 
-def delete_last_message_if_assistant(session_id: str, user_id: str) -> bool:
+def delete_last_message_if_assistant(
+    session_id: str,
+    user_id: str,
+    *,
+    expected_message_version: int | None = None,
+) -> bool:
     """Delete the most recent message iff it is an assistant turn.
 
     Used by the regenerate flow to drop a broken/partial/empty AI reply before
@@ -414,9 +483,16 @@ def delete_last_message_if_assistant(session_id: str, user_id: str) -> bool:
     Returns True if a row was deleted.
     """
     conn = get_db()
+    version_clause = "" if expected_message_version is None else " AND s.message_version = ?"
+    params: list = [session_id, user_id]
+    if expected_message_version is not None:
+        params.append(expected_message_version)
     row = conn.execute(
-        "SELECT id, role FROM qa_messages WHERE session_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1",
-        (session_id, user_id),
+        "SELECT m.id, m.role FROM qa_messages AS m "
+        "JOIN qa_sessions AS s ON s.id = m.session_id AND s.user_id = m.user_id "
+        "WHERE m.session_id = ? AND m.user_id = ?"
+        f"{version_clause} ORDER BY m.id DESC LIMIT 1",
+        params,
     ).fetchone()
     if not row or row["role"] != "assistant":
         return False
@@ -445,10 +521,23 @@ def get_context_summary(session_id: str, user_id: str) -> tuple[str, int] | None
     return None
 
 
-def save_context_summary(session_id: str, user_id: str, summary: str, msg_count: int):
+def save_context_summary(
+    session_id: str,
+    user_id: str,
+    summary: str,
+    msg_count: int,
+    *,
+    expected_message_version: int | None = None,
+) -> bool:
     conn = get_db()
-    conn.execute(
-        "UPDATE qa_sessions SET context_summary = ?, summary_msg_count = ? WHERE id = ? AND user_id = ?",
-        (summary, msg_count, session_id, user_id),
+    version_clause = "" if expected_message_version is None else " AND message_version = ?"
+    params: list = [summary, msg_count, session_id, user_id]
+    if expected_message_version is not None:
+        params.append(expected_message_version)
+    cur = conn.execute(
+        "UPDATE qa_sessions SET context_summary = ?, summary_msg_count = ? "
+        f"WHERE id = ? AND user_id = ?{version_clause}",
+        params,
     )
     conn.commit()
+    return cur.rowcount > 0

@@ -6,6 +6,7 @@ interface AuthContextValue {
   token: string | null;
   loading: boolean;
   login: (tokenStr: string, userData: User) => void;
+  replaceToken: (tokenStr: string) => void;
   logout: () => void;
   updateUser: (userData: User) => void;
 }
@@ -114,14 +115,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(userData);
   }, []);
 
+  const replaceToken = useCallback((tokenStr: string) => {
+    try { localStorage.setItem("token", tokenStr); } catch { /* storage unavailable */ }
+    setToken(tokenStr);
+  }, []);
+
   const updateUser = useCallback((userData: User) => {
     try { localStorage.setItem("user", JSON.stringify(userData)); } catch { /* storage unavailable */ }
     setUser(userData);
   }, []);
 
   const value = useMemo(
-    () => ({ user, token, loading, login, logout, updateUser }),
-    [user, token, loading, login, logout, updateUser]
+    () => ({ user, token, loading, login, replaceToken, logout, updateUser }),
+    [user, token, loading, login, replaceToken, logout, updateUser]
   );
 
   return (

@@ -24,7 +24,7 @@ from backend.storage.sessions import (
     try_claim_session_evaluation, release_session_evaluation_claim,
     try_claim_resume_turn, commit_resume_turn, release_resume_turn_claim,
     renew_resume_turn_claim, RESUME_TURN_CLAIM_TTL_SECONDS,
-    new_session_id,
+    new_session_id, delete_session, mark_resume_session_initialized,
 )
 from backend.graphs.resume_interview import compile_resume_interview
 from backend.graphs.topic_drill import generate_drill_questions, stream_evaluate_drill_answers
@@ -531,17 +531,22 @@ def _get_resume_graph(session_id: str, user_id: str) -> dict | None:
     on the next ``invoke``/``get_state``. Returns None when no such session
     exists (caller raises 404).
     """
-    if session_id in graphs:
-        return graphs[session_id]
+    cached = graphs.get(session_id)
+    if cached is not None:
+        return cached
     # Prefer the live_sessions meta (type-scoped so a drill/JD row can never be
     # mistaken for a resume one). Fall back to the durable `sessions` row when the
     # live row has been TTL-cleaned (>24h) or was written by a different worker:
     # the graph STATE lives in the checkpoint DB (never TTL'd), so a recompiled
     # graph replays it. Recovery must not hinge on the 24h-expiring live row.
     meta = load_live_session(session_id, user_id, "resume")
+    if meta and meta.get("initialization_status") == "pending":
+        return None
     if not meta:
         row = get_session(session_id, user_id=user_id)
         if not row or row.get("mode") != InterviewMode.RESUME.value:
+            return None
+        if (row.get("meta") or {}).get("initialization_status") == "pending":
             return None
         meta = {
             "mode": row.get("mode"),
@@ -557,6 +562,72 @@ def _get_resume_graph(session_id: str, user_id: str) -> dict | None:
     }
     graphs[session_id] = entry
     return entry
+
+
+def _initialize_resume_interview(
+    graph,
+    initial_state: dict,
+    config: dict,
+    session_id: str,
+    mode: str,
+    topic: str | None,
+    user_id: str,
+) -> str:
+    session_created = False
+    try:
+        create_session(
+            session_id,
+            mode,
+            topic,
+            meta={"initialization_status": "pending"},
+            user_id=user_id,
+        )
+        session_created = True
+        save_live_session(session_id, "resume", user_id, {
+            "mode": mode,
+            "topic": topic,
+            "user_id": user_id,
+            "initialization_status": "pending",
+        })
+        result = graph.invoke(initial_state, config)
+        ai_message = ""
+        for msg in reversed(result["messages"]):
+            if isinstance(msg, AIMessage):
+                ai_message = msg.content
+                break
+        if not append_message(session_id, "assistant", ai_message, user_id=user_id):
+            raise RuntimeError("Resume session disappeared during initialization")
+        if not mark_resume_session_initialized(session_id, user_id=user_id):
+            raise RuntimeError("Resume session initialization state was lost")
+        entry = {
+            "graph": graph,
+            "config": config,
+            "mode": InterviewMode(mode),
+            "topic": topic,
+            "user_id": user_id,
+        }
+        graphs[session_id] = entry
+        save_live_session(session_id, "resume", user_id, {
+            "mode": mode,
+            "topic": topic,
+            "user_id": user_id,
+            "initialization_status": "ready",
+        })
+        return ai_message
+    except Exception:
+        graphs.pop(session_id, None)
+        if session_created:
+            delete_session(session_id, user_id=user_id)
+        try:
+            from backend.graphs.checkpointer import delete_thread_checkpoints
+            delete_thread_checkpoints(session_id)
+        except Exception as cleanup_error:
+            logger.error(
+                "Could not clean failed resume checkpoint %s: %s",
+                session_id,
+                cleanup_error,
+            )
+        raise
 
 
 def _invoke_resume_turn(graph, config: dict, message: str):
@@ -767,39 +838,25 @@ async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get
 
         async def _gen():
             try:
-                result = None
+                ai_message = None
                 async for kind, value in stream_blocking_sse(
-                    graph.invoke, initial_state, config,
+                    _initialize_resume_interview,
+                    graph,
+                    initial_state,
+                    config,
+                    session_id,
+                    req.mode.value,
+                    req.topic,
+                    user_id,
                     progress_msg="正在准备面试",
                 ):
                     if kind == "sse":
                         yield value
                     else:
-                        result = value
+                        ai_message = value
 
-                if result is None:
-                    # graph.invoke failed — stream_blocking_sse already yielded
-                    # the error event; don't mask it with a NameError below.
+                if ai_message is None:
                     return
-
-                ai_message = ""
-                for msg in reversed(result["messages"]):
-                    if isinstance(msg, AIMessage):
-                        ai_message = msg.content
-                        break
-
-                create_session(session_id, req.mode.value, req.topic, user_id=user_id)
-                append_message(session_id, "assistant", ai_message, user_id=user_id)
-                graphs[session_id] = {
-                    "graph": graph, "config": config,
-                    "mode": req.mode, "topic": req.topic,
-                    "user_id": user_id,
-                }
-                # Persist session meta (NOT the graph object) so a restart /
-                # different worker can recompile and replay the checkpoint.
-                save_live_session(session_id, "resume", user_id, {
-                    "mode": req.mode.value, "topic": req.topic, "user_id": user_id,
-                })
                 yield sse_event({"type": "complete", "data": {
                     "session_id": session_id, "mode": req.mode.value,
                     "topic": req.topic, "message": ai_message,

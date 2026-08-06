@@ -561,6 +561,7 @@ def test_external_task_cancellation_discards_durable_live_job(monkeypatch):
 
 def test_start_lease_heartbeat_fails_before_exception_budget_expires(monkeypatch):
     calls = 0
+    now = 0.0
 
     def unavailable_sqlite(*args, **kwargs):
         nonlocal calls
@@ -576,6 +577,16 @@ def test_start_lease_heartbeat_fails_before_exception_budget_expires(monkeypatch
     monkeypatch.setattr(router, "_START_LEASE_DURATION_SECONDS", 0.04)
     monkeypatch.setattr(router, "_START_LEASE_RENEWAL_GUARD_SECONDS", 0.015)
     monkeypatch.setattr(router, "_START_LEASE_MIN_RETRY_SECONDS", 0.001)
+
+    def fake_time():
+        return now
+
+    async def advance_time(delay):
+        nonlocal now
+        now += delay
+
+    monkeypatch.setattr(router, "_start_lease_time", fake_time)
+    monkeypatch.setattr(router, "_start_lease_sleep", advance_time)
 
     with pytest.raises(rag_eval_store.RagEvalLeaseLostError):
         asyncio.run(router._renew_start_lease((

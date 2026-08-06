@@ -14,6 +14,7 @@ from backend.storage import qa_sessions as store
 
 router = APIRouter(prefix="/api/qa-arena")
 logger = logging.getLogger("uvicorn")
+MAX_IMAGE_DATA_URL_CHARS = 8 * 1024 * 1024 + 64
 
 # Keep a strong reference when the HTTP waiter is cancelled. The actual
 # ingestion must finish and persist its idempotency result because its disk
@@ -40,7 +41,9 @@ class QASessionRenameRequest(BaseModel):
 
 class QAChatRequest(BaseModel):
     message: str = Field(default="", max_length=100_000)
-    images: list[str] = Field(default_factory=list, max_length=4)
+    images: list[
+        Annotated[str, Field(max_length=MAX_IMAGE_DATA_URL_CHARS)]
+    ] = Field(default_factory=list, max_length=4)
 
 
 class QAKnowledgeIngestRequest(BaseModel):
@@ -105,7 +108,8 @@ def get_messages(
 
 @router.delete("/sessions/{session_id}/messages")
 def clear_messages(session_id: str, user_id: str = Depends(get_current_user)):
-    store.clear_messages(session_id, user_id)
+    if not store.clear_messages(session_id, user_id):
+        raise HTTPException(404, "会话不存在")
     from backend.qa_arena import delete_session_images
     delete_session_images(session_id, user_id)
     return {"ok": True}
@@ -344,6 +348,8 @@ async def ingest_knowledge(
 
 @router.get("/sessions/{session_id}/summary/download")
 def download_summary(session_id: str, user_id: str = Depends(get_current_user)):
+    if not store.get_session(session_id, user_id):
+        raise HTTPException(404, "会话不存在")
     from backend.qa_arena import get_summary_file
     result = get_summary_file(session_id, user_id)
     if not result:

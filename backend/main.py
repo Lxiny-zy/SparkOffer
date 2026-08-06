@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
+from backend.utils.request_limits import RequestBodyLimitMiddleware
 from backend.routers import (
     auth, settings_router, resume, interview,
     profile, knowledge, job_prep, algorithm, favorites,
@@ -89,6 +90,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SparkOffer", version="0.3.0", lifespan=lifespan)
 
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_bytes=settings.max_request_body_bytes,
+)
 _cors_origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,

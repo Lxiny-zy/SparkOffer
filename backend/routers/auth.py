@@ -128,7 +128,12 @@ def login(req: LoginRequest, request: Request):
     rate_limit.release_record(acct_key, reservation_token)
     rate_limit.release_record(ip_key, reservation_token)
     log_event("login_success", user_id=user["id"], email=user["email"], ip=ip)
-    token = create_token(user["id"])
+    token_version = user.pop("_token_version", None)
+    token = (
+        create_token(user["id"])
+        if token_version is None
+        else create_token(user["id"], int(token_version))
+    )
     return {"token": token, "user": user}
 
 
@@ -151,12 +156,14 @@ def update_profile(req: UpdateProfileRequest, request: Request, user_id: str = D
 @router.put("/auth/password")
 def change_password(req: ChangePasswordRequest, request: Request, user_id: str = Depends(get_current_user)):
     validate_new_password(req.new_password)
-    ok = change_user_password(user_id, req.current_password, req.new_password)
-    if not ok:
+    token_version = change_user_password(
+        user_id, req.current_password, req.new_password,
+    )
+    if token_version is None:
         log_event("password_change_failed", user_id=user_id, ip=client_ip(request))
         raise HTTPException(400, "Current password is incorrect")
     log_event("password_changed", user_id=user_id, ip=client_ip(request))
-    return {"ok": True}
+    return {"ok": True, "token": create_token(user_id, token_version)}
 
 
 @router.get("/")

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
@@ -110,6 +110,8 @@ export default function KnowledgeTraining() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [revealedAnswers, setRevealedAnswers] = useState<Record<string, boolean>>({});
   const [familiarity, setFamiliarity] = useState<Record<string, Familiarity>>({});
+  const reviewRequests = useRef(new Set<string>());
+  const [reviewingCardId, setReviewingCardId] = useState<string | null>(null);
   const [loadingTopics, setLoadingTopics] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState("");
@@ -299,6 +301,9 @@ export default function KnowledgeTraining() {
   const setCardFamiliarity = async (value: Familiarity) => {
     if (!currentCard) return;
     const cardId = currentCard.id;
+    if (reviewRequests.current.has(cardId)) return;
+    reviewRequests.current.add(cardId);
+    setReviewingCardId(cardId);
     const prevValue = familiarity[cardId];
     // Optimistic mark; the server applies the SM-2 schedule update.
     // Mirror the mark onto the card object too, so it survives the
@@ -320,6 +325,9 @@ export default function KnowledgeTraining() {
         prev.map((c) => (c.id === cardId ? { ...c, familiarity: prevValue ?? "" } : c)),
       );
       toast.error(e?.message || "保存熟悉度失败");
+    } finally {
+      reviewRequests.current.delete(cardId);
+      setReviewingCardId((current) => current === cardId ? null : current);
     }
   };
 
@@ -620,13 +628,13 @@ export default function KnowledgeTraining() {
                     </Button>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <Button variant={familiarity[currentCard.id] === "known" ? "default" : "outline"} size="sm" onClick={() => setCardFamiliarity("known")}>
+                    <Button variant={familiarity[currentCard.id] === "known" ? "default" : "outline"} size="sm" onClick={() => setCardFamiliarity("known")} disabled={reviewingCardId === currentCard.id}>
                       <CheckCircle2 /> 已掌握
                     </Button>
-                    <Button variant={familiarity[currentCard.id] === "uncertain" ? "default" : "outline"} size="sm" onClick={() => setCardFamiliarity("uncertain")}>
+                    <Button variant={familiarity[currentCard.id] === "uncertain" ? "default" : "outline"} size="sm" onClick={() => setCardFamiliarity("uncertain")} disabled={reviewingCardId === currentCard.id}>
                       <HelpCircle /> 模糊
                     </Button>
-                    <Button variant={familiarity[currentCard.id] === "unknown" ? "default" : "outline"} size="sm" onClick={() => setCardFamiliarity("unknown")}>
+                    <Button variant={familiarity[currentCard.id] === "unknown" ? "default" : "outline"} size="sm" onClick={() => setCardFamiliarity("unknown")} disabled={reviewingCardId === currentCard.id}>
                       <XCircle /> 不会
                     </Button>
                   </div>

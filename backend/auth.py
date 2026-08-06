@@ -499,13 +499,19 @@ def authenticate_user(email: str, password: str) -> dict | None:
     if not row or not _verify_password(password, row["password"]):
         return None
     _init_user_knowledge(row["id"])
-    return {"id": row["id"], "email": row["email"], "name": row["name"], "is_owner": is_owner(row["id"])}
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "name": row["name"],
+        "is_owner": is_owner(row["id"]),
+        "_token_version": int(row["token_version"] or 0),
+    }
 
 
-def create_token(user_id: str) -> str:
+def create_token(user_id: str, token_version: int = 0) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS)
     return jwt.encode(
-        {"sub": user_id, "exp": expire},
+        {"sub": user_id, "ver": token_version, "exp": expire},
         settings.jwt_secret,
         algorithm=JWT_ALGORITHM,
     )
@@ -529,7 +535,20 @@ def get_current_user(
         if not _USER_ID_PATTERN.match(user_id):
             logger.warning(f"Rejected token with invalid user_id format: {user_id!r}")
             raise HTTPException(401, "Invalid token")
+        token_version = payload.get("ver", 0)
+        if not isinstance(token_version, int) or token_version < 0:
+            raise HTTPException(401, "Invalid token")
         if get_user_by_id(user_id) is None:
+            raise HTTPException(401, "Invalid or expired token")
+        try:
+            row = get_db().execute(
+                "SELECT token_version FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            current_version = int(row["token_version"] or 0) if row else None
+        except sqlite3.OperationalError:
+            # Compatibility for a legacy database opened before startup migration.
+            current_version = 0
+        if current_version != token_version:
             raise HTTPException(401, "Invalid or expired token")
         return user_id
     except JWTError:
@@ -626,13 +645,24 @@ def update_user_profile(user_id: str, name: str = None, email: str = None) -> di
     return get_user_by_id(user_id)
 
 
-def change_user_password(user_id: str, current_password: str, new_password: str) -> bool:
+def change_user_password(
+    user_id: str, current_password: str, new_password: str,
+) -> int | None:
     validate_new_password(new_password)
     conn = get_db()
-    row = conn.execute("SELECT password FROM users WHERE id = ?", (user_id,)).fetchone()
+    row = conn.execute(
+        "SELECT password, token_version FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
     if not row or not _verify_password(current_password, row["password"]):
-        return False
+        return None
     hashed = _hash_password(new_password)
-    conn.execute("UPDATE users SET password = ? WHERE id = ?", (hashed, user_id))
+    cur = conn.execute(
+        "UPDATE users SET password = ?, token_version = token_version + 1 "
+        "WHERE id = ? AND password = ?",
+        (hashed, user_id, row["password"]),
+    )
+    if cur.rowcount == 0:
+        conn.rollback()
+        return None
     conn.commit()
-    return True
+    return int(row["token_version"] or 0) + 1

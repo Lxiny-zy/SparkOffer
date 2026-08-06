@@ -45,12 +45,19 @@ _START_LEASE_MIN_RETRY_SECONDS = 0.01
 _BENCHMARK_CANCEL_WAIT_SECONDS = 5
 
 
+def _start_lease_time() -> float:
+    return asyncio.get_running_loop().time()
+
+
+async def _start_lease_sleep(delay: float) -> None:
+    await asyncio.sleep(delay)
+
+
 async def _renew_start_lease(claim: tuple[str, str, str, str, str]) -> None:
     user_id, idempotency_key, request_hash, job_id, claim_token = claim
-    loop = asyncio.get_running_loop()
-    confirmed_until = loop.time() + _START_LEASE_DURATION_SECONDS
+    confirmed_until = _start_lease_time() + _START_LEASE_DURATION_SECONDS
     while True:
-        remaining = confirmed_until - loop.time()
+        remaining = confirmed_until - _start_lease_time()
         if remaining <= _START_LEASE_RENEWAL_GUARD_SECONDS:
             raise rag_eval_store.RagEvalLeaseLostError(
                 f"Could not confirm RAG eval lease before expiry for {job_id}"
@@ -59,7 +66,7 @@ async def _renew_start_lease(claim: tuple[str, str, str, str, str]) -> None:
             max(_START_LEASE_MIN_RETRY_SECONDS, _START_LEASE_HEARTBEAT_SECONDS),
             max(_START_LEASE_MIN_RETRY_SECONDS, remaining - _START_LEASE_RENEWAL_GUARD_SECONDS),
         )
-        await asyncio.sleep(retry_in)
+        await _start_lease_sleep(retry_in)
         try:
             renewed = await asyncio.to_thread(
                 rag_eval_store.renew_rag_eval_start_request,
@@ -77,7 +84,7 @@ async def _renew_start_lease(claim: tuple[str, str, str, str, str]) -> None:
                 exc,
             )
             if (
-                loop.time()
+                _start_lease_time()
                 >= confirmed_until - _START_LEASE_RENEWAL_GUARD_SECONDS
             ):
                 raise rag_eval_store.RagEvalLeaseLostError(
@@ -88,7 +95,7 @@ async def _renew_start_lease(claim: tuple[str, str, str, str, str]) -> None:
             raise rag_eval_store.RagEvalLeaseLostError(
                 f"RAG eval lease was lost for {job_id}"
             )
-        confirmed_until = loop.time() + _START_LEASE_DURATION_SECONDS
+        confirmed_until = _start_lease_time() + _START_LEASE_DURATION_SECONDS
 
 
 def _discard_stale_live_job(
@@ -96,7 +103,7 @@ def _discard_stale_live_job(
     reason: str,
 ) -> None:
     job_id = claim[3]
-    job = rag_eval_jobs[job_id] if job_id in rag_eval_jobs else None
+    job = rag_eval_jobs.get(job_id)
     if job is None or job.get("_durable_claim") != claim:
         return
     job.update({
@@ -419,7 +426,7 @@ async def _resolved_durable_start_response(
     fallback_estimated_llm_calls: int,
 ) -> dict | None:
     job_id = str(mapping["job_id"])
-    live_job = rag_eval_jobs[job_id] if job_id in rag_eval_jobs else None
+    live_job = rag_eval_jobs.get(job_id)
     live_claim = live_job.get("_durable_claim") if live_job else None
     if (
         live_job
@@ -595,7 +602,7 @@ async def start_rag_eval(
     execution_request = _normalized_start_request(req, n, k, judge_mode)
     key = _inflight_key(user_id, execution_request)
     existing = _inflight.get(key)
-    existing_job = rag_eval_jobs[existing] if existing and existing in rag_eval_jobs else None
+    existing_job = rag_eval_jobs.get(existing) if existing else None
     if existing_job and existing_job.get("status") not in ("pending", "running"):
         existing_job = None
 
@@ -742,7 +749,7 @@ async def start_rag_eval(
 
 @router.get("/rag-eval/status/{job_id}")
 async def rag_eval_status(job_id: str, user_id: str = Depends(get_current_user)):
-    live_job = rag_eval_jobs[job_id] if job_id in rag_eval_jobs else None
+    live_job = rag_eval_jobs.get(job_id)
     live_claim = live_job.get("_durable_claim") if live_job else None
     if (
         live_job is not None
@@ -765,7 +772,8 @@ async def rag_eval_status(job_id: str, user_id: str = Depends(get_current_user))
                 live_claim,
                 "RAG eval live job no longer owns an active lease",
             )
-    if job_id not in rag_eval_jobs:
+            live_job = None
+    if live_job is None:
         # Completed runs survive a process/container restart in SQLite. Rebuild
         # a terminal status view so a client that was polling can finish cleanly.
         from backend.storage.rag_eval_store import get_rag_eval_run_by_job
@@ -865,10 +873,9 @@ async def rag_eval_status(job_id: str, user_id: str = Depends(get_current_user))
             "started_at": None,
             "updated_at": None,
         }
-    job = rag_eval_jobs[job_id]
-    if job.get("user_id") != user_id:
+    if live_job.get("user_id") != user_id:
         raise HTTPException(404, "Job not found")
-    return _public_job(job)
+    return _public_job(live_job)
 
 
 @router.get("/rag-eval/runs")

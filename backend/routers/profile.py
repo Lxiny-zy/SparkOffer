@@ -20,6 +20,7 @@ from backend.storage.sessions import (
     get_session, list_sessions, list_sessions_by_topic,
     delete_session, list_distinct_topics, save_drill_progress,
 )
+from backend.storage.knowledge_cards import delete_topic_cards
 from backend.auth import get_current_user
 from backend.models import DrillProgressRequest
 
@@ -111,6 +112,7 @@ def delete_topic(key: str, user_id: str = Depends(get_current_user)):
                 # Drop persisted state while the source can still be restored
                 # if invalidation or topics.json persistence fails.
                 invalidate_topic_index(key, user_id, strict=True)
+                delete_topic_cards(user_id=user_id, topic=key)
                 del topics[key]
         except Exception:
             if (

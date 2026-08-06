@@ -61,6 +61,18 @@ class TTLDict:
                 return False
             return True
 
+    def get(self, key: str, default=None):
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return default
+            expire, value = entry
+            if time.time() > expire:
+                del self._data[key]
+                return default
+            self._data[key] = (time.time() + self._default_ttl, value)
+            return value
+
     def pop(self, key: str, default=None):
         with self._lock:
             entry = self._data.pop(key, None)
@@ -107,8 +119,9 @@ def save_live(store: dict, session_id: str, session_type: str, user_id: str, dat
 
 
 def get_live(store: dict, session_id: str, session_type: str, user_id: str):
-    if session_id in store:
-        return store[session_id]
+    cached = store.get(session_id)
+    if cached is not None:
+        return cached
     # Scope the persistent fallback to this store's type: the live_sessions table
     # is shared across modes, so a type-blind read would return another mode's row
     # (e.g. a resume row surfacing in the drill branch → KeyError on 'questions').

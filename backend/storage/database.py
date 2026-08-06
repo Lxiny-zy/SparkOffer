@@ -54,9 +54,16 @@ def init_all_tables():
             email      TEXT UNIQUE NOT NULL,
             password   TEXT NOT NULL,
             name       TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            token_version INTEGER NOT NULL DEFAULT 0
         )
     """)
+    try:
+        conn.execute("SELECT token_version FROM users LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"
+        )
 
     # ── sessions ──
     conn.execute("""
@@ -189,7 +196,8 @@ def init_all_tables():
             user_id    TEXT NOT NULL,
             title      TEXT DEFAULT '新对话',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            message_version INTEGER NOT NULL DEFAULT 0
         )
     """)
 
@@ -199,6 +207,13 @@ def init_all_tables():
     except Exception:
         conn.execute("ALTER TABLE qa_sessions ADD COLUMN context_summary TEXT")
         conn.execute("ALTER TABLE qa_sessions ADD COLUMN summary_msg_count INTEGER DEFAULT 0")
+
+    try:
+        conn.execute("SELECT message_version FROM qa_sessions LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute(
+            "ALTER TABLE qa_sessions ADD COLUMN message_version INTEGER NOT NULL DEFAULT 0"
+        )
 
     # ── qa_messages ──
     conn.execute("""

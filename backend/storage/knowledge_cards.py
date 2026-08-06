@@ -113,27 +113,35 @@ def record_review(*, user_id: str, card_id: str, familiarity: str) -> dict | Non
     if familiarity not in FAMILIARITY_SCORE:
         raise ValueError(f"unknown familiarity: {familiarity}")
     conn = get_db()
-    row = conn.execute(
-        "SELECT * FROM knowledge_cards WHERE user_id = ? AND id = ?", (user_id, card_id)
-    ).fetchone()
-    if row is None:
-        return None
-    sr_state = json.loads(row["sr_state"] or "{}")
-    new_sr = sm2_update(sr_state, FAMILIARITY_SCORE[familiarity])
-    conn.execute(
-        "UPDATE knowledge_cards SET familiarity = ?, sr_state = ?, next_review = ?, "
-        "review_count = review_count + 1, last_reviewed_at = CURRENT_TIMESTAMP, "
-        "updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND id = ?",
-        (
-            familiarity, json.dumps(new_sr, ensure_ascii=False),
-            new_sr.get("next_review"), user_id, card_id,
-        ),
-    )
-    conn.commit()
-    updated = conn.execute(
-        "SELECT * FROM knowledge_cards WHERE user_id = ? AND id = ?", (user_id, card_id)
-    ).fetchone()
-    return _row_to_dict(updated)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM knowledge_cards WHERE user_id = ? AND id = ?",
+            (user_id, card_id),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        sr_state = json.loads(row["sr_state"] or "{}")
+        new_sr = sm2_update(sr_state, FAMILIARITY_SCORE[familiarity])
+        conn.execute(
+            "UPDATE knowledge_cards SET familiarity = ?, sr_state = ?, next_review = ?, "
+            "review_count = review_count + 1, last_reviewed_at = CURRENT_TIMESTAMP, "
+            "updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND id = ?",
+            (
+                familiarity, json.dumps(new_sr, ensure_ascii=False),
+                new_sr.get("next_review"), user_id, card_id,
+            ),
+        )
+        updated = conn.execute(
+            "SELECT * FROM knowledge_cards WHERE user_id = ? AND id = ?",
+            (user_id, card_id),
+        ).fetchone()
+        conn.commit()
+        return _row_to_dict(updated)
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def covered_section_keys(user_id: str, topic: str) -> set[tuple[str, str]]:
@@ -176,3 +184,13 @@ def delete_card(*, user_id: str, card_id: str) -> bool:
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def delete_topic_cards(*, user_id: str, topic: str) -> int:
+    conn = get_db()
+    cur = conn.execute(
+        "DELETE FROM knowledge_cards WHERE user_id = ? AND topic = ?",
+        (user_id, topic),
+    )
+    conn.commit()
+    return max(cur.rowcount, 0)

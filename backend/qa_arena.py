@@ -16,6 +16,15 @@ from backend.config import settings
 from backend.llm_provider import get_langchain_llm
 from backend.storage import qa_sessions as store
 from backend.context_assembler import resolve_input_budget, count_tokens, pack_messages
+from backend.prompts.qa_arena import (
+    QA_ARENA_SYSTEM,
+    SUMMARY_SYSTEM,
+    SUMMARY_USER_TEMPLATE,
+    MAP_PROMPT,
+    REDUCE_PROMPT,
+    COMPRESS_PROMPT,
+    INCREMENTAL_COMPRESS_PROMPT,
+)
 from backend.utils.sse_helpers import chunk_text as _chunk_text, chunk_reasoning as _chunk_reasoning, iter_chunks_with_idle
 
 logger = logging.getLogger("uvicorn")
@@ -35,17 +44,6 @@ def _get_turn_lock(user_id: str, session_id: str) -> asyncio.Lock:
             _turn_locks[key] = lock
         return lock
 
-from backend.prompts.qa_arena import (  # prompt 文案已集中到 prompts/
-    QA_ARENA_SYSTEM,
-    SUMMARY_SYSTEM,
-    SUMMARY_USER_TEMPLATE,
-    MAP_PROMPT,
-    REDUCE_PROMPT,
-    COMPRESS_PROMPT,
-    INCREMENTAL_COMPRESS_PROMPT,
-)
-
-
 # ── Multimodal image attachments ──
 # Uploaded images are saved as files under the per-user data dir (the DB stores
 # only filenames, kept lean) and re-encoded to base64 data URLs when fed to the
@@ -61,12 +59,21 @@ _MIME_BY_EXT = {
 }
 MAX_IMAGE_BYTES = 6 * 1024 * 1024   # 6MB per image
 MAX_IMAGES_PER_MESSAGE = 4
+MAX_IMAGE_BASE64_CHARS = 4 * ((MAX_IMAGE_BYTES + 2) // 3)
 _DATA_URL_RE = re.compile(r"^data:(image/[\w.+-]+);base64,(.+)$", re.DOTALL)
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
+def _session_upload_dir(user_id: str, session_id: str) -> Path:
+    root = (settings.user_data_dir(user_id) / "qa_uploads").resolve()
+    candidate = (root / session_id).resolve()
+    if candidate == root or root not in candidate.parents:
+        raise ValueError("Invalid QA session upload path")
+    return candidate
+
+
 def _qa_uploads_dir(user_id: str, session_id: str) -> Path:
-    d = settings.user_data_dir(user_id) / "qa_uploads" / session_id
+    d = _session_upload_dir(user_id, session_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -75,9 +82,27 @@ def delete_session_images(session_id: str, user_id: str) -> None:
     """Remove all uploaded images for a session — called when the session or its
     messages are deleted, so image files don't orphan on disk."""
     import shutil
-    d = settings.user_data_dir(user_id) / "qa_uploads" / session_id
+    try:
+        d = _session_upload_dir(user_id, session_id)
+    except ValueError:
+        logger.warning("Refusing to delete unsafe QA upload path for session %r", session_id)
+        return
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
+
+
+def delete_uploaded_images(session_id: str, user_id: str, names: list[str]) -> None:
+    try:
+        directory = _session_upload_dir(user_id, session_id)
+    except ValueError:
+        return
+    for name in names:
+        if not _SAFE_NAME_RE.fullmatch(name):
+            continue
+        try:
+            (directory / name).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Failed to remove orphaned QA image %s: %s", name, exc)
 
 
 def save_uploaded_images(session_id: str, user_id: str, data_urls: list[str] | None) -> list[str]:
@@ -96,8 +121,11 @@ def save_uploaded_images(session_id: str, user_id: str, data_urls: list[str] | N
         ext = _IMAGE_EXT_BY_MIME.get(m.group(1).lower())
         if not ext:
             continue
+        encoded = m.group(2)
+        if len(encoded) > MAX_IMAGE_BASE64_CHARS:
+            continue
         try:
-            raw = base64.b64decode(m.group(2), validate=True)
+            raw = base64.b64decode(encoded, validate=True)
         except Exception:
             continue
         if not raw or len(raw) > MAX_IMAGE_BYTES:
@@ -117,7 +145,10 @@ def get_image_path(session_id: str, user_id: str, name: str) -> Path | None:
     unsafe (path-traversal guard) or the file is missing."""
     if not name or not _SAFE_NAME_RE.match(name):
         return None
-    p = settings.user_data_dir(user_id) / "qa_uploads" / session_id / name
+    try:
+        p = _session_upload_dir(user_id, session_id) / name
+    except ValueError:
+        return None
     return p if p.exists() else None
 
 
@@ -250,6 +281,7 @@ _DIAG_CHUNKS = {"n": 0, "limit": 12}
 
 async def _get_or_create_summary(
     session_id: str, user_id: str, history: list[dict], total_count: int,
+    message_version: int,
 ) -> tuple[str, int]:
     """Return ``(rolling_summary, covered)`` where ``covered`` is how many of the
     OLDEST messages are folded into the summary.
@@ -299,7 +331,13 @@ async def _get_or_create_summary(
         # Keep the prior summary if we have one; else a raw excerpt of the new turns.
         summary = prev_summary or conversation[:300]
 
-    store.save_context_summary(session_id, user_id, summary, target_cover)
+    store.save_context_summary(
+        session_id,
+        user_id,
+        summary,
+        target_cover,
+        expected_message_version=message_version,
+    )
     return summary, target_cover
 
 
@@ -311,6 +349,8 @@ def _sse(payload: dict) -> str:
 async def _stream_chat_answer(
     session_id: str, user_id: str, history: list[dict], prompt: str,
     prompt_images: list[str] | None = None,
+    *,
+    message_version: int,
 ) -> AsyncGenerator[str, None]:
     """Core QA streaming, shared by first-send and regenerate.
 
@@ -342,7 +382,9 @@ async def _stream_chat_answer(
     # part the summary already covers (not a fixed last-N), so the middle is never
     # lost between the summary and the recent window.
     if len(history) > COMPRESSION_THRESHOLD:
-        summary, covered = await _get_or_create_summary(session_id, user_id, history, len(history))
+        summary, covered = await _get_or_create_summary(
+            session_id, user_id, history, len(history), message_version,
+        )
         raw_tail = history[covered:]
         summary_block = (
             f"## 之前的对话摘要\n{summary}\n\n（以下是最近的对话记录）" if summary else ""
@@ -449,7 +491,19 @@ async def _stream_chat_answer(
 
     # Persist whatever we got (full or partial) so a reload shows it and regenerate can
     # cleanly replace it.
-    store.save_message(session_id, user_id, "assistant", content[:MAX_RESPONSE_STORE_LENGTH])
+    persisted = store.save_message(
+        session_id,
+        user_id,
+        "assistant",
+        content[:MAX_RESPONSE_STORE_LENGTH],
+        expected_message_version=message_version,
+    )
+    if not persisted:
+        yield _sse({
+            "type": "error",
+            "message": "会话已被清空或删除，当前回答未保存",
+        })
+        return
 
     if stream_error:
         yield _sse({"type": "error", "message": "回复被中断，可能不完整，请点击重新生成"})
@@ -481,9 +535,23 @@ async def _stream_qa_chat_unlocked(
     """
     # Full history: the rolling-summary covered cursor indexes from message 0, and
     # the compression + token-budget layers below already bound what reaches the LLM.
+    message_version = store.get_message_version(session_id, user_id)
+    if message_version is None:
+        yield _sse({"type": "error", "message": "会话不存在"})
+        return
     history = store.load_messages(session_id, user_id, limit=None)
     image_names = save_uploaded_images(session_id, user_id, images)
-    store.save_message(session_id, user_id, "user", message, images=image_names)
+    if not store.save_message(
+        session_id,
+        user_id,
+        "user",
+        message,
+        images=image_names,
+        expected_message_version=message_version,
+    ):
+        delete_uploaded_images(session_id, user_id, image_names)
+        yield _sse({"type": "error", "message": "会话已被清空或删除"})
+        return
 
     # Auto-title on first user message
     if not history:
@@ -492,7 +560,14 @@ async def _stream_qa_chat_unlocked(
             title += "..."
         store.update_session_title(session_id, user_id, title)
 
-    async for event in _stream_chat_answer(session_id, user_id, history, message, image_names):
+    async for event in _stream_chat_answer(
+        session_id,
+        user_id,
+        history,
+        message,
+        image_names,
+        message_version=message_version,
+    ):
         yield event
 
 
@@ -517,15 +592,33 @@ async def _stream_qa_regenerate_unlocked(
     ``stream_qa_chat`` so the regenerated answer sees the same history — including any
     images attached to that last user turn.
     """
-    store.delete_last_message_if_assistant(session_id, user_id)
+    message_version = store.get_message_version(session_id, user_id)
+    if message_version is None:
+        yield _sse({"type": "error", "message": "会话不存在"})
+        return
+    store.delete_last_message_if_assistant(
+        session_id,
+        user_id,
+        expected_message_version=message_version,
+    )
     messages = store.load_messages(session_id, user_id, limit=None)
+    if not store.message_version_is_current(session_id, user_id, message_version):
+        yield _sse({"type": "error", "message": "会话已被清空或删除"})
+        return
     if not messages or messages[-1]["role"] != "user":
         yield f"data: {json.dumps({'type': 'error', 'message': '没有可重新生成的提问'}, ensure_ascii=False)}\n\n"
         return
     prompt = messages[-1]["content"]
     prompt_images = messages[-1].get("images") or []
     history = messages[:-1]
-    async for event in _stream_chat_answer(session_id, user_id, history, prompt, prompt_images):
+    async for event in _stream_chat_answer(
+        session_id,
+        user_id,
+        history,
+        prompt,
+        prompt_images,
+        message_version=message_version,
+    ):
         yield event
 
 
@@ -597,6 +690,10 @@ async def stream_generate_summary(
     """
     # Full history — the map-reduce path below exists precisely so long sessions
     # are summarized in full instead of being truncated.
+    message_version = store.get_message_version(session_id, user_id)
+    if message_version is None:
+        yield _sse({"type": "error", "message": "会话不存在"})
+        return
     messages = store.load_messages(session_id, user_id, limit=None)
     if len(messages) < 2:
         yield f"data: {json.dumps({'type': 'error', 'message': '对话内容太少，无法生成总结'}, ensure_ascii=False)}\n\n"
@@ -680,6 +777,10 @@ async def stream_generate_summary(
     # card instead of whichever card was written most recently.
     filename = f"{today}-{safe_topic}-{session_id}.md"
 
+    if not store.message_version_is_current(session_id, user_id, message_version):
+        yield _sse({"type": "error", "message": "会话已被清空或删除，总结未保存"})
+        return
+
     notes_dir = settings.base_dir / "data" / "qa_notes" / user_id
     notes_dir.mkdir(parents=True, exist_ok=True)
     (notes_dir / filename).write_text(content, encoding="utf-8")
@@ -703,13 +804,12 @@ def get_summary_file(session_id: str, user_id: str) -> tuple[str, str] | None:
     notes_dir = settings.base_dir / "data" / "qa_notes" / user_id
     if not notes_dir.exists():
         return None
-    # Prefer files tagged with this session id (see stream_generate_summary).
-    # Legacy cards predate the tag, so fall back to the user's most recent file
-    # — but only when the session has NO tagged card, to avoid handing back a
-    # different session's summary.
+    suffix = f"-{session_id}.md"
     files = sorted(
-        notes_dir.glob(f"*-{session_id}.md"), key=lambda f: f.stat().st_mtime, reverse=True
-    ) or sorted(notes_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        (f for f in notes_dir.glob("*.md") if f.name.endswith(suffix)),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
     if not files:
         return None
     f = files[0]

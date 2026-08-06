@@ -67,6 +67,30 @@ def test_delete_topic_restores_source_when_index_invalidation_fails(
     assert list(tmp_path.glob(".topic-delete-*")) == []
 
 
+def test_delete_topic_removes_training_cards(monkeypatch, tmp_path):
+    _patch_knowledge_root(monkeypatch, tmp_path)
+    topic_dir = tmp_path / "python"
+    topic_dir.mkdir()
+    topics = {"python": {"name": "Python", "icon": "", "dir": "python"}}
+    deleted = []
+
+    @contextmanager
+    def transaction(_user_id):
+        yield topics
+
+    monkeypatch.setattr(profile, "topics_transaction", transaction)
+    monkeypatch.setattr(profile, "invalidate_topic_index", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        profile,
+        "delete_topic_cards",
+        lambda **kwargs: deleted.append(kwargs) or 2,
+    )
+
+    assert profile.delete_topic("python", user_id="user-1") == {"ok": True}
+    assert deleted == [{"user_id": "user-1", "topic": "python"}]
+    assert not topic_dir.exists()
+
+
 def test_create_topic_rejects_non_string_fields():
     with pytest.raises(HTTPException) as exc_info:
         profile.create_topic({"name": None}, user_id="user-1")

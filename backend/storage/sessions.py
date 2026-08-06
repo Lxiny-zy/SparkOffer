@@ -738,6 +738,18 @@ def get_session(session_id: str, *, user_id: str) -> dict | None:
     return result
 
 
+def mark_resume_session_initialized(session_id: str, *, user_id: str) -> bool:
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE sessions SET meta = json_set("
+        "COALESCE(NULLIF(meta, ''), '{}'), '$.initialization_status', 'ready'"
+        "), updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ?",
+        (session_id, user_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def list_sessions_by_topic(topic: str, *, user_id: str, limit: int = 50) -> list[dict]:
     """Get all sessions for a topic with reviews and scores."""
     conn = get_db()

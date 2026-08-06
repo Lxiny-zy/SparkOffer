@@ -44,3 +44,35 @@ def get_checkpointer():
         _saver = saver
         logger.info("LangGraph SqliteSaver initialized at %s", settings.checkpoint_db_path)
         return _saver
+
+
+def delete_thread_checkpoints(thread_id: str) -> None:
+    """Delete every LangGraph checkpoint row owned by one session id."""
+    if not thread_id or not settings.checkpoint_db_path.exists():
+        return
+    conn = sqlite3.connect(str(settings.checkpoint_db_path))
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN IMMEDIATE")
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+        for (table_name,) in tables:
+            columns = {
+                row[1]
+                for row in conn.execute(
+                    f'PRAGMA table_info("{table_name.replace(chr(34), chr(34) * 2)}")'
+                )
+            }
+            if "thread_id" not in columns:
+                continue
+            quoted = table_name.replace('"', '""')
+            conn.execute(
+                f'DELETE FROM "{quoted}" WHERE thread_id = ?', (thread_id,)
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()

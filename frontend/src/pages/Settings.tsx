@@ -124,7 +124,7 @@ function SecretInput({ value, onChange, placeholder, id }: SecretInputProps) {
 }
 
 function AccountSection() {
-  const { user, updateUser } = useAuth();
+  const { user, updateUser, replaceToken } = useAuth();
   const [name, setName] = useState(user?.name || "");
   const [email, setEmail] = useState(user?.email || "");
   const [savingProfile, setSavingProfile] = useState(false);
@@ -165,7 +165,8 @@ function AccountSection() {
     }
     setSavingPassword(true);
     try {
-      await changePassword({ current_password: currentPassword, new_password: newPassword });
+      const result = await changePassword({ current_password: currentPassword, new_password: newPassword });
+      replaceToken(result.token);
       toast.success("Password changed successfully");
       setCurrentPassword("");
       setNewPassword("");

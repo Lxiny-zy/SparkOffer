@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     # Comma-separated IP addresses or CIDRs whose forwarding headers may be
     # trusted. Empty means the direct TCP peer is always used.
     trusted_proxy_cidrs: str = ""
+    max_request_body_bytes: int = 40 * 1024 * 1024
 
     # Interview settings
     max_questions_per_phase: int = 5

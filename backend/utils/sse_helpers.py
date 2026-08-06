@@ -17,6 +17,16 @@ PROGRESS_CHAR_INTERVAL = 200
 # content. We forward batched reasoning at least this often so the SSE stream
 # never goes byte-silent (which a proxy/httpx read-timeout would otherwise kill).
 REASONING_KEEPALIVE_SECONDS = 3.0
+_blocking_tasks: set[asyncio.Task] = set()
+
+
+def _observe_blocking_task(task: asyncio.Task) -> None:
+    _blocking_tasks.discard(task)
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("Detached blocking SSE task failed: %s", error)
 
 
 def sse_event(data: dict) -> str:
@@ -300,12 +310,17 @@ async def stream_blocking_sse(
     """
     yield ("sse", sse_event({"type": "progress", "message": f"{progress_msg}..."}))
 
-    task = asyncio.ensure_future(asyncio.to_thread(sync_callable, *args))
+    task = asyncio.create_task(asyncio.to_thread(sync_callable, *args))
+    _blocking_tasks.add(task)
+    task.add_done_callback(_observe_blocking_task)
 
-    while not task.done():
-        await asyncio.sleep(heartbeat_interval)
-        if not task.done():
-            yield ("sse", sse_event({"type": "ping"}))
+    while True:
+        done, _ = await asyncio.wait(
+            {task}, timeout=max(heartbeat_interval, 0.001),
+        )
+        if done:
+            break
+        yield ("sse", sse_event({"type": "ping"}))
 
     if task.exception():
         logger.error("stream_blocking_sse failed: %s", task.exception())

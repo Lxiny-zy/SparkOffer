@@ -398,6 +398,40 @@ def test_deleted_user_token_is_rejected(monkeypatch):
     assert exc_info.value.status_code == 401
 
 
+def test_password_change_revokes_previously_issued_token(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE, password TEXT, "
+        "name TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+        "token_version INTEGER NOT NULL DEFAULT 0)"
+    )
+    user_id = "deadbeef"
+    conn.execute(
+        "INSERT INTO users (id, email, password, name) VALUES (?, ?, ?, '')",
+        (user_id, "user@example.com", auth._hash_password("old-password")),
+    )
+    conn.commit()
+    monkeypatch.setattr(auth, "get_db", lambda: conn)
+    monkeypatch.setattr(auth.settings, "jwt_secret", "test-secret")
+    old_credentials = HTTPAuthorizationCredentials(
+        scheme="Bearer", credentials=auth.create_token(user_id, 0),
+    )
+
+    new_version = auth.change_user_password(
+        user_id, "old-password", "new-password",
+    )
+
+    assert new_version == 1
+    with pytest.raises(HTTPException) as exc_info:
+        auth.get_current_user(old_credentials)
+    assert exc_info.value.status_code == 401
+    new_credentials = HTTPAuthorizationCredentials(
+        scheme="Bearer", credentials=auth.create_token(user_id, new_version),
+    )
+    assert auth.get_current_user(new_credentials) == user_id
+
+
 @pytest.mark.parametrize(
     ("email", "expected_status"),
     [

@@ -52,7 +52,9 @@ export async function updateProfile(data: any): Promise<any> {
   return res.json();
 }
 
-export async function changePassword(data: { current_password: string; new_password: string }): Promise<any> {
+export async function changePassword(
+  data: { current_password: string; new_password: string },
+): Promise<{ ok: boolean; token: string }> {
   const res = await authFetch(`${API_BASE}/auth/password`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
