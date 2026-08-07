@@ -86,6 +86,7 @@ class ChatRequest(BaseModel):
 
 class RetryInterviewReplyRequest(BaseModel):
     message: str = Field(min_length=1, max_length=100_000)
+    force: bool = False
 
     @field_validator("message")
     @classmethod

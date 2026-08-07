@@ -23,7 +23,8 @@ from backend.storage.sessions import (
     abort_session_sync_claim, session_sync_targets,
     mark_session_sync_step, session_sync_steps, session_sync_step_result,
     try_claim_session_evaluation, release_session_evaluation_claim,
-    try_claim_resume_turn, commit_resume_turn, release_resume_turn_claim,
+    try_claim_resume_turn, commit_resume_turn, replace_resume_reply,
+    release_resume_turn_claim,
     renew_resume_turn_claim, RESUME_TURN_CLAIM_TTL_SECONDS,
     new_session_id, delete_session, mark_resume_session_initialized,
 )
@@ -939,6 +940,145 @@ async def _run_resume_retry(entry: dict, session_id: str, message: str,
     )
 
 
+def _regenerate_resume_graph_reply(entry: dict, message: str) -> tuple[dict, str]:
+    """Replace the latest graph reply from the state immediately before it ran."""
+    graph = entry["graph"]
+    config = entry["config"]
+    latest = graph.get_state(config)
+    latest_values = getattr(latest, "values", None)
+    latest_messages = (
+        list(latest_values.get("messages", []))
+        if isinstance(latest_values, dict) else []
+    )
+    if not latest_messages or not isinstance(latest_messages[-1], AIMessage):
+        raise RuntimeError("The latest graph reply is not replaceable")
+    replaced_message_id = getattr(latest_messages[-1], "id", None)
+    if not replaced_message_id:
+        raise RuntimeError("The latest graph reply has no stable message id")
+
+    pre_ask = None
+    for snapshot in graph.get_state_history(config, limit=100):
+        values = getattr(snapshot, "values", None)
+        state_messages = (
+            list(values.get("messages", []))
+            if isinstance(values, dict) else []
+        )
+        next_nodes = tuple(getattr(snapshot, "next", ()) or ())
+        if (
+            "ask" in next_nodes
+            and state_messages
+            and isinstance(state_messages[-1], HumanMessage)
+            and str(state_messages[-1].content or "").strip() == message
+        ):
+            pre_ask = dict(values)
+            break
+    if pre_ask is None:
+        raise RuntimeError("The previous interviewer state is no longer available")
+
+    generated = graph.nodes["ask"].invoke(pre_ask, config)
+    generated_messages = generated.get("messages", [])
+    if not generated_messages or not isinstance(generated_messages[-1], AIMessage):
+        raise RuntimeError("Resume interviewer returned no replacement reply")
+    replacement_text = chunk_text(generated_messages[-1]).strip()
+    if not replacement_text:
+        raise RuntimeError("Resume interviewer returned an empty replacement reply")
+
+    replacement = AIMessage(content=replacement_text, id=replaced_message_id)
+    updates = {"messages": [replacement]}
+    for key, default in (
+        ("phase", "greeting"),
+        ("questions_asked", []),
+        ("phase_question_count", 0),
+        ("is_finished", False),
+        ("last_eval", {}),
+        ("eval_history", []),
+    ):
+        updates[key] = generated.get(key, pre_ask.get(key, default))
+    graph.update_state(config, updates, as_node="ask")
+    updated = graph.get_state(config)
+    updated_values = getattr(updated, "values", None)
+    if not isinstance(updated_values, dict):
+        raise RuntimeError("The regenerated graph state could not be read")
+    return dict(updated_values), replacement_text
+
+
+async def _commit_resume_regeneration(
+    entry: dict, session_id: str, message: str, user_id: str,
+) -> tuple[dict, str]:
+    """Regenerate and atomically replace one completed resume-interview reply."""
+    async with _get_resume_session_lock(user_id, session_id):
+        stored = await asyncio.to_thread(get_session, session_id, user_id=user_id)
+        transcript = (stored or {}).get("transcript") or []
+        completed, _old_reply = _completed_resume_reply(transcript, message)
+        if not stored or stored.get("mode") != InterviewMode.RESUME.value:
+            raise RuntimeError("Resume session no longer exists")
+        if not completed:
+            raise RuntimeError("No completed interview reply is available to regenerate")
+        expected_user_message = str(transcript[-2].get("content") or "")
+
+        turn_token = await asyncio.to_thread(
+            try_claim_resume_turn, session_id, user_id=user_id,
+        )
+        if not turn_token:
+            raise RuntimeError("Resume session is being evaluated or updated")
+
+        committed = False
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            _resume_turn_heartbeat(
+                session_id, user_id, turn_token, heartbeat_stop,
+            )
+        )
+        try:
+            result, ai_message = await asyncio.to_thread(
+                _regenerate_resume_graph_reply, entry, message,
+            )
+            raw_phase = result.get("phase")
+            committed_phase = (
+                raw_phase.value
+                if isinstance(raw_phase, InterviewPhase)
+                else str(raw_phase)
+            ) if raw_phase is not None else None
+            committed_finished = bool(result.get("is_finished", False))
+            if committed_phase in (InterviewPhase.END.value, "end"):
+                committed_finished = True
+            persisted = await asyncio.to_thread(
+                replace_resume_reply,
+                session_id,
+                user_id=user_id,
+                claim_token=turn_token,
+                expected_user_message=expected_user_message,
+                assistant_message=ai_message,
+                phase=committed_phase,
+                is_finished=committed_finished,
+            )
+            if not persisted:
+                raise RuntimeError("Resume transcript claim was lost")
+            committed = True
+            return result, ai_message
+        finally:
+            heartbeat_stop.set()
+            try:
+                await heartbeat_task
+            except Exception:
+                pass
+            if not committed:
+                await asyncio.to_thread(
+                    release_resume_turn_claim,
+                    session_id,
+                    user_id=user_id,
+                    claim_token=turn_token,
+                )
+
+
+async def _run_resume_regeneration(
+    entry: dict, session_id: str, message: str, user_id: str,
+) -> tuple[dict, str]:
+    return await _finish_despite_cancellation(
+        _commit_resume_regeneration(entry, session_id, message, user_id),
+    )
+
+
 @router.get("/interview/rag-metrics")
 async def get_rag_metrics(
     topic: str | None = Query(default=None, max_length=200),
@@ -1125,12 +1265,14 @@ async def regenerate_resume_reply(
     body: RetryInterviewReplyRequest,
     user_id: str = Depends(get_current_user),
 ):
-    """Recover or retry the last resume-interview reply without duplicating input.
+    """Recover or replace the last resume-interview reply without duplicating input.
 
     If the original request finished after the browser lost its SSE connection,
     the durable assistant message is replayed. If generation failed before an
     assistant message was committed, LangGraph resumes from its pending
-    checkpoint and only the missing assistant message is appended.
+    checkpoint and only the missing assistant message is appended. With
+    ``force=true``, a completed reply is regenerated from its pre-ask graph
+    state and replaces the durable assistant message.
     """
     entry = _get_resume_graph(session_id, user_id)
     if entry is None:
@@ -1139,11 +1281,17 @@ async def regenerate_resume_reply(
         raise HTTPException(403, "Access denied.")
 
     async def _gen():
+        runner = _run_resume_regeneration if body.force else _run_resume_retry
         turn_task = asyncio.create_task(
-            _run_resume_retry(entry, session_id, body.message, user_id),
+            runner(entry, session_id, body.message, user_id),
         )
         try:
-            yield sse_event({"type": "progress", "message": "正在恢复上一轮面试回复..."})
+            progress_message = (
+                "正在重新生成上一轮面试回复..."
+                if body.force
+                else "正在恢复上一轮面试回复..."
+            )
+            yield sse_event({"type": "progress", "message": progress_message})
             while not turn_task.done():
                 done, _ = await asyncio.wait({turn_task}, timeout=5.0)
                 if not done:
@@ -1162,9 +1310,14 @@ async def regenerate_resume_reply(
             raise
         except Exception as exc:
             logger.error("Resume reply retry failed: %s", exc)
+            error_message = (
+                "上一轮回复重新生成失败，请稍后重试。"
+                if body.force
+                else "上一轮回复暂时无法恢复，请稍后重试。"
+            )
             yield sse_event({
                 "type": "error",
-                "message": "上一轮回复暂时无法恢复，请稍后重试。",
+                "message": error_message,
             })
             yield sse_event({"type": "done"})
             return
@@ -1180,6 +1333,7 @@ async def regenerate_resume_reply(
             "message": ai_message,
             "is_finished": is_finished,
             "recovered": bool(isinstance(result, dict) and result.get("_recovered")),
+            "regenerated": body.force,
         }})
         yield sse_event({"type": "done"})
 

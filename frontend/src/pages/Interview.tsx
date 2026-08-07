@@ -639,18 +639,34 @@ export default function Interview() {
   };
 
   const handleRegenerateResume = async () => {
-    if (!sessionId || sending || !resumeSendError || !failedResumeMessage) return;
+    const isRecovery = !!resumeSendError;
+    const lastAssistant = messages[messages.length - 1];
+    const lastUser = messages[messages.length - 2];
+    const message = isRecovery ? failedResumeMessage : lastUser?.content || "";
+    if (
+      !sessionId
+      || sending
+      || resumeRequestRef.current
+      || reviewing
+      || resumeRestoreWarning
+      || !message
+      || (!isRecovery && (lastAssistant?.role !== "assistant" || lastUser?.role !== "user"))
+    ) return;
     setSending(true);
-    setSendProgress("正在恢复上一轮回复...");
+    setSendProgress(isRecovery ? "正在恢复上一轮回复..." : "正在重新生成上一轮回复...");
     const controller = new AbortController();
     resumeRequestRef.current = controller;
     try {
-      const data = await regenerateResumeReply(sessionId, failedResumeMessage, {
+      const data = await regenerateResumeReply(sessionId, message, {
         onProgress: (msg) => setSendProgress(msg),
-      }, controller.signal);
+      }, controller.signal, !isRecovery);
       setMessages((prev) => {
         const next = [...prev];
         const last = next[next.length - 1];
+        if (!isRecovery && last?.role === "assistant") {
+          next[next.length - 1] = { role: "assistant", content: data.message };
+          return next;
+        }
         if (last?.role === "assistant" && last.content.startsWith("[错误]")) {
           next[next.length - 1] = { role: "assistant", content: data.message };
           return next;
@@ -661,11 +677,15 @@ export default function Interview() {
       setResumeRestoreWarning(null);
       setResumeSendError(null);
       setFailedResumeMessage("");
-      if (data.is_finished) setFinished(true);
+      setFinished(Boolean(data.is_finished));
       if (data.recovered) toast.info("已恢复服务端完成的面试回复");
     } catch (err: any) {
       if (err?.name !== "AbortError") {
-        setResumeSendError(err?.message || "上一轮回复恢复失败，请稍后重试");
+        const message = err?.message || (isRecovery
+          ? "上一轮回复恢复失败，请稍后重试"
+          : "上一轮回复重新生成失败，请稍后重试");
+        if (isRecovery) setResumeSendError(message);
+        else toast.error(message);
       }
     } finally {
       if (resumeRequestRef.current === controller) resumeRequestRef.current = null;
@@ -1056,6 +1076,26 @@ export default function Interview() {
             </div>
           </div>
         )}
+        {!resumeSendError
+          && !resumeRestoreWarning
+          && !sending
+          && !reviewing
+          && messages.length >= 2
+          && messages[messages.length - 2]?.role === "user"
+          && messages[messages.length - 1]?.role === "assistant" && (
+            <div className="flex">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-dim h-7 px-2 text-xs gap-1"
+                onClick={handleRegenerateResume}
+                title="重新生成上一条回复（无需重新输入回答）"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                重新生成
+              </Button>
+            </div>
+          )}
         {sending && (
           <div className="flex items-center gap-2 px-4 py-3 text-dim text-sm">
             <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot" />

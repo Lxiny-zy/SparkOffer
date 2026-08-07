@@ -7,9 +7,15 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import START, StateGraph
 
 import backend.storage.database as database
-from backend.models import ChatRequest, RetryInterviewReplyRequest
+from backend.models import (
+    ChatRequest,
+    ResumeInterviewState,
+    RetryInterviewReplyRequest,
+)
 from backend.routers import interview
 from backend.storage.sessions import (
     abort_session_sync_claim,
@@ -19,6 +25,7 @@ from backend.storage.sessions import (
     get_session,
     mark_resume_session_initialized,
     mark_session_sync_step,
+    replace_resume_reply,
     release_resume_turn_claim,
     release_session_evaluation_claim,
     release_session_sync_claim,
@@ -95,8 +102,11 @@ def test_resume_initialization_persists_recoverable_graph_state(isolated_db):
 def test_resume_chat_and_retry_normalize_messages_consistently():
     chat = ChatRequest(session_id="session", message="  answer  ")
     retry = RetryInterviewReplyRequest(message="  answer  ")
+    forced_retry = RetryInterviewReplyRequest(message="answer", force=True)
 
     assert chat.message == retry.message == "answer"
+    assert retry.force is False
+    assert forced_retry.force is True
     completed, reply = interview._completed_resume_reply(
         [
             {"role": "user", "content": "  answer  "},
@@ -171,6 +181,45 @@ def test_resume_turn_commit_persists_completion_state(isolated_db):
     stored = get_session("commit-state", user_id="u1")
     assert stored["meta"]["resume_phase"] == "end"
     assert stored["meta"]["resume_is_finished"] is True
+
+
+def test_resume_reply_replacement_is_pair_and_token_fenced(isolated_db):
+    create_session("replace", "resume", user_id="u1")
+    append_message("replace", "user", "answer", user_id="u1")
+    append_message("replace", "assistant", "old reply", user_id="u1")
+    token = try_claim_resume_turn("replace", user_id="u1")
+
+    assert replace_resume_reply(
+        "replace",
+        user_id="u1",
+        claim_token=token,
+        expected_user_message="different answer",
+        assistant_message="new reply",
+    ) is False
+    assert replace_resume_reply(
+        "replace",
+        user_id="u1",
+        claim_token="wrong",
+        expected_user_message="answer",
+        assistant_message="new reply",
+    ) is False
+    assert replace_resume_reply(
+        "replace",
+        user_id="u1",
+        claim_token=token,
+        expected_user_message="answer",
+        assistant_message="new reply",
+        phase="technical",
+        is_finished=False,
+    ) is True
+
+    stored = get_session("replace", user_id="u1")
+    assert [item["content"] for item in stored["transcript"]] == [
+        "answer", "new reply",
+    ]
+    assert stored["meta"]["resume_phase"] == "technical"
+    assert stored["meta"]["resume_is_finished"] is False
+    assert "resume_turn_claim_token" not in stored["meta"]
 
 
 def test_resume_turn_commit_rejects_session_completed_after_claim(isolated_db):
@@ -507,6 +556,143 @@ def test_resume_retry_replays_committed_reply_without_invoking_graph(monkeypatch
     assert result["_recovered"] is True
     assert result["phase"] == "technical"
     assert message == "next question"
+
+
+def test_manual_regeneration_replaces_graph_reply_without_advancing_twice():
+    config = {"configurable": {"thread_id": "regenerate"}}
+    pre_ask_values = {
+        "messages": [
+            AIMessage(content="old question", id="question-1"),
+            HumanMessage(content="answer", id="answer-1"),
+        ],
+        "phase": "technical",
+        "questions_asked": ["old question"],
+        "phase_question_count": 1,
+        "is_finished": False,
+        "last_eval": {"score": 7},
+        "eval_history": [{"score": 7}],
+    }
+    latest_values = {
+        **pre_ask_values,
+        "messages": [
+            *pre_ask_values["messages"],
+            AIMessage(content="first reply", id="reply-1"),
+        ],
+        "questions_asked": ["old question", "first reply"],
+        "phase_question_count": 2,
+        "last_eval": {"score": 5},
+        "eval_history": [{"score": 7}, {"score": 5}],
+    }
+
+    class AskNode:
+        def invoke(self, state, node_config):
+            assert node_config == config
+            assert state["phase_question_count"] == 1
+            assert isinstance(state["messages"][-1], HumanMessage)
+            return {
+                "messages": [AIMessage(content="replacement reply")],
+                "questions_asked": ["old question", "replacement reply"],
+                "phase_question_count": 2,
+                "last_eval": {"score": 9},
+                "eval_history": [{"score": 7}, {"score": 9}],
+            }
+
+    class Graph:
+        nodes = {"ask": AskNode()}
+
+        def __init__(self):
+            self.values = latest_values
+
+        def get_state(self, _config):
+            return SimpleNamespace(values=self.values)
+
+        def get_state_history(self, _config, limit):
+            assert limit == 100
+            return iter([
+                SimpleNamespace(values=self.values, next=("wait",)),
+                SimpleNamespace(values=pre_ask_values, next=("ask",)),
+            ])
+
+        def update_state(self, _config, updates, as_node):
+            assert as_node == "ask"
+            replacement = updates["messages"][0]
+            assert replacement.id == "reply-1"
+            self.values = {
+                **self.values,
+                **updates,
+                "messages": [*self.values["messages"][:-1], replacement],
+            }
+
+    result, message = interview._regenerate_resume_graph_reply(
+        {"graph": Graph(), "config": config}, "answer",
+    )
+
+    assert message == "replacement reply"
+    assert result["phase_question_count"] == 2
+    assert result["questions_asked"] == ["old question", "replacement reply"]
+    assert result["eval_history"] == [{"score": 7}, {"score": 9}]
+    assert len(result["messages"]) == 3
+    assert result["messages"][-1].content == "replacement reply"
+
+
+def test_manual_regeneration_uses_langgraph_replacement_semantics():
+    ask_count = 0
+
+    def initialize(_state):
+        return {
+            "messages": [AIMessage(content="opening")],
+            "phase": "technical",
+            "questions_asked": [],
+            "phase_question_count": 0,
+            "is_finished": False,
+            "last_eval": {},
+            "eval_history": [],
+        }
+
+    def wait_for_answer(_state):
+        return {}
+
+    def ask(state):
+        nonlocal ask_count
+        ask_count += 1
+        reply = f"reply {ask_count}"
+        return {
+            "messages": [AIMessage(content=reply)],
+            "questions_asked": [*state["questions_asked"], reply],
+            "phase_question_count": state["phase_question_count"] + 1,
+        }
+
+    graph_builder = StateGraph(ResumeInterviewState)
+    graph_builder.add_node("init", initialize)
+    graph_builder.add_node("wait", wait_for_answer)
+    graph_builder.add_node("ask", ask)
+    graph_builder.add_edge(START, "init")
+    graph_builder.add_edge("init", "wait")
+    graph_builder.add_edge("ask", "wait")
+    graph_builder.add_conditional_edges(
+        "wait", lambda _state: "ask", {"ask": "ask"},
+    )
+    graph = graph_builder.compile(
+        checkpointer=InMemorySaver(), interrupt_before=["wait"],
+    )
+    config = {"configurable": {"thread_id": "real-regenerate"}}
+    graph.invoke({}, config)
+    graph.update_state(config, {"messages": [HumanMessage(content="answer")]})
+    graph.invoke(None, config)
+
+    before = graph.get_state(config).values
+    assert before["phase_question_count"] == 1
+    assert len(before["messages"]) == 3
+
+    result, message = interview._regenerate_resume_graph_reply(
+        {"graph": graph, "config": config}, "answer",
+    )
+
+    assert message == "reply 2"
+    assert result["phase_question_count"] == 1
+    assert result["questions_asked"] == ["reply 2"]
+    assert len(result["messages"]) == 3
+    assert result["messages"][-1].content == "reply 2"
 
 
 def test_resume_retry_continues_pending_checkpoint_without_duplicate_user(monkeypatch):

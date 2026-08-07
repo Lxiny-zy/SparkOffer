@@ -136,11 +136,12 @@ export async function regenerateResumeReply(
   message: string,
   callbacks?: SSECallbacks,
   signal?: AbortSignal,
+  force = false,
 ): Promise<any> {
   return fetchSSE(`${API_BASE}/interview/regenerate/${sessionId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, force }),
   }, callbacks, signal);
 }
 

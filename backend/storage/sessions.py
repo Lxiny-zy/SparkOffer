@@ -648,6 +648,54 @@ def commit_resume_turn(
     return cursor.rowcount > 0
 
 
+def replace_resume_reply(
+    session_id: str,
+    *,
+    user_id: str,
+    claim_token: str,
+    expected_user_message: str,
+    assistant_message: str,
+    phase: str | None = None,
+    is_finished: bool | None = None,
+) -> bool:
+    """Replace the trailing assistant reply while an owned turn claim is held."""
+    if not claim_token or not assistant_message:
+        return False
+    conn = get_db()
+    now = datetime.now().isoformat()
+    transcript = "COALESCE(NULLIF(transcript, ''), '[]')"
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    meta_expr = (
+        f"json_remove({doc}, '$.resume_turn_claimed_at', "
+        "'$.resume_turn_claim_token')"
+    )
+    state_params = []
+    if phase is not None:
+        meta_expr = f"json_set({meta_expr}, '$.resume_phase', ?)"
+        state_params.append(str(phase))
+    if is_finished is not None:
+        meta_expr = f"json_set({meta_expr}, '$.resume_is_finished', json(?))"
+        state_params.append("true" if is_finished else "false")
+    replacement = json.dumps(
+        {"role": "assistant", "content": assistant_message, "time": now},
+        ensure_ascii=False,
+    )
+    cursor = conn.execute(
+        f"UPDATE sessions SET transcript = json_set({transcript}, '$[#-1]', json(?)), "
+        f"meta = {meta_expr}, updated_at = CURRENT_TIMESTAMP "
+        "WHERE session_id = ? AND user_id = ? AND mode = 'resume' "
+        "AND (review IS NULL OR review = '') "
+        f"AND json_extract({doc}, '$.resume_turn_claim_token') = ? "
+        f"AND json_extract({transcript}, '$[#-1].role') = 'assistant' "
+        f"AND json_extract({transcript}, '$[#-2].role') = 'user' "
+        f"AND json_extract({transcript}, '$[#-2].content') = ?",
+        [replacement, *state_params, session_id, user_id, claim_token,
+         expected_user_message],
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def release_resume_turn_claim(
     session_id: str, *, user_id: str, claim_token: str,
 ) -> bool:
