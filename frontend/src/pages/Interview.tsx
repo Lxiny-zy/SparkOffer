@@ -4,7 +4,7 @@ import { Markdown } from "../components/ChatBubble";
 import { Check, Minus, Star, Lightbulb, Eye, Loader2, RefreshCw, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import ChatBubble from "../components/ChatBubble";
-import { sendMessage, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics, type DrillProgressPayload } from "../api/interview";
+import { sendMessage, regenerateResumeReply, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics, type DrillProgressPayload } from "../api/interview";
 import { formatQuestionLabel } from "@/lib/question";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -18,12 +18,69 @@ interface HintState {
   full?: string;
 }
 
+interface ResumePendingTurn {
+  version: 1;
+  message: string;
+  transcriptLength: number | null;
+  createdAt: number;
+}
+
+function readResumePendingTurn(key: string | null): ResumePendingTurn | null {
+  if (!key) return null;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.version === 1 && typeof parsed.message === "string") {
+        return {
+          version: 1,
+          message: parsed.message,
+          transcriptLength: Number.isInteger(parsed.transcriptLength)
+            ? parsed.transcriptLength
+            : null,
+          createdAt: typeof parsed.createdAt === "number" ? parsed.createdAt : 0,
+        };
+      }
+    } catch {
+      // Legacy entries stored the answer as a plain string.
+    }
+    return { version: 1, message: raw, transcriptLength: null, createdAt: 0 };
+  } catch {
+    return null;
+  }
+}
+
+function writeResumePendingTurn(
+  key: string | null,
+  message: string,
+  transcriptLength: number | null,
+) {
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify({
+      version: 1,
+      message,
+      transcriptLength,
+      createdAt: Date.now(),
+    } satisfies ResumePendingTurn));
+  } catch {
+    // Storage may be unavailable; the durable transcript remains the fallback.
+  }
+}
+
+function clearResumePendingTurn(key: string | null) {
+  if (!key) return;
+  try { localStorage.removeItem(key); } catch { /* noop */ }
+}
+
 export default function Interview() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const location = useLocation();
   const navigate = useNavigate();
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const resumeRequestRef = useRef<AbortController | null>(null);
 
   const initData: any = location.state || {};
   const [restoredMeta, setRestoredMeta] = useState<any>(null);
@@ -39,6 +96,8 @@ export default function Interview() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [sendProgress, setSendProgress] = useState("");
+  const [resumeSendError, setResumeSendError] = useState<string | null>(null);
+  const [failedResumeMessage, setFailedResumeMessage] = useState("");
   const [finished, setFinished] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [progress, setProgress] = useState(initData.progress || "");
@@ -53,23 +112,36 @@ export default function Interview() {
   const [hints, setHints] = useState<Record<string | number, HintState>>({});
   const [hintLoading, setHintLoading] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
-  const [restoring, setRestoring] = useState<boolean>(!initData.mode);
+  const [restoring, setRestoring] = useState<boolean>(
+    !initData.mode || initData.mode === "resume",
+  );
   const [restoreError, setRestoreError] = useState<string | null>(null);
-  const restoredRef = useRef(false);
+  const [resumeRestoreWarning, setResumeRestoreWarning] = useState<string | null>(null);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
   const autoEvalDoneRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
 
-  const draftKey = sessionId ? `drill:draft:${sessionId}` : null;
+  useEffect(() => () => {
+    resumeRequestRef.current?.abort();
+  }, []);
 
-  // Restore from backend when location.state is empty (page refresh / direct visit)
+  const draftKey = sessionId ? `drill:draft:${sessionId}` : null;
+  const resumePendingKey = sessionId ? `resume:pending:${sessionId}` : null;
+
+  // Resume sessions always reconcile with the backend: React Router history
+  // state can survive a browser refresh, so its presence is not proof that the
+  // latest transcript or pending-turn state is already in memory.
   useEffect(() => {
-    if (initData.mode || !sessionId || restoredRef.current) return;
-    restoredRef.current = true;
+    if ((initData.mode && initData.mode !== "resume") || !sessionId) return;
     setRestoring(true);
+    setRestoreError(null);
     getInterviewSession(sessionId)
       .then((sess: any) => {
+        setResumeRestoreWarning(null);
+        setResumeSendError(null);
+        setFailedResumeMessage("");
         const meta = sess.meta || {};
         const progress = meta.progress || {};
         setRestoredMeta({
@@ -81,6 +153,12 @@ export default function Interview() {
           meta,
         });
         if (sess.questions?.length) setQuestions(sess.questions);
+        if (sess.mode === "resume") {
+          const resumeState = sess.resume_state || {};
+          if (sess.review || resumeState.is_finished || resumeState.phase === "end") {
+            setFinished(true);
+          }
+        }
         if (progress.partial_answers) {
           // Keys are question IDs verbatim. They can be strings like "Q2"
           // (the LLM emits string ids), so do NOT Number() them — that yields
@@ -102,7 +180,51 @@ export default function Interview() {
         }
         // Resume mode: replay transcript
         if (sess.mode === "resume" && Array.isArray(sess.transcript)) {
-          setMessages(sess.transcript.map((m: any) => ({ role: m.role, content: m.content })));
+          const transcript: ChatMessage[] = sess.transcript.map((m: any) => ({
+            role: m.role,
+            content: m.content,
+          }));
+          let pendingTurn = readResumePendingTurn(resumePendingKey);
+          const last = transcript[transcript.length - 1];
+          if (last?.role === "user") {
+            // A durable user-only tail means generation stopped before the
+            // assistant reply. Recover it even when localStorage is gone.
+            const pendingMessage = String(last.content || "");
+            pendingTurn = {
+              version: 1,
+              message: pendingMessage,
+              transcriptLength: Math.max(0, transcript.length - 1),
+              createdAt: Date.now(),
+            };
+            writeResumePendingTurn(
+              resumePendingKey,
+              pendingMessage,
+              pendingTurn.transcriptLength,
+            );
+            if (pendingTurn.message) {
+              setFailedResumeMessage(pendingTurn.message);
+              setResumeSendError("检测到上一轮回复尚未完成");
+            }
+          } else if (pendingTurn?.message) {
+            // Match the exact transcript position observed before send. Text
+            // alone is ambiguous when the candidate repeats a short answer.
+            const expectedIndex = pendingTurn.transcriptLength;
+            const hasDurablePair = expectedIndex != null
+              ? transcript[expectedIndex]?.role === "user"
+                && transcript[expectedIndex]?.content === pendingTurn.message
+                && transcript[expectedIndex + 1]?.role === "assistant"
+              : transcript[transcript.length - 2]?.role === "user"
+                && transcript[transcript.length - 2]?.content === pendingTurn.message
+                && last?.role === "assistant";
+            if (hasDurablePair) {
+              clearResumePendingTurn(resumePendingKey);
+            } else {
+              transcript.push({ role: "user", content: pendingTurn.message });
+              setFailedResumeMessage(pendingTurn.message);
+              setResumeSendError("检测到上一轮回复尚未完成");
+            }
+          }
+          setMessages(transcript);
         }
 
         // Tier-2 (backend) restore done. If backend had no progress yet,
@@ -137,10 +259,26 @@ export default function Interview() {
       })
       .catch((err: any) => {
         console.error("恢复面试失败:", err);
-        setRestoreError(err?.message || "无法加载会话，请返回首页重试");
+        const message = err?.message || "无法加载会话";
+        if (initData.mode === "resume" && initData.message) {
+          setResumeRestoreWarning(`会话同步暂时失败：${message}`);
+          const pendingTurn = readResumePendingTurn(resumePendingKey);
+          if (pendingTurn?.message) {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              return last?.role === "user" && last.content === pendingTurn.message
+                ? prev
+                : [...prev, { role: "user", content: pendingTurn.message }];
+            });
+            setFailedResumeMessage(pendingTurn.message);
+            setResumeSendError("检测到上一轮回复尚未完成");
+          }
+        } else {
+          setRestoreError(message);
+        }
       })
       .finally(() => setRestoring(false));
-  }, [sessionId, initData.mode, draftKey]);
+  }, [sessionId, initData.mode, initData.message, draftKey, resumePendingKey, restoreAttempt]);
 
   // Debounced persist of in-progress state.
   // Two-tier strategy:
@@ -469,27 +607,76 @@ export default function Interview() {
 
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text || sending || resumeRestoreWarning) return;
+    writeResumePendingTurn(resumePendingKey, text, messages.length);
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     setInput("");
     setSending(true);
     setSendProgress("");
+    setResumeSendError(null);
+    const controller = new AbortController();
+    resumeRequestRef.current = controller;
     try {
       const data = await sendMessage(sessionId, text, {
         onProgress: (msg) => setSendProgress(msg),
-      });
+      }, controller.signal);
       setMessages((prev) => [...prev, { role: "assistant", content: data.message }]);
+      clearResumePendingTurn(resumePendingKey);
+      setResumeRestoreWarning(null);
+      setFailedResumeMessage("");
       if (data.progress) setProgress(data.progress);
       if (data.is_finished) setFinished(true);
     } catch (err: any) {
-      setMessages((prev) => [...prev, { role: "assistant", content: `[错误] ${err.message}` }]);
+      if (err?.name !== "AbortError") {
+        setFailedResumeMessage(text);
+        setResumeSendError(err?.message || "网络异常，上一轮回复未能显示");
+      }
     } finally {
+      if (resumeRequestRef.current === controller) resumeRequestRef.current = null;
       setSending(false);
       textareaRef.current?.focus();
     }
   };
 
+  const handleRegenerateResume = async () => {
+    if (!sessionId || sending || !resumeSendError || !failedResumeMessage) return;
+    setSending(true);
+    setSendProgress("正在恢复上一轮回复...");
+    const controller = new AbortController();
+    resumeRequestRef.current = controller;
+    try {
+      const data = await regenerateResumeReply(sessionId, failedResumeMessage, {
+        onProgress: (msg) => setSendProgress(msg),
+      }, controller.signal);
+      setMessages((prev) => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last?.role === "assistant" && last.content.startsWith("[错误]")) {
+          next[next.length - 1] = { role: "assistant", content: data.message };
+          return next;
+        }
+        return [...next, { role: "assistant", content: data.message }];
+      });
+      clearResumePendingTurn(resumePendingKey);
+      setResumeRestoreWarning(null);
+      setResumeSendError(null);
+      setFailedResumeMessage("");
+      if (data.is_finished) setFinished(true);
+      if (data.recovered) toast.info("已恢复服务端完成的面试回复");
+    } catch (err: any) {
+      if (err?.name !== "AbortError") {
+        setResumeSendError(err?.message || "上一轮回复恢复失败，请稍后重试");
+      }
+    } finally {
+      if (resumeRequestRef.current === controller) resumeRequestRef.current = null;
+      setSending(false);
+      setSendProgress("");
+      textareaRef.current?.focus();
+    }
+  };
+
   const handleEndResume = async () => {
+    if (sending || resumeSendError || resumeRestoreWarning) return;
     setShowEndConfirm(false);
     setReviewing(true);
     setEvalProgress("");
@@ -542,7 +729,12 @@ export default function Interview() {
           <CardContent className="p-6 text-center space-y-3">
             <div className="text-base font-medium">面试会话加载失败</div>
             <p className="text-sm text-dim">{restoreError}</p>
-            <Button variant="default" onClick={() => navigate("/")}>返回首页</Button>
+            <div className="flex justify-center gap-3">
+              <Button variant="outline" onClick={() => navigate("/")}>返回首页</Button>
+              <Button variant="default" onClick={() => setRestoreAttempt((value) => value + 1)}>
+                重新加载
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </div>
@@ -580,7 +772,7 @@ export default function Interview() {
           </p>
           <div className="flex justify-center gap-3 pt-2">
             <Button variant="outline" onClick={() => setShowEndConfirm(false)}>继续答题</Button>
-            <Button variant="destructive" onClick={isBatchMode ? handleEndBatch : handleEndResume}>
+            <Button variant="destructive" onClick={isBatchMode ? handleEndBatch : handleEndResume} disabled={!isBatchMode && (sending || !!resumeSendError || !!resumeRestoreWarning)}>
               确认结束
             </Button>
           </div>
@@ -829,7 +1021,7 @@ export default function Interview() {
             </span>
           )}
         </div>
-        <Button variant="destructive" size="sm" onClick={() => finished ? handleEndResume() : setShowEndConfirm(true)} disabled={reviewing}>
+        <Button variant="destructive" size="sm" onClick={() => finished ? handleEndResume() : setShowEndConfirm(true)} disabled={reviewing || sending || !!resumeSendError || !!resumeRestoreWarning}>
           {reviewing ? (evalProgress || "生成复盘中...") : finished ? "查看复盘" : "结束面试"}
         </Button>
       </div>
@@ -838,6 +1030,32 @@ export default function Interview() {
         {messages.map((msg, i) => (
           <ChatBubble key={i} role={msg.role} content={msg.content} />
         ))}
+        {resumeRestoreWarning && !sending && (
+          <div className="rounded-lg bg-amber-500/8 border border-amber-500/20 px-4 py-3 flex flex-col gap-2 animate-fade-in">
+            <div className="text-sm font-medium leading-relaxed">{resumeRestoreWarning}</div>
+            <div className="text-[13px] text-dim">当前展示本地保留内容，可重新同步服务端会话。</div>
+            <div className="flex justify-end">
+              <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setRestoreAttempt((value) => value + 1)}>
+                <RefreshCw size={14} />
+                重新同步
+              </Button>
+            </div>
+          </div>
+        )}
+        {resumeSendError && !sending && (
+          <div className="rounded-lg bg-red/8 border border-red/20 px-4 py-3 flex flex-col gap-2 animate-fade-in">
+            <div className="text-sm text-red font-medium leading-relaxed">
+              面试官回复中断：{resumeSendError}
+            </div>
+            <div className="text-[13px] text-dim">你的回答已保留，可直接重新生成。</div>
+            <div className="flex justify-end">
+              <Button variant="default" size="sm" className="gap-1.5" onClick={handleRegenerateResume}>
+                <RefreshCw size={14} />
+                重新生成
+              </Button>
+            </div>
+          </div>
+        )}
         {sending && (
           <div className="flex items-center gap-2 px-4 py-3 text-dim text-sm">
             <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot" />
@@ -857,8 +1075,8 @@ export default function Interview() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={finished ? "面试已结束" : "输入你的回答... (Enter 发送)"}
-              disabled={finished || sending}
+              placeholder={finished ? "面试已结束" : resumeRestoreWarning ? "请先重新同步会话" : resumeSendError ? "请先恢复上一轮回复" : "输入你的回答... (Enter 发送)"}
+              disabled={finished || sending || !!resumeSendError || !!resumeRestoreWarning}
               rows={3}
             />
           </div>

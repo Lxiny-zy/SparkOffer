@@ -596,6 +596,8 @@ def commit_resume_turn(
     *,
     user_id: str,
     claim_token: str,
+    phase: str | None = None,
+    is_finished: bool | None = None,
 ) -> bool:
     """Append one resume turn only while its durable claim is still owned.
 
@@ -622,15 +624,25 @@ def commit_resume_turn(
         return False
     inserts = ", ".join("'$[#]', json(?)" for _ in encoded)
     doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    meta_expr = (
+        f"json_remove({doc}, '$.resume_turn_claimed_at', "
+        "'$.resume_turn_claim_token')"
+    )
+    state_params = []
+    if phase is not None:
+        meta_expr = f"json_set({meta_expr}, '$.resume_phase', ?)"
+        state_params.append(str(phase))
+    if is_finished is not None:
+        meta_expr = f"json_set({meta_expr}, '$.resume_is_finished', json(?))"
+        state_params.append("true" if is_finished else "false")
     cursor = conn.execute(
         "UPDATE sessions SET transcript = json_insert("
         f"COALESCE(NULLIF(transcript, ''), '[]'), {inserts}), "
-        f"meta = json_remove({doc}, '$.resume_turn_claimed_at', "
-        "'$.resume_turn_claim_token'), updated_at = CURRENT_TIMESTAMP "
+        f"meta = {meta_expr}, updated_at = CURRENT_TIMESTAMP "
         "WHERE session_id = ? AND user_id = ? AND mode = 'resume' "
         "AND (review IS NULL OR review = '') "
         f"AND json_extract({doc}, '$.resume_turn_claim_token') = ?",
-        [*encoded, session_id, user_id, claim_token],
+        [*encoded, *state_params, session_id, user_id, claim_token],
     )
     conn.commit()
     return cursor.rowcount > 0
@@ -686,6 +698,9 @@ def try_claim_session_evaluation(session_id: str, *, user_id: str) -> str | None
         f"OR json_extract({doc}, '$.resume_turn_claim_token') IS NULL "
         f"OR json_extract({doc}, '$.resume_turn_claimed_at') IS NULL "
         f"OR json_extract({doc}, '$.resume_turn_claimed_at') < ?) "
+        f"AND (mode != 'resume' "
+        f"OR COALESCE(json_extract(COALESCE(NULLIF(transcript, ''), '[]'), "
+        f"'$[#-1].role'), '') != 'user') "
         # Drill/JD recovery must use the persisted scores until every prior
         # side-effect step is complete. Resume can re-enter through its graph;
         # its profile operation marker remains idempotent across retries.
@@ -742,7 +757,10 @@ def mark_resume_session_initialized(session_id: str, *, user_id: str) -> bool:
     conn = get_db()
     cur = conn.execute(
         "UPDATE sessions SET meta = json_set("
-        "COALESCE(NULLIF(meta, ''), '{}'), '$.initialization_status', 'ready'"
+        "COALESCE(NULLIF(meta, ''), '{}'), "
+        "'$.initialization_status', 'ready', "
+        "'$.resume_phase', 'greeting', "
+        "'$.resume_is_finished', json('false')"
         "), updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ?",
         (session_id, user_id),
     )

@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 import backend.storage.database as database
+from backend.models import ChatRequest, RetryInterviewReplyRequest
+from backend.routers import interview
 from backend.storage.sessions import (
     abort_session_sync_claim,
+    append_message,
     commit_resume_turn,
     create_session,
     get_session,
+    mark_resume_session_initialized,
     mark_session_sync_step,
     release_resume_turn_claim,
     release_session_evaluation_claim,
@@ -69,6 +76,38 @@ def test_resume_turn_claim_requires_owned_unfinished_resume_session(isolated_db)
     assert try_claim_resume_turn("complete", user_id="u1") is None
 
 
+def test_resume_initialization_persists_recoverable_graph_state(isolated_db):
+    create_session(
+        "initialized",
+        "resume",
+        meta={"initialization_status": "pending"},
+        user_id="u1",
+    )
+
+    assert mark_resume_session_initialized("initialized", user_id="u1") is True
+
+    meta = get_session("initialized", user_id="u1")["meta"]
+    assert meta["initialization_status"] == "ready"
+    assert meta["resume_phase"] == "greeting"
+    assert meta["resume_is_finished"] is False
+
+
+def test_resume_chat_and_retry_normalize_messages_consistently():
+    chat = ChatRequest(session_id="session", message="  answer  ")
+    retry = RetryInterviewReplyRequest(message="  answer  ")
+
+    assert chat.message == retry.message == "answer"
+    completed, reply = interview._completed_resume_reply(
+        [
+            {"role": "user", "content": "  answer  "},
+            {"role": "assistant", "content": "next"},
+        ],
+        retry.message,
+    )
+    assert completed is True
+    assert reply == "next"
+
+
 def test_only_one_connection_can_claim_a_resume_turn(isolated_db):
     create_session("concurrent", "resume", user_id="u1")
     barrier = threading.Barrier(2)
@@ -113,6 +152,27 @@ def test_resume_turn_commit_is_token_fenced_and_clears_claim(isolated_db):
     ) is False
 
 
+def test_resume_turn_commit_persists_completion_state(isolated_db):
+    create_session("commit-state", "resume", user_id="u1")
+    token = try_claim_resume_turn("commit-state", user_id="u1")
+
+    assert commit_resume_turn(
+        "commit-state",
+        [
+            {"role": "user", "content": "final question"},
+            {"role": "assistant", "content": "final reply"},
+        ],
+        user_id="u1",
+        claim_token=token,
+        phase="end",
+        is_finished=True,
+    ) is True
+
+    stored = get_session("commit-state", user_id="u1")
+    assert stored["meta"]["resume_phase"] == "end"
+    assert stored["meta"]["resume_is_finished"] is True
+
+
 def test_resume_turn_commit_rejects_session_completed_after_claim(isolated_db):
     create_session("completed-late", "resume", user_id="u1")
     token = try_claim_resume_turn("completed-late", user_id="u1")
@@ -154,6 +214,21 @@ def test_evaluation_rejects_active_turn_and_fences_expired_owner(isolated_db):
     assert release_resume_turn_claim(
         "eval", user_id="u1", claim_token=turn_token,
     ) is False
+
+
+def test_evaluation_rejects_resume_transcript_with_pending_user(isolated_db):
+    create_session("pending-eval", "resume", user_id="u1")
+    assert append_message(
+        "pending-eval", "user", "answer", user_id="u1",
+    ) is True
+
+    assert try_claim_session_evaluation("pending-eval", user_id="u1") is None
+
+    assert append_message(
+        "pending-eval", "assistant", "reply", user_id="u1",
+    ) is True
+    token = try_claim_session_evaluation("pending-eval", user_id="u1")
+    assert token
 
 
 def test_resume_turn_renewal_keeps_evaluation_fenced(isolated_db):
@@ -399,3 +474,259 @@ def test_concurrent_sync_target_freeze_has_one_stable_winner(isolated_db):
     winners = [result for result in results if result[0]]
     assert len(winners) == 1
     assert winners[0][1] in (["python"], ["go"])
+
+
+def test_resume_retry_replays_committed_reply_without_invoking_graph(monkeypatch):
+    class Graph:
+        def invoke(self, *_args, **_kwargs):
+            raise AssertionError("a durable reply must be replayed, not regenerated")
+
+        def get_state(self, _config):
+            return SimpleNamespace(values={"phase": "technical", "is_finished": False})
+
+    entry = {
+        "graph": Graph(),
+        "config": {"configurable": {"thread_id": "replay"}},
+    }
+    monkeypatch.setattr(
+        interview,
+        "get_session",
+        lambda *args, **kwargs: {
+            "mode": "resume",
+            "transcript": [
+                {"role": "user", "content": "answer"},
+                {"role": "assistant", "content": "next question"},
+            ],
+        },
+    )
+
+    result, message = asyncio.run(
+        interview._run_resume_retry(entry, "replay", "answer", "u1"),
+    )
+
+    assert result["_recovered"] is True
+    assert result["phase"] == "technical"
+    assert message == "next question"
+
+
+def test_resume_retry_continues_pending_checkpoint_without_duplicate_user(monkeypatch):
+    calls = []
+
+    class Graph:
+        def invoke(self, value, config):
+            calls.append(("invoke", value, config))
+            return {
+                "messages": [
+                    HumanMessage(content="answer"),
+                    AIMessage(content="retried question"),
+                ],
+                "phase": "technical",
+            }
+
+    entry = {
+        "graph": Graph(),
+        "config": {"configurable": {"thread_id": "pending"}},
+    }
+    monkeypatch.setattr(
+        interview,
+        "get_session",
+        lambda *args, **kwargs: {
+            "mode": "resume",
+            "transcript": [{"role": "user", "content": "answer"}],
+        },
+    )
+    monkeypatch.setattr(
+        interview, "try_claim_resume_turn", lambda *args, **kwargs: "turn-token",
+    )
+    monkeypatch.setattr(
+        interview, "renew_resume_turn_claim", lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        interview, "release_resume_turn_claim", lambda *args, **kwargs: True,
+    )
+
+    committed = []
+
+    def commit(_session_id, messages, **kwargs):
+        committed.append(messages)
+        return True
+
+    monkeypatch.setattr(interview, "commit_resume_turn", commit)
+
+    result, message = asyncio.run(
+        interview._run_resume_retry(entry, "pending", "answer", "u1"),
+    )
+
+    assert result["phase"] == "technical"
+    assert message == "retried question"
+    assert calls == [
+        ("invoke", None, {"configurable": {"thread_id": "pending"}}),
+    ]
+    assert committed == [[{"role": "assistant", "content": "retried question"}]]
+
+
+def test_resume_retry_rejects_result_without_new_assistant(monkeypatch):
+    class Graph:
+        def invoke(self, _value, _config):
+            return {
+                "messages": [
+                    AIMessage(content="older reply"),
+                    HumanMessage(content="answer"),
+                ],
+                "phase": "technical",
+            }
+
+    entry = {
+        "graph": Graph(),
+        "config": {"configurable": {"thread_id": "missing-reply"}},
+    }
+    monkeypatch.setattr(
+        interview,
+        "get_session",
+        lambda *args, **kwargs: {
+            "mode": "resume",
+            "transcript": [{"role": "user", "content": "answer"}],
+        },
+    )
+    monkeypatch.setattr(
+        interview, "try_claim_resume_turn", lambda *args, **kwargs: "turn-token",
+    )
+    monkeypatch.setattr(
+        interview, "renew_resume_turn_claim", lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        interview, "release_resume_turn_claim", lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        interview,
+        "commit_resume_turn",
+        lambda *args, **kwargs: pytest.fail("an empty/stale reply must not commit"),
+    )
+
+    with pytest.raises(RuntimeError, match="no new assistant reply"):
+        asyncio.run(
+            interview._run_resume_retry(
+                entry, "missing-reply", "answer", "u1",
+            ),
+        )
+
+
+def test_resume_retry_submits_preserved_message_when_original_never_arrived(monkeypatch):
+    calls = []
+
+    class Graph:
+        def update_state(self, config, value):
+            calls.append(("update", config, value["messages"][0].content))
+
+        def invoke(self, value, config):
+            calls.append(("invoke", value, config))
+            return {
+                "messages": [
+                    AIMessage(content="opening"),
+                    HumanMessage(content="preserved answer"),
+                    AIMessage(content="next question"),
+                ],
+            }
+
+    entry = {
+        "graph": Graph(),
+        "config": {"configurable": {"thread_id": "not-arrived"}},
+    }
+    monkeypatch.setattr(
+        interview,
+        "get_session",
+        lambda *args, **kwargs: {
+            "mode": "resume",
+            "transcript": [{"role": "assistant", "content": "opening"}],
+        },
+    )
+    monkeypatch.setattr(
+        interview, "try_claim_resume_turn", lambda *args, **kwargs: "turn-token",
+    )
+    monkeypatch.setattr(
+        interview, "renew_resume_turn_claim", lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        interview, "release_resume_turn_claim", lambda *args, **kwargs: True,
+    )
+    committed = []
+    monkeypatch.setattr(
+        interview,
+        "commit_resume_turn",
+        lambda _sid, messages, **kwargs: committed.append(messages) or True,
+    )
+
+    _result, message = asyncio.run(
+        interview._run_resume_retry(
+            entry, "not-arrived", "preserved answer", "u1",
+        ),
+    )
+
+    assert message == "next question"
+    assert calls == [
+        (
+            "update",
+            {"configurable": {"thread_id": "not-arrived"}},
+            "preserved answer",
+        ),
+        ("invoke", None, {"configurable": {"thread_id": "not-arrived"}}),
+    ]
+    assert committed == [[
+        {"role": "user", "content": "preserved answer"},
+        {"role": "assistant", "content": "next question"},
+    ]]
+
+
+def test_resume_chat_rejects_new_input_while_reply_is_pending(monkeypatch):
+    class Graph:
+        def update_state(self, *_args, **_kwargs):
+            raise AssertionError("pending turns must use the recovery endpoint")
+
+    entry = {
+        "graph": Graph(),
+        "config": {"configurable": {"thread_id": "pending-chat"}},
+    }
+    monkeypatch.setattr(
+        interview,
+        "get_session",
+        lambda *args, **kwargs: {
+            "mode": "resume",
+            "transcript": [{"role": "user", "content": "first answer"}],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="pending recovery"):
+        asyncio.run(
+            interview._commit_resume_turn(
+                entry, "pending-chat", "second answer", "u1",
+            ),
+        )
+
+
+def test_resume_chat_rejects_input_after_graph_completion(monkeypatch):
+    class Graph:
+        def get_state(self, _config):
+            return SimpleNamespace(values={"phase": "end", "is_finished": True})
+
+        def update_state(self, *_args, **_kwargs):
+            raise AssertionError("completed interviews cannot accept new input")
+
+    entry = {
+        "graph": Graph(),
+        "config": {"configurable": {"thread_id": "finished-chat"}},
+    }
+    monkeypatch.setattr(
+        interview,
+        "get_session",
+        lambda *args, **kwargs: {
+            "mode": "resume",
+            "transcript": [{"role": "assistant", "content": "final reply"}],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="already complete"):
+        asyncio.run(
+            interview._commit_resume_turn(
+                entry, "finished-chat", "late answer", "u1",
+            ),
+        )

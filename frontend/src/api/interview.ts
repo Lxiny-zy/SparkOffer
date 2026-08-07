@@ -118,12 +118,30 @@ export async function startJobPrep(payload: any, callbacks?: SSECallbacks, signa
   }, callbacks, signal);
 }
 
-export async function sendMessage(sessionId: string, message: string, callbacks?: SSECallbacks): Promise<any> {
+export async function sendMessage(
+  sessionId: string,
+  message: string,
+  callbacks?: SSECallbacks,
+  signal?: AbortSignal,
+): Promise<any> {
   return fetchSSE(`${API_BASE}/interview/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, message }),
-  }, callbacks);
+  }, callbacks, signal);
+}
+
+export async function regenerateResumeReply(
+  sessionId: string,
+  message: string,
+  callbacks?: SSECallbacks,
+  signal?: AbortSignal,
+): Promise<any> {
+  return fetchSSE(`${API_BASE}/interview/regenerate/${sessionId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  }, callbacks, signal);
 }
 
 export interface RAGEvalMetrics {

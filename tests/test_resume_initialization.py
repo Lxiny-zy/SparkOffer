@@ -1,10 +1,14 @@
 import asyncio
 import threading
+from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
 from langchain_core.messages import AIMessage
 
+from backend.graphs import resume_interview
 from backend.models import InterviewMode, StartInterviewRequest
-from backend.routers import interview
+from backend.routers import interview, profile
 
 
 class BlockingInitialGraph:
@@ -74,3 +78,92 @@ def test_resume_initialization_finishes_after_client_disconnect(monkeypatch):
         assert not any(call[0] == "delete" for call in calls)
     finally:
         interview.graphs.pop("resume-init", None)
+
+
+def test_resume_session_restore_includes_graph_completion_state(monkeypatch):
+    class Graph:
+        def get_state(self, config):
+            assert config == {"configurable": {"thread_id": "resume-state"}}
+            return SimpleNamespace(values={"phase": "end", "is_finished": True})
+
+    monkeypatch.setattr(
+        profile,
+        "get_session",
+        lambda *args, **kwargs: {
+            "session_id": "resume-state",
+            "mode": "resume",
+            "review": "",
+            "transcript": [],
+        },
+    )
+    monkeypatch.setattr(
+        resume_interview,
+        "compile_resume_interview",
+        lambda _user_id: Graph(),
+    )
+
+    restored = asyncio.run(
+        profile.get_interview_session("resume-state", user_id="u1"),
+    )
+
+    assert restored["resume_state"] == {
+        "phase": "end",
+        "is_finished": True,
+    }
+
+
+def test_resume_session_restore_prefers_durable_completion_state(monkeypatch):
+    monkeypatch.setattr(
+        profile,
+        "get_session",
+        lambda *args, **kwargs: {
+            "session_id": "durable-state",
+            "mode": "resume",
+            "review": "",
+            "transcript": [],
+            "meta": {
+                "resume_phase": "end",
+                "resume_is_finished": True,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        resume_interview,
+        "compile_resume_interview",
+        lambda _user_id: pytest.fail("durable state must avoid checkpoint reads"),
+    )
+
+    restored = asyncio.run(
+        profile.get_interview_session("durable-state", user_id="u1"),
+    )
+
+    assert restored["resume_state"] == {
+        "phase": "end",
+        "is_finished": True,
+    }
+
+
+def test_resume_session_restore_reports_checkpoint_failure(monkeypatch):
+    monkeypatch.setattr(
+        profile,
+        "get_session",
+        lambda *args, **kwargs: {
+            "session_id": "broken-state",
+            "mode": "resume",
+            "review": "",
+            "transcript": [],
+            "meta": {},
+        },
+    )
+    monkeypatch.setattr(
+        resume_interview,
+        "compile_resume_interview",
+        lambda _user_id: (_ for _ in ()).throw(RuntimeError("checkpoint unavailable")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            profile.get_interview_session("broken-state", user_id="u1"),
+        )
+
+    assert exc_info.value.status_code == 503

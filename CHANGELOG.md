@@ -4,6 +4,7 @@
 
 ### Added / Changed / Fixed
 
+- Added durable Resume interview reply recovery across SSE/network failures, including pending-turn replay, refresh restoration, evaluation fencing, empty-response rejection, and reverse-QA completion fixes.
 - Hardened production authentication and Docker defaults, trusted-proxy handling, bounded/atomic rate limiting, deleted-user token checks, and transactional default-user ID migration.
 - Extended default-user migration to stage, verify, roll back, and finalize Qdrant memory/knowledge data without exposing reserved resume or escaped Topic namespaces.
 - Made legacy Qdrant cleanup restart-safe with durable retry markers, preserved memory collections outside knowledge-prefix cleanup, migrated configured Qdrant data even from numpy mode, and retained Qdrant 1.12 collection settings.

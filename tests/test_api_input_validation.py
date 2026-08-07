@@ -72,6 +72,11 @@ def client():
         ),
         (
             "POST",
+            "/api/interview/chat",
+            {"session_id": "session-1", "message": "   "},
+        ),
+        (
+            "POST",
             "/api/interview/session/session-1/progress",
             {"current_index": "not-an-integer"},
         ),

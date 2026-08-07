@@ -14,6 +14,7 @@ from backend.indexer import query_resume, gather_topic_contexts, load_topics
 from backend.memory import get_profile_summary
 from backend.context_assembler import resolve_input_budget, count_tokens, ContextBudget, Section
 from backend.prompts.interviewer import RESUME_INTERVIEWER_SYSTEM, RESUME_TURN_CONTEXT
+from backend.utils.sse_helpers import chunk_text
 
 logger = logging.getLogger("uvicorn")
 
@@ -125,9 +126,12 @@ def _make_init_interview(user_id: str):
             SystemMessage(content=system_prompt),
             HumanMessage(content="面试开始，请开场并让候选人做自我介绍。"),
         ])
+        opening = chunk_text(response).strip()
+        if not opening:
+            raise RuntimeError("Resume interviewer returned an empty opening message")
 
         return {
-            "messages": [response],
+            "messages": [AIMessage(content=opening)],
             "system_prompt": system_prompt,
             "resume_context": resume_ctx,
             "knowledge_context": knowledge_ctx,
@@ -184,9 +188,14 @@ def _make_interviewer_ask(user_id: str):
         llm = get_langchain_llm()
         messages = [SystemMessage(content=stable)] + kept + [SystemMessage(content=turn_ctx)]
         response = llm.invoke(messages)
+        response_content = chunk_text(response).strip()
+        if not response_content:
+            raise RuntimeError("Resume interviewer returned an empty reply")
 
         # Parse and strip inline eval from response
-        clean_content, eval_data = _parse_inline_eval(response.content)
+        clean_content, eval_data = _parse_inline_eval(response_content)
+        if not clean_content.strip():
+            raise RuntimeError("Resume interviewer returned an empty reply")
         count = state.get("phase_question_count", 0)
 
         result = {
@@ -194,6 +203,14 @@ def _make_interviewer_ask(user_id: str):
             "questions_asked": asked + [clean_content[:100]],
             "phase_question_count": count + 1,
         }
+
+        # The first reverse-QA response invites the candidate to ask, and the
+        # next two responses answer those questions. Mark completion on the
+        # second answer itself; ending in ``route_after_answer`` at count=2 used
+        # to swallow the candidate's final question before the LLM saw it.
+        if state.get("phase") == InterviewPhase.REVERSE_QA.value and count + 1 >= 3:
+            result["phase"] = InterviewPhase.END.value
+            result["is_finished"] = True
 
         if eval_data:
             eval_data["phase"] = state.get("phase", "")
@@ -228,7 +245,7 @@ def route_after_answer(state: ResumeInterviewState) -> str:
         return "advance"
     if phase == "self_intro" and count >= 2:
         return "advance"
-    if phase == "reverse_qa" and count >= 2:
+    if phase == "reverse_qa" and count >= 3:
         return "end"
 
     # Technical / project_deep_dive: eval-driven with count fallback

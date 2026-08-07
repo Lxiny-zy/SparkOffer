@@ -420,6 +420,39 @@ async def get_interview_session(session_id: str, user_id: str = Depends(get_curr
     # Re-populate live_store if the backend has been restarted since session start
     from backend.live_store import drill_sessions, job_prep_sessions, save_live
     mode = session.get("mode")
+    if mode == "resume":
+        meta = session.get("meta", {}) or {}
+        if "resume_phase" in meta and "resume_is_finished" in meta:
+            session["resume_state"] = {
+                "phase": meta.get("resume_phase"),
+                "is_finished": bool(meta.get("resume_is_finished")),
+            }
+        else:
+            try:
+                from backend.graphs.resume_interview import compile_resume_interview
+
+                def _load_resume_state():
+                    graph = compile_resume_interview(user_id)
+                    snapshot = graph.get_state({
+                        "configurable": {"thread_id": session_id},
+                    })
+                    values = getattr(snapshot, "values", None) or {}
+                    return {
+                        "phase": values.get("phase"),
+                        "is_finished": bool(values.get("is_finished")),
+                    }
+
+                session["resume_state"] = await asyncio.to_thread(_load_resume_state)
+            except Exception as exc:
+                logger.warning(
+                    "Could not restore resume graph state for %s: %s",
+                    session_id,
+                    exc,
+                )
+                raise HTTPException(
+                    503,
+                    "Resume interview state is temporarily unavailable.",
+                ) from exc
     if mode == "topic_drill" and session_id not in drill_sessions:
         save_live(drill_sessions, session_id, "drill", user_id, {
             "topic": session.get("topic"),

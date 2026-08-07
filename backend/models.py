@@ -75,6 +75,26 @@ class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=64)
     message: str = Field(min_length=1, max_length=100_000)
 
+    @field_validator("message")
+    @classmethod
+    def strip_message(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class RetryInterviewReplyRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("message")
+    @classmethod
+    def strip_message(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
 
 class ReferenceAnswerRequest(BaseModel):
     topic: str = Field(min_length=1, max_length=200)

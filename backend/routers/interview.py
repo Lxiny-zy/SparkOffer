@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from backend.models import (
     StartInterviewRequest, ChatRequest, EndDrillRequest,
     InterviewMode, InterviewPhase, ReferenceAnswerRequest,
+    RetryInterviewReplyRequest,
 )
 from backend.indexer import load_topics
 from backend.memory import update_profile_after_interview, llm_update_profile
@@ -36,7 +37,7 @@ from backend.live_store import (
     save_live, get_live, del_live,
 )
 from backend.storage.live_sessions import save_live_session, load_live_session
-from backend.utils.sse_helpers import sse_event, streaming_response
+from backend.utils.sse_helpers import chunk_text, sse_event, streaming_response
 from backend.auth import get_current_user
 
 router = APIRouter(prefix="/api")
@@ -639,6 +640,54 @@ def _invoke_resume_turn(graph, config: dict, message: str):
         return None, exc
 
 
+def _resume_graph_values(entry: dict) -> dict:
+    """Best-effort state snapshot used when replaying a durable reply."""
+    try:
+        snapshot = entry["graph"].get_state(entry["config"])
+        values = getattr(snapshot, "values", None)
+        return dict(values) if isinstance(values, dict) else {}
+    except Exception as exc:
+        logger.warning("Could not read resume graph state for replay: %s", exc)
+        return {}
+
+
+def _completed_resume_reply(
+    transcript: list[dict], message: str,
+) -> tuple[bool, str]:
+    """Return the durable reply only when it belongs to ``message``."""
+    if (
+        len(transcript) >= 2
+        and transcript[-1].get("role") == "assistant"
+        and transcript[-2].get("role") == "user"
+        and str(transcript[-2].get("content") or "").strip() == message
+    ):
+        return True, str(transcript[-1].get("content") or "")
+    return False, ""
+
+
+def _current_resume_reply(result: dict, message: str) -> str:
+    """Return the non-empty assistant reply produced after this human input."""
+    messages = result.get("messages", []) if isinstance(result, dict) else []
+    human_index = None
+    for index in range(len(messages) - 1, -1, -1):
+        candidate = messages[index]
+        if (
+            isinstance(candidate, HumanMessage)
+            and str(candidate.content or "").strip() == message
+        ):
+            human_index = index
+            break
+    if human_index is None:
+        raise RuntimeError("Resume graph result did not contain the current input")
+
+    for candidate in messages[human_index + 1:]:
+        if isinstance(candidate, AIMessage):
+            reply = chunk_text(candidate).strip()
+            if reply:
+                return reply
+    raise RuntimeError("Resume interviewer returned no new assistant reply")
+
+
 async def _resume_turn_heartbeat(
     session_id: str,
     user_id: str,
@@ -709,9 +758,58 @@ async def _resume_turn_heartbeat(
 
 
 async def _commit_resume_turn(entry: dict, session_id: str, message: str,
-                              user_id: str) -> tuple[dict, str]:
-    """Serialize a resume turn through graph completion and transcript commit."""
+                              user_id: str, *, retry_pending: bool = False) -> tuple[dict, str]:
+    """Serialize a resume turn through graph completion and transcript commit.
+
+    ``retry_pending`` is used after a client lost the SSE connection while the
+    model failed before producing an assistant message. The human message is
+    already in the checkpoint/transcript in that case, so updating the graph
+    with it again would duplicate the turn.
+    """
     async with _get_resume_session_lock(user_id, session_id):
+        retry_request = retry_pending
+        if not retry_request:
+            stored = await asyncio.to_thread(
+                get_session, session_id, user_id=user_id,
+            )
+            transcript = (stored or {}).get("transcript") or []
+            if transcript and transcript[-1].get("role") == "user":
+                raise RuntimeError(
+                    "The previous interview reply is pending recovery"
+                )
+        if retry_request:
+            stored = await asyncio.to_thread(
+                get_session, session_id, user_id=user_id,
+            )
+            transcript = (stored or {}).get("transcript") or []
+            if not stored or stored.get("mode") != InterviewMode.RESUME.value:
+                raise RuntimeError("Resume session no longer exists")
+            if not transcript:
+                raise RuntimeError("No interview reply is available to retry")
+            completed, reply = _completed_resume_reply(transcript, message)
+            if completed:
+                recovered = await asyncio.to_thread(_resume_graph_values, entry)
+                recovered["_recovered"] = True
+                return recovered, reply
+            if transcript[-1].get("role") == "user":
+                if str(transcript[-1].get("content") or "").strip() != message:
+                    raise RuntimeError("A different interview turn is pending")
+                retry_pending = True
+            elif transcript[-1].get("role") == "assistant":
+                # The failed request never reached the backend. Submit the
+                # preserved client message as a new graph turn.
+                retry_pending = False
+            else:
+                raise RuntimeError("The last interview turn cannot be retried")
+
+        if not retry_pending:
+            current = await asyncio.to_thread(_resume_graph_values, entry)
+            if current.get("is_finished") or current.get("phase") in (
+                InterviewPhase.END.value,
+                "end",
+            ):
+                raise RuntimeError("Resume interview is already complete")
+
         turn_token = await asyncio.to_thread(
             try_claim_resume_turn, session_id, user_id=user_id,
         )
@@ -726,21 +824,72 @@ async def _commit_resume_turn(entry: dict, session_id: str, message: str,
             )
         )
         try:
-            result, invoke_error = await asyncio.to_thread(
-                _invoke_resume_turn, entry["graph"], entry["config"], message,
-            )
-            if invoke_error is not None:
-                turn_messages = [{"role": "user", "content": message}]
+            if retry_request:
+                # Re-check after the durable claim. In a multi-worker deployment
+                # the original request may have committed while this worker was
+                # waiting to claim; replay that result instead of advancing the
+                # graph a second time without a new human answer.
+                latest = await asyncio.to_thread(
+                    get_session, session_id, user_id=user_id,
+                )
+                transcript = (latest or {}).get("transcript") or []
+                completed, reply = _completed_resume_reply(transcript, message)
+                if completed:
+                    recovered = await asyncio.to_thread(_resume_graph_values, entry)
+                    recovered["_recovered"] = True
+                    return recovered, reply
+                if transcript and transcript[-1].get("role") == "user":
+                    if str(transcript[-1].get("content") or "").strip() != message:
+                        raise RuntimeError("A different interview turn is pending")
+                    retry_pending = True
+                elif transcript and transcript[-1].get("role") == "assistant":
+                    retry_pending = False
+                else:
+                    raise RuntimeError("The last interview turn cannot be retried")
+
+            if retry_pending:
+                try:
+                    result = await asyncio.to_thread(
+                        entry["graph"].invoke, None, entry["config"],
+                    )
+                    invoke_error = None
+                except Exception as exc:
+                    result, invoke_error = None, exc
             else:
-                ai_message = ""
-                for msg in reversed(result.get("messages", [])):
-                    if isinstance(msg, AIMessage):
-                        ai_message = msg.content
-                        break
-                turn_messages = [
-                    {"role": "user", "content": message},
-                    {"role": "assistant", "content": ai_message},
-                ]
+                result, invoke_error = await asyncio.to_thread(
+                    _invoke_resume_turn, entry["graph"], entry["config"], message,
+                )
+            ai_message = ""
+            if invoke_error is None:
+                try:
+                    ai_message = _current_resume_reply(result, message)
+                except Exception as exc:
+                    invoke_error = exc
+
+            if invoke_error is not None:
+                turn_messages = [] if retry_pending else [{"role": "user", "content": message}]
+            else:
+                turn_messages = [{"role": "assistant", "content": ai_message}]
+                if not retry_pending:
+                    turn_messages.insert(0, {"role": "user", "content": message})
+
+            if not turn_messages:
+                raise invoke_error
+
+            committed_phase = None
+            committed_finished = None
+            if invoke_error is None and isinstance(result, dict):
+                raw_phase = result.get("phase")
+                if raw_phase is not None:
+                    committed_phase = (
+                        raw_phase.value
+                        if isinstance(raw_phase, InterviewPhase)
+                        else str(raw_phase)
+                    )
+                if "is_finished" in result:
+                    committed_finished = bool(result.get("is_finished"))
+                if committed_phase in (InterviewPhase.END.value, "end"):
+                    committed_finished = True
 
             persisted = await asyncio.to_thread(
                 commit_resume_turn,
@@ -748,6 +897,8 @@ async def _commit_resume_turn(entry: dict, session_id: str, message: str,
                 turn_messages,
                 user_id=user_id,
                 claim_token=turn_token,
+                phase=committed_phase,
+                is_finished=committed_finished,
             )
             if not persisted:
                 raise RuntimeError("Resume transcript claim was lost") from invoke_error
@@ -775,6 +926,16 @@ async def _run_resume_turn(entry: dict, session_id: str, message: str,
     """Finish a checkpointed turn even when its awaiting request is cancelled."""
     return await _finish_despite_cancellation(
         _commit_resume_turn(entry, session_id, message, user_id),
+    )
+
+
+async def _run_resume_retry(entry: dict, session_id: str, message: str,
+                            user_id: str) -> tuple[dict, str]:
+    """Recover a completed reply or resume the last failed graph turn."""
+    return await _finish_despite_cancellation(
+        _commit_resume_turn(
+            entry, session_id, message, user_id, retry_pending=True,
+        ),
     )
 
 
@@ -952,6 +1113,73 @@ async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
 
         yield sse_event({"type": "complete", "data": {
             "session_id": req.session_id, "message": ai_message, "is_finished": is_finished,
+        }})
+        yield sse_event({"type": "done"})
+
+    return streaming_response(_gen())
+
+
+@router.post("/interview/regenerate/{session_id}")
+async def regenerate_resume_reply(
+    session_id: str,
+    body: RetryInterviewReplyRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """Recover or retry the last resume-interview reply without duplicating input.
+
+    If the original request finished after the browser lost its SSE connection,
+    the durable assistant message is replayed. If generation failed before an
+    assistant message was committed, LangGraph resumes from its pending
+    checkpoint and only the missing assistant message is appended.
+    """
+    entry = _get_resume_graph(session_id, user_id)
+    if entry is None:
+        raise HTTPException(404, "Session not found. It may have expired.")
+    if entry.get("user_id") != user_id:
+        raise HTTPException(403, "Access denied.")
+
+    async def _gen():
+        turn_task = asyncio.create_task(
+            _run_resume_retry(entry, session_id, body.message, user_id),
+        )
+        try:
+            yield sse_event({"type": "progress", "message": "正在恢复上一轮面试回复..."})
+            while not turn_task.done():
+                done, _ = await asyncio.wait({turn_task}, timeout=5.0)
+                if not done:
+                    yield sse_event({"type": "ping"})
+            result, ai_message = turn_task.result()
+        except (asyncio.CancelledError, GeneratorExit):
+            try:
+                await asyncio.shield(turn_task)
+            except asyncio.CancelledError:
+                try:
+                    await turn_task
+                except Exception as exc:
+                    logger.error("Resume retry failed after client disconnect: %s", exc)
+            except Exception as exc:
+                logger.error("Resume retry failed after client disconnect: %s", exc)
+            raise
+        except Exception as exc:
+            logger.error("Resume reply retry failed: %s", exc)
+            yield sse_event({
+                "type": "error",
+                "message": "上一轮回复暂时无法恢复，请稍后重试。",
+            })
+            yield sse_event({"type": "done"})
+            return
+
+        is_finished = False
+        if isinstance(result, dict):
+            is_finished = bool(result.get("is_finished", False))
+            if result.get("phase") in (InterviewPhase.END.value, "end"):
+                is_finished = True
+
+        yield sse_event({"type": "complete", "data": {
+            "session_id": session_id,
+            "message": ai_message,
+            "is_finished": is_finished,
+            "recovered": bool(isinstance(result, dict) and result.get("_recovered")),
         }})
         yield sse_event({"type": "done"})
 
@@ -1440,6 +1668,15 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         try_claim_session_evaluation, session_id, user_id=user_id,
     )
     if not evaluation_token:
+        latest = await asyncio.to_thread(
+            get_session, session_id, user_id=user_id,
+        )
+        latest_transcript = (latest or {}).get("transcript") or []
+        if latest_transcript and latest_transcript[-1].get("role") == "user":
+            raise HTTPException(
+                409,
+                "The previous interview reply must be recovered before evaluation.",
+            )
         raise HTTPException(409, "Evaluation is already in progress for this session.")
 
     async def _stream_resume_unlocked():
