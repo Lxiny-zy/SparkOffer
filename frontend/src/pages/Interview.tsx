@@ -4,7 +4,7 @@ import { Markdown } from "../components/ChatBubble";
 import { Check, Minus, Star, Lightbulb, Eye, Loader2, RefreshCw, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import ChatBubble from "../components/ChatBubble";
-import { sendMessage, regenerateResumeReply, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics, type DrillProgressPayload } from "../api/interview";
+import { sendMessage, regenerateResumeReply, withdrawResumeTurn, endInterview, getReferenceAnswer, getInterviewSession, saveDrillProgress, type RAGEvalMetrics, type DrillProgressPayload } from "../api/interview";
 import { formatQuestionLabel } from "@/lib/question";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -98,6 +98,8 @@ export default function Interview() {
   const [sendProgress, setSendProgress] = useState("");
   const [resumeSendError, setResumeSendError] = useState<string | null>(null);
   const [failedResumeMessage, setFailedResumeMessage] = useState("");
+  const [resumeEvalError, setResumeEvalError] = useState<string | null>(null);
+  const [withdrawing, setWithdrawing] = useState(false);
   const [finished, setFinished] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [progress, setProgress] = useState(initData.progress || "");
@@ -112,13 +114,22 @@ export default function Interview() {
   const [hints, setHints] = useState<Record<string | number, HintState>>({});
   const [hintLoading, setHintLoading] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
+  // Fresh resume sessions arrive from the start page with the opening message
+  // in history state — render it immediately and reconcile in the background.
+  // Only block the screen when there is nothing local to show (refresh /
+  // direct link), otherwise every entry flashes a full-page spinner.
+  const hasLocalResumeContent = initData.mode === "resume" && !!initData.message;
   const [restoring, setRestoring] = useState<boolean>(
-    !initData.mode || initData.mode === "resume",
+    (!initData.mode || initData.mode === "resume") && !hasLocalResumeContent,
   );
+  const [backgroundSyncing, setBackgroundSyncing] = useState(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [resumeRestoreWarning, setResumeRestoreWarning] = useState<string | null>(null);
   const [restoreAttempt, setRestoreAttempt] = useState(0);
   const autoEvalDoneRef = useRef(false);
+  // True while a chat send is in flight — the background reconcile must not
+  // clobber the optimistic message list with a pre-send transcript snapshot.
+  const sendingRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
@@ -129,13 +140,44 @@ export default function Interview() {
 
   const draftKey = sessionId ? `drill:draft:${sessionId}` : null;
   const resumePendingKey = sessionId ? `resume:pending:${sessionId}` : null;
+  // The chat composer's unsent text. Unlike drill answers (two-tier persisted),
+  // this used to live only in React state — a refresh mid-typing lost a long
+  // answer entirely. Persist it debounced; cleared on successful send.
+  const resumeDraftKey = sessionId ? `resume:draft:${sessionId}` : null;
+
+  // Restore the unsent chat draft once per session key.
+  const resumeDraftRestoredRef = useRef(false);
+  useEffect(() => {
+    if (isBatchMode || !resumeDraftKey || resumeDraftRestoredRef.current) return;
+    resumeDraftRestoredRef.current = true;
+    try {
+      const raw = localStorage.getItem(resumeDraftKey);
+      if (raw) setInput(raw);
+    } catch { /* storage unavailable */ }
+  }, [resumeDraftKey, isBatchMode]);
+
+  // Debounced draft save. Empty input removes the entry so stale drafts don't
+  // reappear after a successful send + refresh.
+  useEffect(() => {
+    if (isBatchMode || !resumeDraftKey || finished) return;
+    const timer = window.setTimeout(() => {
+      try {
+        if (input) localStorage.setItem(resumeDraftKey, input);
+        else localStorage.removeItem(resumeDraftKey);
+      } catch { /* quota / private mode */ }
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [input, isBatchMode, resumeDraftKey, finished]);
 
   // Resume sessions always reconcile with the backend: React Router history
   // state can survive a browser refresh, so its presence is not proof that the
   // latest transcript or pending-turn state is already in memory.
   useEffect(() => {
     if ((initData.mode && initData.mode !== "resume") || !sessionId) return;
-    setRestoring(true);
+    // With local content already renderable, reconcile without blanking the
+    // screen; a cold entry (refresh) still shows the loading state.
+    if (hasLocalResumeContent) setBackgroundSyncing(true);
+    else setRestoring(true);
     setRestoreError(null);
     getInterviewSession(sessionId)
       .then((sess: any) => {
@@ -155,6 +197,12 @@ export default function Interview() {
         if (sess.questions?.length) setQuestions(sess.questions);
         if (sess.mode === "resume") {
           const resumeState = sess.resume_state || {};
+          if (resumeState.recoverable === false && !sess.review) {
+            // Sessions row survived but the graph checkpoint is gone —
+            // continuing would silently restart the interview from scratch.
+            setRestoreError("该面试的进度数据已丢失，无法继续。请重新开始一场面试。");
+            return;
+          }
           if (sess.review || resumeState.is_finished || resumeState.phase === "end") {
             setFinished(true);
           }
@@ -180,6 +228,12 @@ export default function Interview() {
         }
         // Resume mode: replay transcript
         if (sess.mode === "resume" && Array.isArray(sess.transcript)) {
+          if (sendingRef.current) {
+            // A turn is in flight; the durable transcript predates it. Skip
+            // this replay — the send's own success/error path owns the UI, and
+            // the next reconcile (or retry banner) resolves any gap.
+            return;
+          }
           const transcript: ChatMessage[] = sess.transcript.map((m: any) => ({
             role: m.role,
             content: m.content,
@@ -277,8 +331,8 @@ export default function Interview() {
           setRestoreError(message);
         }
       })
-      .finally(() => setRestoring(false));
-  }, [sessionId, initData.mode, initData.message, draftKey, resumePendingKey, restoreAttempt]);
+      .finally(() => { setRestoring(false); setBackgroundSyncing(false); });
+  }, [sessionId, initData.mode, initData.message, draftKey, resumePendingKey, restoreAttempt, hasLocalResumeContent]);
 
   // Debounced persist of in-progress state.
   // Two-tier strategy:
@@ -534,8 +588,9 @@ export default function Interview() {
         ...p,
         [qid]: { ...p[qid], [nextMode]: data.reference_answer, stage: nextMode } as HintState,
       }));
-    } catch (e) {
+    } catch (e: any) {
       console.error("获取提示失败:", e);
+      toast.error(nextMode === "hint" ? "提示获取失败，请重试" : "参考答案获取失败，请重试");
     } finally {
       setHintLoading(false);
     }
@@ -611,7 +666,11 @@ export default function Interview() {
     writeResumePendingTurn(resumePendingKey, text, messages.length);
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     setInput("");
+    // The message is now tracked by the pending-turn entry; drop the draft so
+    // it doesn't resurrect this text after the turn completes.
+    if (resumeDraftKey) { try { localStorage.removeItem(resumeDraftKey); } catch { /* noop */ } }
     setSending(true);
+    sendingRef.current = true;
     setSendProgress("");
     setResumeSendError(null);
     const controller = new AbortController();
@@ -634,6 +693,7 @@ export default function Interview() {
     } finally {
       if (resumeRequestRef.current === controller) resumeRequestRef.current = null;
       setSending(false);
+      sendingRef.current = false;
       textareaRef.current?.focus();
     }
   };
@@ -653,6 +713,7 @@ export default function Interview() {
       || (!isRecovery && (lastAssistant?.role !== "assistant" || lastUser?.role !== "user"))
     ) return;
     setSending(true);
+    sendingRef.current = true;
     setSendProgress(isRecovery ? "正在恢复上一轮回复..." : "正在重新生成上一轮回复...");
     const controller = new AbortController();
     resumeRequestRef.current = controller;
@@ -690,8 +751,37 @@ export default function Interview() {
     } finally {
       if (resumeRequestRef.current === controller) resumeRequestRef.current = null;
       setSending(false);
+      sendingRef.current = false;
       setSendProgress("");
       textareaRef.current?.focus();
+    }
+  };
+
+  /**
+   * Abandon the pending turn and put the failed answer back in the composer
+   * for editing. The backend removes the durable user-tail (if any); locally we
+   * pop the trailing user bubble and clear the error state.
+   */
+  const handleEditFailedAnswer = async () => {
+    if (!sessionId || !failedResumeMessage || sending || withdrawing) return;
+    setWithdrawing(true);
+    try {
+      await withdrawResumeTurn(sessionId, failedResumeMessage);
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        return last?.role === "user" && last.content === failedResumeMessage
+          ? prev.slice(0, -1)
+          : prev;
+      });
+      clearResumePendingTurn(resumePendingKey);
+      setInput(failedResumeMessage);
+      setResumeSendError(null);
+      setFailedResumeMessage("");
+      textareaRef.current?.focus();
+    } catch (err: any) {
+      toast.error(err?.message || "撤回失败，请重试");
+    } finally {
+      setWithdrawing(false);
     }
   };
 
@@ -700,6 +790,7 @@ export default function Interview() {
     setShowEndConfirm(false);
     setReviewing(true);
     setEvalProgress("");
+    setResumeEvalError(null);
     try {
       const data = await endInterview(sessionId, null, {
         onProgress: (msg) => setEvalProgress(msg),
@@ -714,7 +805,7 @@ export default function Interview() {
         },
       });
     } catch (err: any) {
-      alert("复盘生成失败: " + err.message);
+      setResumeEvalError(err?.message || "复盘生成失败，请重试");
     } finally {
       setReviewing(false);
     }
@@ -1040,8 +1131,28 @@ export default function Interview() {
               进度: {progress}
             </span>
           )}
+          {backgroundSyncing && (
+            <span className="text-[11px] text-dim flex items-center gap-1 whitespace-nowrap">
+              <Loader2 size={11} className="animate-spin" />
+              同步中
+            </span>
+          )}
         </div>
-        <Button variant="destructive" size="sm" onClick={() => finished ? handleEndResume() : setShowEndConfirm(true)} disabled={reviewing || sending || !!resumeSendError || !!resumeRestoreWarning}>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={() => finished ? handleEndResume() : setShowEndConfirm(true)}
+          disabled={reviewing || sending || !!resumeSendError || !!resumeRestoreWarning}
+          title={
+            resumeSendError
+              ? "请先恢复或修改上一轮回答，再结束面试"
+              : resumeRestoreWarning
+                ? "请先重新同步会话，再结束面试"
+                : sending
+                  ? "面试官回复中，请稍候"
+                  : undefined
+          }
+        >
           {reviewing ? (evalProgress || "生成复盘中...") : finished ? "查看复盘" : "结束面试"}
         </Button>
       </div>
@@ -1067,13 +1178,40 @@ export default function Interview() {
             <div className="text-sm text-red font-medium leading-relaxed">
               面试官回复中断：{resumeSendError}
             </div>
-            <div className="text-[13px] text-dim">你的回答已保留，可直接重新生成。</div>
-            <div className="flex justify-end">
-              <Button variant="default" size="sm" className="gap-1.5" onClick={handleRegenerateResume}>
+            <div className="text-[13px] text-dim">你的回答已保留，可重新生成回复，或撤回后修改这条回答。</div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" size="sm" className="gap-1.5" onClick={handleEditFailedAnswer} disabled={withdrawing || sending}>
+                {withdrawing ? <Loader2 size={14} className="animate-spin" /> : null}
+                修改回答
+              </Button>
+              <Button variant="default" size="sm" className="gap-1.5" onClick={handleRegenerateResume} disabled={withdrawing || sending}>
                 <RefreshCw size={14} />
                 重新生成
               </Button>
             </div>
+          </div>
+        )}
+        {resumeEvalError && !reviewing && (
+          <div className="rounded-lg bg-red/8 border border-red/20 px-4 py-3 flex flex-col gap-2 animate-fade-in">
+            <div className="text-sm text-red font-medium leading-relaxed">复盘生成失败：{resumeEvalError}</div>
+            <div className="text-[13px] text-dim">面试记录已保存，可直接重试。</div>
+            <div className="flex justify-end">
+              <Button variant="default" size="sm" className="gap-1.5" onClick={handleEndResume}>
+                <RefreshCw size={14} />
+                重新生成复盘
+              </Button>
+            </div>
+          </div>
+        )}
+        {reviewing && (
+          <div className="flex flex-col items-center gap-3 px-4 py-6 text-dim text-sm animate-fade-in">
+            <div className="flex gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot" />
+              <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot [animation-delay:0.2s]" />
+              <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot [animation-delay:0.4s]" />
+            </div>
+            <span>正在生成面试复盘...</span>
+            <span className="text-[13px] opacity-60">{evalProgress || "AI 正在回顾整场面试并评估你的表现"}</span>
           </div>
         )}
         {!resumeSendError

@@ -437,9 +437,17 @@ async def get_interview_session(session_id: str, user_id: str = Depends(get_curr
                         "configurable": {"thread_id": session_id},
                     })
                     values = getattr(snapshot, "values", None) or {}
+                    if not values.get("messages") and values.get("phase") is None:
+                        # The sessions row survived but its checkpoint is gone
+                        # (deleted checkpoints.db / cleaned thread). Chatting
+                        # against an empty checkpoint would re-run init from
+                        # START — surface it as unrecoverable instead.
+                        return {"phase": None, "is_finished": False,
+                                "recoverable": False}
                     return {
                         "phase": values.get("phase"),
                         "is_finished": bool(values.get("is_finished")),
+                        "recoverable": True,
                     }
 
                 session["resume_state"] = await asyncio.to_thread(_load_resume_state)

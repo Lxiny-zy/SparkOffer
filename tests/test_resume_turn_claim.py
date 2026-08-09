@@ -916,3 +916,77 @@ def test_resume_chat_rejects_input_after_graph_completion(monkeypatch):
                 entry, "finished-chat", "late answer", "u1",
             ),
         )
+
+
+def test_withdraw_resume_user_tail_removes_pending_message(isolated_db):
+    from backend.storage.sessions import withdraw_resume_user_tail
+
+    create_session("withdraw-1", "resume", None, user_id="u1")
+    mark_resume_session_initialized("withdraw-1", user_id="u1")
+    append_message("withdraw-1", "assistant", "Q1?", user_id="u1")
+    append_message("withdraw-1", "user", "my failed answer", user_id="u1")
+
+    token = try_claim_resume_turn("withdraw-1", user_id="u1")
+    assert token
+    assert withdraw_resume_user_tail(
+        "withdraw-1", user_id="u1", claim_token=token,
+        expected_message="my failed answer",
+    )
+    session = get_session("withdraw-1", user_id="u1")
+    transcript = session["transcript"]
+    assert [m["role"] for m in transcript] == ["assistant"]
+    # The successful withdraw releases the claim in the same transaction.
+    assert try_claim_resume_turn("withdraw-1", user_id="u1")
+
+
+def test_withdraw_resume_user_tail_rejects_completed_turn(isolated_db):
+    from backend.storage.sessions import withdraw_resume_user_tail
+
+    create_session("withdraw-2", "resume", None, user_id="u1")
+    mark_resume_session_initialized("withdraw-2", user_id="u1")
+    append_message("withdraw-2", "user", "answer", user_id="u1")
+    append_message("withdraw-2", "assistant", "reply landed", user_id="u1")
+
+    token = try_claim_resume_turn("withdraw-2", user_id="u1")
+    assert token
+    # Tail is an assistant reply — nothing to withdraw; transcript untouched.
+    assert not withdraw_resume_user_tail(
+        "withdraw-2", user_id="u1", claim_token=token,
+        expected_message="answer",
+    )
+    session = get_session("withdraw-2", user_id="u1")
+    assert [m["role"] for m in session["transcript"]] == ["user", "assistant"]
+    release_resume_turn_claim("withdraw-2", user_id="u1", claim_token=token)
+
+
+def test_withdraw_resume_user_tail_rejects_mismatched_message(isolated_db):
+    from backend.storage.sessions import withdraw_resume_user_tail
+
+    create_session("withdraw-3", "resume", None, user_id="u1")
+    mark_resume_session_initialized("withdraw-3", user_id="u1")
+    append_message("withdraw-3", "user", "actual pending answer", user_id="u1")
+
+    token = try_claim_resume_turn("withdraw-3", user_id="u1")
+    assert token
+    assert not withdraw_resume_user_tail(
+        "withdraw-3", user_id="u1", claim_token=token,
+        expected_message="some other text",
+    )
+    session = get_session("withdraw-3", user_id="u1")
+    assert [m["role"] for m in session["transcript"]] == ["user"]
+    release_resume_turn_claim("withdraw-3", user_id="u1", claim_token=token)
+
+
+def test_withdraw_resume_user_tail_requires_owned_claim(isolated_db):
+    from backend.storage.sessions import withdraw_resume_user_tail
+
+    create_session("withdraw-4", "resume", None, user_id="u1")
+    mark_resume_session_initialized("withdraw-4", user_id="u1")
+    append_message("withdraw-4", "user", "pending", user_id="u1")
+
+    assert not withdraw_resume_user_tail(
+        "withdraw-4", user_id="u1", claim_token="not-the-token",
+        expected_message="pending",
+    )
+    session = get_session("withdraw-4", user_id="u1")
+    assert [m["role"] for m in session["transcript"]] == ["user"]

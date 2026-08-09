@@ -109,6 +109,7 @@ def test_resume_session_restore_includes_graph_completion_state(monkeypatch):
     assert restored["resume_state"] == {
         "phase": "end",
         "is_finished": True,
+        "recoverable": True,
     }
 
 
@@ -140,6 +141,39 @@ def test_resume_session_restore_prefers_durable_completion_state(monkeypatch):
     assert restored["resume_state"] == {
         "phase": "end",
         "is_finished": True,
+    }
+
+
+def test_resume_session_restore_flags_lost_checkpoint_unrecoverable(monkeypatch):
+    class EmptyGraph:
+        def get_state(self, config):
+            return SimpleNamespace(values={})
+
+    monkeypatch.setattr(
+        profile,
+        "get_session",
+        lambda *args, **kwargs: {
+            "session_id": "lost-checkpoint",
+            "mode": "resume",
+            "review": "",
+            "transcript": [],
+            "meta": {},
+        },
+    )
+    monkeypatch.setattr(
+        resume_interview,
+        "compile_resume_interview",
+        lambda _user_id: EmptyGraph(),
+    )
+
+    restored = asyncio.run(
+        profile.get_interview_session("lost-checkpoint", user_id="u1"),
+    )
+
+    assert restored["resume_state"] == {
+        "phase": None,
+        "is_finished": False,
+        "recoverable": False,
     }
 
 

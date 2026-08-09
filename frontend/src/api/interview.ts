@@ -145,6 +145,28 @@ export async function regenerateResumeReply(
   }, callbacks, signal);
 }
 
+/**
+ * Abandon the pending (unanswered) user turn so the answer can be edited and
+ * resent. Removes the trailing user message from the durable transcript and
+ * the graph checkpoint. `withdrawn: false` means there was nothing durable to
+ * remove (the failed send never reached the backend) — still safe to edit.
+ */
+export async function withdrawResumeTurn(
+  sessionId: string,
+  message: string,
+): Promise<{ ok: boolean; withdrawn: boolean }> {
+  const res = await authFetch(`${API_BASE}/interview/withdraw/${sessionId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, force: false }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || err.message || `请求失败 (${res.status})`);
+  }
+  return res.json();
+}
+
 export interface RAGEvalMetrics {
   faithfulness: number;
   answer_relevance: number;

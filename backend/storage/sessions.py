@@ -716,6 +716,40 @@ def release_resume_turn_claim(
     return cursor.rowcount > 0
 
 
+def withdraw_resume_user_tail(
+    session_id: str, *, user_id: str, claim_token: str, expected_message: str,
+) -> bool:
+    """Remove the trailing unanswered user message while an owned claim is held.
+
+    Used by the "edit my answer" recovery path: the candidate abandons a turn
+    whose assistant reply never committed. The tail must still be that exact
+    user message — a completed reply or a different pending turn is a no-op so
+    a concurrent worker's commit can never be clobbered. Removal and claim
+    release are one transaction, mirroring ``commit_resume_turn``.
+    """
+    if not claim_token:
+        return False
+    conn = get_db()
+    transcript = "COALESCE(NULLIF(transcript, ''), '[]')"
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    meta_expr = (
+        f"json_remove({doc}, '$.resume_turn_claimed_at', "
+        "'$.resume_turn_claim_token')"
+    )
+    cursor = conn.execute(
+        f"UPDATE sessions SET transcript = json_remove({transcript}, '$[#-1]'), "
+        f"meta = {meta_expr}, updated_at = CURRENT_TIMESTAMP "
+        "WHERE session_id = ? AND user_id = ? AND mode = 'resume' "
+        "AND (review IS NULL OR review = '') "
+        f"AND json_extract({doc}, '$.resume_turn_claim_token') = ? "
+        f"AND json_extract({transcript}, '$[#-1].role') = 'user' "
+        f"AND json_extract({transcript}, '$[#-1].content') = ?",
+        (session_id, user_id, claim_token, expected_message),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def try_claim_session_evaluation(session_id: str, *, user_id: str) -> str | None:
     """Claim report generation so concurrent /end calls cannot race writes."""
     conn = get_db()

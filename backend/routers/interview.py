@@ -24,7 +24,7 @@ from backend.storage.sessions import (
     mark_session_sync_step, session_sync_steps, session_sync_step_result,
     try_claim_session_evaluation, release_session_evaluation_claim,
     try_claim_resume_turn, commit_resume_turn, replace_resume_reply,
-    release_resume_turn_claim,
+    release_resume_turn_claim, withdraw_resume_user_tail,
     renew_resume_turn_claim, RESUME_TURN_CLAIM_TTL_SECONDS,
     new_session_id, delete_session, mark_resume_session_initialized,
 )
@@ -210,6 +210,25 @@ async def _finish_despite_cancellation(coro):
             await task
         finally:
             raise
+
+
+# Map internal turn-flow errors to messages the user can act on. The generic
+# fallback ("请重试") is wrong advice for claim conflicts — retrying while
+# another tab holds the turn claim fails identically and reads as flakiness.
+_RESUME_TURN_ERROR_MESSAGES = {
+    "Resume session is being evaluated or is already complete":
+        "该会话正在其他窗口回复或评估中，请稍候或切换到那个窗口继续。",
+    "Resume session is being evaluated or updated":
+        "该会话正在其他窗口回复或评估中，请稍候或切换到那个窗口继续。",
+    "The previous interview reply is pending recovery":
+        "上一轮面试官回复尚未完成，请先在页面提示中恢复或修改该回答。",
+    "Resume interview is already complete":
+        "本场面试已经结束，请点击「查看复盘」。",
+}
+
+
+def _resume_turn_error_message(exc: Exception, fallback: str) -> str:
+    return _RESUME_TURN_ERROR_MESSAGES.get(str(exc), fallback)
 
 
 class _SyncClaimLost(RuntimeError):
@@ -1239,7 +1258,9 @@ async def chat(req: ChatRequest, user_id: str = Depends(get_current_user)):
             logging.getLogger("uvicorn").error("Resume chat failed: %s", exc)
             yield sse_event({
                 "type": "error",
-                "message": "面试回复生成失败，请重试。",
+                "message": _resume_turn_error_message(
+                    exc, "面试回复生成失败，请重试。",
+                ),
             })
             yield sse_event({"type": "done"})
             return
@@ -1310,10 +1331,11 @@ async def regenerate_resume_reply(
             raise
         except Exception as exc:
             logger.error("Resume reply retry failed: %s", exc)
-            error_message = (
+            error_message = _resume_turn_error_message(
+                exc,
                 "上一轮回复重新生成失败，请稍后重试。"
                 if body.force
-                else "上一轮回复暂时无法恢复，请稍后重试。"
+                else "上一轮回复暂时无法恢复，请稍后重试。",
             )
             yield sse_event({
                 "type": "error",
@@ -1338,6 +1360,105 @@ async def regenerate_resume_reply(
         yield sse_event({"type": "done"})
 
     return streaming_response(_gen())
+
+
+@router.post("/interview/withdraw/{session_id}")
+async def withdraw_resume_turn(
+    session_id: str,
+    body: RetryInterviewReplyRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """Abandon a pending (unanswered) resume turn so the answer can be edited.
+
+    Only applies when the transcript tail is exactly the given user message with
+    no assistant reply after it — i.e. generation failed or never completed. The
+    message is removed from both the durable transcript and the LangGraph
+    checkpoint under a turn claim, so a concurrently completing worker either
+    wins (its commit lands first and this withdraw is rejected) or loses (its
+    fenced token can no longer commit).
+    """
+    entry = _get_resume_graph(session_id, user_id)
+    if entry is None:
+        raise HTTPException(404, "Session not found. It may have expired.")
+    if entry.get("user_id") != user_id:
+        raise HTTPException(403, "Access denied.")
+
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(400, "A message is required.")
+
+    async with _get_resume_session_lock(user_id, session_id):
+        stored = await asyncio.to_thread(get_session, session_id, user_id=user_id)
+        if not stored or stored.get("mode") != InterviewMode.RESUME.value:
+            raise HTTPException(404, "Session not found.")
+        transcript = stored.get("transcript") or []
+        last = transcript[-1] if transcript else None
+        if not last or last.get("role") != "user":
+            # Nothing durable to withdraw (the failed send never reached the
+            # backend). Report success so the client can clear its local state.
+            return {"ok": True, "withdrawn": False}
+        if str(last.get("content") or "").strip() != message:
+            raise HTTPException(409, "A different interview turn is pending.")
+
+        turn_token = await asyncio.to_thread(
+            try_claim_resume_turn, session_id, user_id=user_id,
+        )
+        if not turn_token:
+            raise HTTPException(
+                409, "该会话正在其他窗口回复或评估中，请稍候再试。",
+            )
+        released = False
+        try:
+            withdrawn = await asyncio.to_thread(
+                withdraw_resume_user_tail,
+                session_id,
+                user_id=user_id,
+                claim_token=turn_token,
+                expected_message=str(last.get("content") or ""),
+            )
+            released = withdrawn  # the UPDATE releases the claim on success
+            if not withdrawn:
+                # Tail changed between our read and the claim (another worker
+                # committed the assistant reply). Surface as a conflict.
+                raise HTTPException(
+                    409, "该回合刚刚已完成回复，请刷新查看最新对话。",
+                )
+
+            # Mirror the removal into the graph checkpoint so the next invoke
+            # doesn't resume the abandoned turn. Best-effort: transcript is the
+            # durable source the chat path re-checks first.
+            def _drop_checkpoint_tail():
+                from langchain_core.messages import RemoveMessage
+                graph = entry["graph"]
+                config = entry["config"]
+                snapshot = graph.get_state(config)
+                values = getattr(snapshot, "values", None) or {}
+                messages = list(values.get("messages", []))
+                if (
+                    messages
+                    and isinstance(messages[-1], HumanMessage)
+                    and str(messages[-1].content or "").strip() == message
+                    and getattr(messages[-1], "id", None)
+                ):
+                    graph.update_state(
+                        config,
+                        {"messages": [RemoveMessage(id=messages[-1].id)]},
+                        as_node="wait",
+                    )
+            try:
+                await asyncio.to_thread(_drop_checkpoint_tail)
+            except Exception as exc:
+                logger.warning(
+                    "Could not drop withdrawn turn from checkpoint %s: %s",
+                    session_id, exc,
+                )
+            return {"ok": True, "withdrawn": True}
+        finally:
+            if not released:
+                await asyncio.to_thread(
+                    release_resume_turn_claim,
+                    session_id, user_id=user_id, claim_token=turn_token,
+                )
 
 
 @router.post("/interview/end/{session_id}")
