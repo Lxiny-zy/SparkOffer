@@ -9,6 +9,20 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import useDraftPersist from "../hooks/useDraftPersist";
+
+// The JD form and its analysis result survive refresh/navigation. The preview
+// is an LLM call the user paid for — losing it to an accidental refresh forces
+// a full re-analysis.
+const JOB_PREP_DRAFT_KEY = "job-prep:draft";
+
+interface JobPrepDraft {
+  company: string;
+  position: string;
+  jdText: string;
+  preview: any;
+  previewSignature: string;
+}
 
 function priorityVariant(priority: string): "destructive" | "blue" | "secondary" {
   if (priority === "high") return "destructive";
@@ -41,6 +55,21 @@ export default function JobPrep() {
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  const { clear: clearJobPrepDraft } = useDraftPersist<JobPrepDraft>({
+    key: JOB_PREP_DRAFT_KEY,
+    value: { company, position, jdText, preview, previewSignature },
+    onRestore: (d) => {
+      setCompany(d.company || "");
+      setPosition(d.position || "");
+      setJdText(d.jdText || "");
+      if (d.preview) {
+        setPreview(d.preview);
+        setPreviewSignature(d.previewSignature || "");
+      }
+    },
+    isEmpty: (d) => !d.jdText.trim() && !d.company.trim() && !d.position.trim() && !d.preview,
+  });
 
   useEffect(() => {
     getResumeStatus()
@@ -103,6 +132,9 @@ export default function JobPrep() {
       const data = await startJobPrep({ ...payload, preview_data: preview }, {
         onProgress: (msg) => setStartProgress(msg),
       }, controller.signal);
+      // The session is created — this form's job is done. Clear the draft so
+      // returning to the page starts fresh instead of resurrecting a used JD.
+      clearJobPrepDraft();
       navigate(`/interview/${data.session_id}`, { state: data });
     } catch (err: any) {
       if (controller.signal.aborted) return;

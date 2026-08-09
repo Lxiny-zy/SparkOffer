@@ -903,6 +903,8 @@ export default function Review() {
   const [refAnswersCache, setRefAnswersCache] = useState<Record<string, string>>({});
   const [ragEvalMetrics, setRagEvalMetrics] = useState<RAGEvalMetrics | null>(stateData.ragEvalMetrics || null);
   const [loading, setLoading] = useState(!review && !scores);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const [syncing, setSyncing] = useState(false);
   // Fetch the review at most once per session. The effect's deps include
   // review/scores, so an empty backend response for an in-progress session would
@@ -941,6 +943,7 @@ export default function Review() {
     setRefAnswersCache({});
     setRagEvalMetrics(nextState.ragEvalMetrics || null);
     setLoading(!nextState.review && !nextState.scores);
+    setLoadError(null);
     setSyncing(false);
   }, [sessionId, location.key, location.state]);
 
@@ -985,12 +988,16 @@ export default function Review() {
         }
       })
       .catch((err: any) => {
-        if (isCurrentRequest()) setReview("加载失败: " + err.message);
+        if (!isCurrentRequest()) return;
+        // Keep the review empty and allow a retry: setting the error text as
+        // the review body used to render it as report content with no way to
+        // re-fetch (fetchedRef already marked this session as fetched).
+        setLoadError(err?.message || "网络异常");
       })
       .finally(() => {
         if (isCurrentRequest()) setLoading(false);
       });
-  }, [sessionId, location.key, location.state, review, scores]);
+  }, [sessionId, location.key, location.state, review, scores, retryAttempt]);
 
   useEffect(() => {
     if (ragEvalMetrics || !sessionId) return;
@@ -1040,6 +1047,37 @@ export default function Review() {
           </div>
           <span className="text-sm">加载复盘报告中...</span>
         </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="flex-1 flex items-center justify-center px-4">
+        <Card className="max-w-md w-full">
+          <CardContent className="p-6 text-center space-y-3">
+            <div className="text-base font-medium">复盘报告加载失败</div>
+            <p className="text-sm text-dim">{loadError}</p>
+            <div className="flex justify-center gap-3">
+              <Button variant="outline" onClick={() => navigate("/history")}>返回历史</Button>
+              <Button
+                variant="default"
+                className="gap-1.5"
+                onClick={() => {
+                  // Re-arm the once-per-session fetch guard, then bump the
+                  // retry counter so the fetch effect re-runs.
+                  fetchedRef.current = null;
+                  setLoadError(null);
+                  setLoading(true);
+                  setRetryAttempt((v) => v + 1);
+                }}
+              >
+                <RefreshCw size={14} />
+                重新加载
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       </div>
     );
   }

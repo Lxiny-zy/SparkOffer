@@ -62,6 +62,9 @@ export default function FloatingAssistant() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  // Set while a tool action (e.g. start_interview) runs after the reply stream
+  // ends — interview init takes 10–30s and used to give zero feedback.
+  const [actionProgress, setActionProgress] = useState<string | null>(null);
   const [isHovered, setIsHovered] = useState(false);
   const [isIdle, setIsIdle] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
@@ -145,7 +148,7 @@ export default function FloatingAssistant() {
     // Skip smooth-scroll during streaming — flushUpdate handles instant scroll
     if (isStreamingRef.current) return;
     scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, isStreaming]);
+  }, [messages, isStreaming, actionProgress]);
 
   // Idle detection
   useEffect(() => {
@@ -274,15 +277,24 @@ export default function FloatingAssistant() {
       navigate(action.path!);
       setIsOpen(false);
     } else if (action.action === "start_interview") {
+      setActionProgress("正在为你准备面试...");
       try {
-        const data = await startInterview(action.mode, action.topic);
+        const data = await startInterview(action.mode, action.topic, {
+          onProgress: (msg) => {
+            if (mountedRef.current) setActionProgress(msg || "正在为你准备面试...");
+          },
+        });
+        if (!mountedRef.current) return;
         navigate(`/interview/${data.session_id}`, { state: data });
         setIsOpen(false);
       } catch (err: any) {
+        if (!mountedRef.current) return;
         setMessages((prev) => [
           ...prev,
           { role: "assistant", content: `启动面试失败: ${err.message}` },
         ]);
+      } finally {
+        if (mountedRef.current) setActionProgress(null);
       }
     }
   }, [navigate]);
@@ -335,7 +347,11 @@ export default function FloatingAssistant() {
       }
     } catch (err: any) {
       if (!controller.signal.aborted) {
-        assistantContent = `出错了: ${err.message}`;
+        // Append the error to whatever streamed successfully — replacing would
+        // wipe a half-useful answer the user may already be reading.
+        assistantContent = assistantContent
+          ? `${assistantContent}\n\n> ⚠️ 回复中断：${err.message}`
+          : `出错了: ${err.message}`;
       }
     } finally {
       if (rafRef.current) {
@@ -460,6 +476,22 @@ export default function FloatingAssistant() {
                   <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot" />
                   <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot [animation-delay:0.2s]" />
                   <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot [animation-delay:0.4s]" />
+                </div>
+              </div>
+            )}
+
+            {actionProgress && (
+              <div className="flex items-center gap-2 px-2 animate-fade-in">
+                <div className="w-6 h-6 shrink-0">
+                  <CatAvatar size={24} mood="static" />
+                </div>
+                <div className="flex items-center gap-2 rounded-lg rounded-tl-sm bg-secondary px-3 py-2 text-[13px] text-secondary-foreground">
+                  <span className="flex gap-1">
+                    <span className="w-1 h-1 rounded-full bg-primary animate-pulse-dot" />
+                    <span className="w-1 h-1 rounded-full bg-primary animate-pulse-dot [animation-delay:0.2s]" />
+                    <span className="w-1 h-1 rounded-full bg-primary animate-pulse-dot [animation-delay:0.4s]" />
+                  </span>
+                  {actionProgress}
                 </div>
               </div>
             )}

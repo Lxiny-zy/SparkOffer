@@ -864,7 +864,7 @@ export default function QAArena() {
         err?.name !== "AbortError"
         && summaryGenerationRef.current === requestGeneration
         && activeIdRef.current === sid
-      ) alert(err.message);
+      ) toast.error(err?.message || "总结生成失败，请重试");
     } finally {
       if (summaryGenerationRef.current === requestGeneration) {
         summaryAbortRef.current = null;

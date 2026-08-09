@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { toast } from "sonner";
 import { Markdown } from "../components/ChatBubble";
 import {
   Star, Trash2, Download, Tag, ChevronDown, ChevronUp,
@@ -78,8 +79,9 @@ export default function Favorites() {
       setItems((prev) => prev.filter((it) => it.id !== id));
       setTotal((prev) => prev - 1);
       setSelected((prev) => { const s = new Set(prev); s.delete(id); return s; });
-    } catch (e) {
+    } catch (e: any) {
       console.error("删除失败:", e);
+      toast.error("删除失败: " + (e?.message || e));
     }
   };
 
@@ -99,7 +101,7 @@ export default function Favorites() {
       setSelected((prev) => new Set([...prev].filter((id) => !deleted.has(id))));
     }
     if (deleted.size < selected.size) {
-      alert(`有 ${selected.size - deleted.size} 条删除失败，请重试。`);
+      toast.error(`有 ${selected.size - deleted.size} 条删除失败，请重试。`);
     }
   };
 
