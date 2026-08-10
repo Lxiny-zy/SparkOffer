@@ -473,11 +473,22 @@ function RAGQualityBadge({ value, label, metricKey }: { value: number | null | u
   return metricKey ? <MetricInfoTooltip metricKey={metricKey} label={label}>{badge}</MetricInfoTooltip> : badge;
 }
 
-function DrillReview({ scores, overall, questions, answers, topic, sessionId, cachedRefAnswers, ragEvalMetrics }: DrillReviewProps) {
-  const answerMap: Record<string | number, string> = {};
-  for (const a of (answers || [])) answerMap[a.question_id] = a.answer;
-  const scoreMap: Record<string | number, Score> = {};
-  for (const s of (scores || [])) scoreMap[s.question_id] = s;
+/**
+ * Reference-answer + favorite actions shared by the drill and JD-prep reviews.
+ *
+ * ``topic`` is "" for JD prep (a JD session spans several topics and stores
+ * none); the backend then resolves the retrieval scope from the session itself,
+ * so the button must NOT be gated on a truthy topic.
+ */
+function useQuestionActions({
+  topic, sessionId, cachedRefAnswers, answerMap, fallbackTopicLabel = "",
+}: {
+  topic: string | null | undefined;
+  sessionId: string;
+  cachedRefAnswers?: Record<string, string>;
+  answerMap: Record<string | number, string>;
+  fallbackTopicLabel?: string;
+}) {
   const [refAnswers, setRefAnswers] = useState<Record<string, string>>(cachedRefAnswers || {});
   const [refLoading, setRefLoading] = useState<Record<string, boolean>>({});
   const [favorited, setFavorited] = useState<Record<string | number, boolean>>({});
@@ -494,7 +505,7 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
     if (refAnswers[qId] && !force) return;
     setRefLoading((p) => ({ ...p, [qId]: true }));
     try {
-      const data = await getReferenceAnswer(topic, questionText, sessionId, qId, force);
+      const data = await getReferenceAnswer(topic || "", questionText, sessionId, qId, force);
       setRefAnswers((p) => ({ ...p, [qId]: data.reference_answer }));
     } catch (e: any) {
       setRefAnswers((p) => ({ ...p, [qId]: "生成失败: " + e.message }));
@@ -513,7 +524,7 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
         reference_answer: refAnswers[q.id] || "",
         score: s?.score,
         assessment: s?.assessment || "",
-        topic: topic || "",
+        topic: topic || fallbackTopicLabel,
         difficulty: q.difficulty ? String(q.difficulty) : "",
       });
       setFavorited((p) => ({ ...p, [q.id]: true }));
@@ -522,6 +533,20 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
     }
     setFavLoading((p) => ({ ...p, [q.id]: false }));
   };
+
+  return { refAnswers, refLoading, handleRefAnswer, favorited, favLoading, handleFavorite };
+}
+
+function DrillReview({ scores, overall, questions, answers, topic, sessionId, cachedRefAnswers, ragEvalMetrics }: DrillReviewProps) {
+  const answerMap: Record<string | number, string> = {};
+  for (const a of (answers || [])) answerMap[a.question_id] = a.answer;
+  const scoreMap: Record<string | number, Score> = {};
+  for (const s of (scores || [])) scoreMap[s.question_id] = s;
+
+  const {
+    refAnswers, refLoading, handleRefAnswer,
+    favorited, favLoading, handleFavorite,
+  } = useQuestionActions({ topic, sessionId, cachedRefAnswers, answerMap });
 
   const avgScore: number | string = overall?.avg_score ?? "-";
   const totalQ = questions?.length || 0;
@@ -662,7 +687,7 @@ function DrillReview({ scores, overall, questions, answers, topic, sessionId, ca
 
                     {/* 操作行 */}
                     <div className="mt-3 pt-3 border-t border-border/50 flex items-center gap-1 flex-wrap">
-                      {!refAnswers[q.id] && topic && (
+                      {!refAnswers[q.id] && (
                         <Button
                           variant="ghost"
                           size="sm"
@@ -725,14 +750,30 @@ interface JobPrepReviewProps {
   questions: Question[] | null | undefined;
   answers: { question_id: number | string; answer: string }[] | null | undefined;
   meta: Record<string, any>;
+  sessionId: string;
+  cachedRefAnswers?: Record<string, string>;
 }
 
-function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepReviewProps) {
+function JobPrepReview({ scores, overall, questions, answers, meta, sessionId, cachedRefAnswers }: JobPrepReviewProps) {
   const answerMap: Record<string | number, string> = {};
   for (const a of (answers || [])) answerMap[a.question_id] = a.answer;
   const scoreMap: Record<string | number, Score> = {};
   for (const s of (scores || [])) scoreMap[s.question_id] = s;
   const avgScore = overall?.avg_score || "-";
+
+  // JD prep spans several knowledge topics, so it has no single topic key. The
+  // backend resolves the retrieval scope from the session's own JD metadata
+  // when the topic is blank — see routers/interview.py reference-answer.
+  const {
+    refAnswers, refLoading, handleRefAnswer,
+    favorited, favLoading, handleFavorite,
+  } = useQuestionActions({
+    topic: "",
+    sessionId,
+    cachedRefAnswers,
+    answerMap,
+    fallbackTopicLabel: meta?.position || "",
+  });
 
   return (
     <>
@@ -852,6 +893,55 @@ function JobPrepReview({ scores, overall, questions, answers, meta }: JobPrepRev
                       <div className="text-[13px] text-red leading-normal">遗漏关键点: {s.key_missing.join("、")}</div>
                     )}
                   </>
+                )}
+
+                {/* 操作行 — 与训练复盘一致：参考答案 + 收藏 */}
+                <div className="mt-3 pt-3 border-t border-border/50 flex items-center gap-1 flex-wrap">
+                  {!refAnswers[q.id] && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-primary"
+                      onClick={() => handleRefAnswer(q.id, q.question)}
+                      disabled={refLoading[q.id]}
+                    >
+                      <BookOpen size={13} />
+                      {refLoading[q.id] ? "正在生成参考答案..." : "查看参考答案"}
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className={favorited[q.id] ? "text-orange" : "text-dim"}
+                    onClick={() => handleFavorite(q, s)}
+                    disabled={favLoading[q.id] || favorited[q.id]}
+                  >
+                    <Star size={13} className={favorited[q.id] ? "fill-orange" : ""} />
+                    {favorited[q.id] ? "已收藏" : "收藏"}
+                  </Button>
+                </div>
+
+                {refAnswers[q.id] && (
+                  <div className="text-sm leading-[1.8] mt-2">
+                    <div className="text-xs font-semibold text-dim mb-2 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <BookOpen size={13} /> 参考答案
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-dim h-6 px-2 text-xs"
+                        onClick={() => handleRefAnswer(q.id, q.question, true)}
+                        disabled={refLoading[q.id]}
+                      >
+                        <RefreshCw size={11} className={refLoading[q.id] ? "animate-spin" : ""} />
+                        重新生成
+                      </Button>
+                    </div>
+                    <div className="md-content bg-secondary/60 rounded-xl px-3.5 py-3">
+                      <Markdown>{refAnswers[q.id]}</Markdown>
+                    </div>
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -1170,7 +1260,7 @@ export default function Review() {
         {isRecording && !isRecordingDual ? (
           <SoloRecordingReview topicsCovered={topicsCovered} overall={overall} />
         ) : isJobPrep ? (
-          <JobPrepReview scores={scores} overall={overall} questions={questions} answers={answers} meta={meta} />
+          <JobPrepReview scores={scores} overall={overall} questions={questions} answers={answers} meta={meta} sessionId={sessionId} cachedRefAnswers={refAnswersCache} />
         ) : showDrill ? (
           <DrillReview scores={scores} overall={overall} questions={questions} answers={answers} topic={topic} sessionId={sessionId} cachedRefAnswers={refAnswersCache} ragEvalMetrics={ragEvalMetrics} />
         ) : (

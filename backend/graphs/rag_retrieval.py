@@ -101,6 +101,59 @@ async def retrieve_for_drill(
         (chunks, stats) where chunks is the final fused+deduped list and
         stats summarizes what happened (for the timeline UI).
     """
+    return await _retrieve_fused(
+        [topic], user_id, weak_points, fallback_query,
+        per_query_top_k=per_query_top_k, final_top_n=final_top_n,
+        timeout=timeout, embed_concurrency=embed_concurrency,
+        dedup_threshold=dedup_threshold,
+        reranker_read_timeout=reranker_read_timeout, strict=strict,
+    )
+
+
+async def retrieve_for_job_prep(
+    topics: list[str],
+    user_id: str,
+    queries: list[str],
+    fallback_query: str,
+    *,
+    per_query_top_k: int | None = None,
+    final_top_n: int | None = None,
+    timeout: float | None = None,
+) -> tuple[list[str], RetrievalStats]:
+    """Multi-topic variant for JD prep.
+
+    JD prep spans several knowledge topics at once, so the fan-out is the cross
+    product of (topic × query) rather than a single topic's weak points. Everything
+    after retrieval — RRF fusion, semantic dedup, reranking, metrics — is the same
+    pipeline the drill uses; previously JD prep had none of it and simply
+    concatenated whatever ``gather_topic_contexts`` returned.
+    """
+    return await _retrieve_fused(
+        topics, user_id, queries, fallback_query,
+        per_query_top_k=per_query_top_k, final_top_n=final_top_n,
+        timeout=timeout,
+    )
+
+
+async def _retrieve_fused(
+    topics: list[str],
+    user_id: str,
+    weak_points: list[str],
+    fallback_query: str,
+    *,
+    per_query_top_k: int | None = None,
+    final_top_n: int | None = None,
+    timeout: float | None = None,
+    embed_concurrency: int | None = None,
+    dedup_threshold: float | None = None,
+    reranker_read_timeout: float | None = None,
+    strict: bool = False,
+) -> tuple[list[str], RetrievalStats]:
+    """Shared fan-out → RRF → dedup → rerank → metrics pipeline.
+
+    ``topics`` holds one entry for the drill and several for JD prep; each query
+    is issued against every topic and all rankings are fused together.
+    """
     # Resolve retrieval knobs at call time so a settings save hot-applies. An
     # explicit arg (e.g. from an eval harness) still wins over the configured value.
     from backend.ai_config import get_retrieval_setting
@@ -132,12 +185,36 @@ async def retrieve_for_drill(
     elif len(queries) < 3:
         queries.append(fallback_query)
 
+    # Deduplicate. RRF sums per-ranking contributions, so issuing the same query
+    # twice would feed one ranking in twice and double that chunk's score — a
+    # self-vote, not evidence. This matters when the caller's query list already
+    # contains the fallback (JD prep passes the JD as both), and it also drops a
+    # wasted embedding round-trip per duplicate.
+    queries = list(dict.fromkeys(q for q in queries if q and q.strip()))
+    if not queries:
+        return [], RetrievalStats(
+            queries=0, raw_chunks=0, fused_chunks=0, final_chunks=0,
+            embed_cache_hits=0, embed_cache_misses=0,
+        )
+
+    scoped_topics = list(dict.fromkeys(t for t in topics if t and t.strip()))
+    if not scoped_topics:
+        return [], RetrievalStats(
+            queries=0, raw_chunks=0, fused_chunks=0, final_chunks=0,
+            embed_cache_hits=0, embed_cache_misses=0,
+        )
+    # One sub-query per (topic, query). Labels keep failure diagnostics readable
+    # when several topics are in play.
+    fanout: list[tuple[str, str]] = [
+        (topic, query) for topic in scoped_topics for query in queries
+    ]
+
     started = time.perf_counter()
     stage_started = started
     stage_latency_ms: dict[str, float] = {}
     sem = asyncio.Semaphore(embed_concurrency)
 
-    async def _bounded(query: str):
+    async def _bounded(topic: str, query: str):
         async with sem:
             if strict:
                 from backend.indexer import async_retrieve_topic_context_with_scores
@@ -151,7 +228,7 @@ async def retrieve_for_drill(
             )
 
     raw_results = await asyncio.gather(
-        *[_bounded(q) for q in queries],
+        *[_bounded(topic, query) for topic, query in fanout],
         return_exceptions=True,
     )
     stage_latency_ms["dense_fanout"] = round((time.perf_counter() - stage_started) * 1000, 2)
@@ -160,17 +237,18 @@ async def retrieve_for_drill(
     per_query_texts: list[list[str]] = []
     failure_codes: list[str] = []
     failure_details: list[dict] = []
-    for query_index, (q, r) in enumerate(zip(queries, raw_results)):
+    for query_index, ((topic, q), r) in enumerate(zip(fanout, raw_results)):
         if isinstance(r, BaseException):
             code = _retrieval_failure_code(r)
             failure_codes.append(code)
             failure_details.append({
                 "query_index": query_index,
+                "topic": topic,
                 "query": q[:120],
                 "code": code,
                 "error": str(r).replace("\n", " ")[:300],
             })
-            logger.warning("RAG sub-query %r failed: %s", q[:60], r)
+            logger.warning("RAG sub-query %r (topic=%s) failed: %s", q[:60], topic, r)
             per_query_chunks.append([])
             per_query_texts.append([])
         else:
@@ -257,7 +335,7 @@ async def retrieve_for_drill(
         logger.warning("RAG metrics computation failed: %s", exc)
 
     stats = RetrievalStats(
-        queries=len(queries),
+        queries=len(fanout),
         raw_chunks=raw_count,
         fused_chunks=len(chunks_post_fusion),
         final_chunks=len(final),

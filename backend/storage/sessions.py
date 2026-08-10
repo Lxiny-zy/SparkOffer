@@ -474,6 +474,37 @@ def release_session_sync_claim(session_id: str, *, user_id: str, claim_token: st
     return cursor.rowcount > 0
 
 
+def clear_unstarted_sync_pending(session_id: str, *, user_id: str) -> bool:
+    """Drop a ``sync_pending_at`` marker that no side effect ever acted on.
+
+    A JD/drill evaluation that fails *before* applying any side effect still
+    leaves ``sync_pending_at`` behind (``try_claim_session_sync`` stamps it at
+    claim time and ``release_session_sync_claim`` deliberately preserves it).
+    From then on ``try_claim_session_evaluation`` refuses the session, so
+    「重新评估」 returns HTTP 409 forever while 「同步」 also refuses it because
+    no valid scores were ever persisted — the user is locked out of both doors.
+
+    Clearing the marker is only safe when nothing was actually applied, which is
+    exactly what the guards below assert: no completed ``sync_steps``, no live
+    sync claim, and no terminal ``synced_at``. Under those conditions no
+    side-effect counter can be double-applied by letting the evaluation re-run.
+    """
+    conn = get_db()
+    doc = "COALESCE(NULLIF(meta, ''), '{}')"
+    cursor = conn.execute(
+        f"UPDATE sessions SET meta = json_remove({doc}, '$.sync_pending_at'), "
+        "updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND user_id = ? "
+        f"AND json_extract({doc}, '$.sync_pending_at') IS NOT NULL "
+        f"AND json_extract({doc}, '$.synced_at') IS NULL "
+        f"AND json_extract({doc}, '$.sync_claim_token') IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE("
+        f"json_extract({doc}, '$.sync_steps'), '{{}}')))",
+        (session_id, user_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def abort_session_sync_claim(
     session_id: str, *, user_id: str, claim_token: str,
 ) -> bool:

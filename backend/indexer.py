@@ -1364,6 +1364,25 @@ def topic_chunk_count(topic: str, user_id: str) -> int:
     return 0
 
 
+def retrieve_resume_chunks(question: str, user_id: str, top_k: int = 5) -> list[str]:
+    """Retrieve raw resume chunks (no LLM synthesis).
+
+    ``query_resume`` runs the text through a query engine, which costs an extra
+    LLM call and can return the literal strings ``"Empty Response"`` / ``"None"``
+    — both of which then read as resume *content* downstream. Callers that want
+    context for their own prompt should use this retriever instead and treat an
+    empty list as "no resume context available". Mirrors
+    ``retrieve_topic_context`` for the knowledge base.
+
+    Raises on infrastructure failure so callers can tell "no resume text" apart
+    from "retrieval broke".
+    """
+    index = build_resume_index(user_id)
+    retriever = index.as_retriever(similarity_top_k=top_k)
+    nodes = retriever.retrieve(question)
+    return [content for node in nodes if (content := node.get_content().strip())]
+
+
 def query_resume(question: str, user_id: str, top_k: int = 3) -> str:
     """Query the resume index. Returns "" if the resume index is unavailable
     (Qdrant-only: a backend failure degrades to no resume context, never crashes
@@ -1372,7 +1391,12 @@ def query_resume(question: str, user_id: str, top_k: int = 3) -> str:
         index = build_resume_index(user_id)
         engine = index.as_query_engine(similarity_top_k=top_k)
         response = engine.query(question)
-        return str(response)
+        answer = str(response).strip()
+        # The synthesizer emits these placeholders when nothing was retrieved;
+        # passing them on would put the word "None" into an interview prompt.
+        if answer.lower() in {"none", "empty response"}:
+            return ""
+        return answer
     except Exception as e:
         logger.warning("query_resume degraded to empty (resume index unavailable): %s", e)
         return ""
@@ -1726,6 +1750,7 @@ def gather_topic_contexts(
     top_k: int = 2,
     timeout: float = _RETRIEVAL_TIMEOUT,
     max_workers: int = 4,
+    build_if_missing: bool = False,
 ) -> list[list[str]]:
     """Run several retrieve_topic_context calls concurrently under one overall
     deadline. Returns results aligned to ``requests`` order (each item is a
@@ -1736,11 +1761,28 @@ def gather_topic_contexts(
     which ran retrievals serially (worst case len(requests)×timeout). Never blocks
     on stragglers — shutdown(wait=False) lets a hung sync retrieval finish in the
     background while the caller proceeds with whatever completed in time.
+
+    ``build_if_missing`` defaults to False: request-path callers must not pay for
+    a synchronous full re-embed of a cold index. A missing index degrades to []
+    and schedules a background rebuild, matching safe_retrieve_topic_context.
     """
     import concurrent.futures
 
     if not requests:
         return []
+
+    def _retrieve(topic: str, question: str) -> list[str]:
+        try:
+            return retrieve_topic_context(
+                topic, question, user_id, top_k, build_if_missing,
+            )
+        except IndexNotReady:
+            logger.info(
+                "Index not built for topic=%s; degrading to empty + scheduling rebuild",
+                topic,
+            )
+            _schedule_topic_rebuild(topic, user_id)
+            return []
 
     results: list[list[str]] = [[] for _ in requests]
     executor = concurrent.futures.ThreadPoolExecutor(
@@ -1748,7 +1790,7 @@ def gather_topic_contexts(
     )
     try:
         future_to_idx = {
-            executor.submit(retrieve_topic_context, topic, question, user_id, top_k): i
+            executor.submit(_retrieve, topic, question): i
             for i, (topic, question) in enumerate(requests)
         }
         done, _ = concurrent.futures.wait(future_to_idx, timeout=timeout)

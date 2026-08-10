@@ -20,7 +20,7 @@ from backend.memory import update_profile_after_interview, llm_update_profile
 from backend.storage.sessions import (
     create_session, append_message, save_review, save_drill_answers, get_session,
     mark_session_synced, try_claim_session_sync, release_session_sync_claim,
-    abort_session_sync_claim, session_sync_targets,
+    abort_session_sync_claim, session_sync_targets, clear_unstarted_sync_pending,
     mark_session_sync_step, session_sync_steps, session_sync_step_result,
     try_claim_session_evaluation, release_session_evaluation_claim,
     try_claim_resume_turn, commit_resume_turn, replace_resume_reply,
@@ -1495,24 +1495,7 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         topic = entry["topic"]
         questions = entry["questions"]
         answers = _resolve_answers(body, existing, questions)
-        evaluation_token = await asyncio.to_thread(
-            try_claim_session_evaluation, session_id, user_id=user_id,
-        )
-        if not evaluation_token:
-            latest = await asyncio.to_thread(
-                get_session, session_id, user_id=user_id,
-            )
-            latest_meta = (latest or {}).get("meta", {}) or {}
-            if not latest_meta.get("synced_at") and (
-                latest_meta.get("sync_pending_at")
-                or latest_meta.get("sync_steps")
-            ):
-                raise HTTPException(
-                    409,
-                    "Previous evaluation side-effects are pending; sync them "
-                    "before re-evaluating this session.",
-                )
-            raise HTTPException(409, "Evaluation is already in progress for this session.")
+        evaluation_token = await _claim_evaluation_or_409(session_id, user_id)
         try:
             if not save_drill_answers(
                 session_id, answers, user_id=user_id,
@@ -1768,24 +1751,7 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
         preview = entry["preview"]
         meta = entry["meta"]
         answers = _resolve_answers(body, existing, questions)
-        evaluation_token = await asyncio.to_thread(
-            try_claim_session_evaluation, session_id, user_id=user_id,
-        )
-        if not evaluation_token:
-            latest = await asyncio.to_thread(
-                get_session, session_id, user_id=user_id,
-            )
-            latest_meta = (latest or {}).get("meta", {}) or {}
-            if not latest_meta.get("synced_at") and (
-                latest_meta.get("sync_pending_at")
-                or latest_meta.get("sync_steps")
-            ):
-                raise HTTPException(
-                    409,
-                    "Previous evaluation side-effects are pending; sync them "
-                    "before re-evaluating this session.",
-                )
-            raise HTTPException(409, "Evaluation is already in progress for this session.")
+        evaluation_token = await _claim_evaluation_or_409(session_id, user_id)
         try:
             if not save_drill_answers(
                 session_id, answers, user_id=user_id,
@@ -2191,6 +2157,44 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
     ))
 
 
+async def _claim_evaluation_or_409(session_id: str, user_id: str) -> str:
+    """Claim the evaluation generation, self-healing a stuck pending marker.
+
+    An evaluation that failed before applying any side effect leaves
+    ``sync_pending_at`` set with no ``sync_steps``. That state blocks every
+    subsequent evaluation claim, while /interview/sync also refuses the session
+    because no valid scores were persisted — 「重新评估」 then 409s forever (the
+    exact loop users hit on JD prep). When nothing was actually applied, clear
+    the marker and retry the claim once; otherwise report the real conflict.
+    """
+    token = await asyncio.to_thread(
+        try_claim_session_evaluation, session_id, user_id=user_id,
+    )
+    if token:
+        return token
+
+    latest = await asyncio.to_thread(get_session, session_id, user_id=user_id)
+    latest_meta = (latest or {}).get("meta", {}) or {}
+    if not latest_meta.get("synced_at") and (
+        latest_meta.get("sync_pending_at") or latest_meta.get("sync_steps")
+    ):
+        # Only an untouched pending marker is cleared; a partially applied sync
+        # keeps its recovery semantics and still reports 409 below.
+        if await asyncio.to_thread(
+            clear_unstarted_sync_pending, session_id, user_id=user_id,
+        ):
+            token = await asyncio.to_thread(
+                try_claim_session_evaluation, session_id, user_id=user_id,
+            )
+            if token:
+                return token
+        raise HTTPException(
+            409,
+            "上一次评估的画像/知识库同步尚未完成，请先在复盘页点「同步」后再重新评估。",
+        )
+    raise HTTPException(409, "Evaluation is already in progress for this session.")
+
+
 @router.post("/interview/sync/{session_id}")
 async def sync_session_side_effects(session_id: str, user_id: str = Depends(get_current_user)):
     """Manual fallback: apply profile / SR / knowledge side-effects from a
@@ -2342,10 +2346,39 @@ async def generate_reference_answer(
     from backend.prompts.interviewer import REFERENCE_ANSWER_PROMPT, HINT_PROMPT
 
     topics = load_topics(user_id)
-    topic_name = topics.get(topic, {}).get("name", topic)
+    # JD-prep sessions have no single topic (they span the whole JD), so the
+    # client sends an empty one. Resolve the knowledge scope from the session's
+    # own JD metadata and retrieve across every matched topic.
+    scope_topics = [topic] if topic else []
+    if not scope_topics and session_id:
+        session = await asyncio.to_thread(get_session, session_id, user_id=user_id)
+        if session and session.get("mode") == "jd_prep":
+            session_meta = session.get("meta") or {}
+            # Prefer the topic set frozen when the session was created; fall back
+            # to re-matching for sessions created before it was persisted.
+            frozen = session_meta.get("topics")
+            scope_topics = (
+                [t for t in frozen if isinstance(t, str) and t.strip()]
+                if isinstance(frozen, list) else []
+            ) or await asyncio.to_thread(_match_jd_to_topics, session_meta, user_id)
+        elif session and session.get("topic"):
+            scope_topics = [session["topic"]]
 
-    refs = await safe_retrieve_topic_context(topic, question, user_id, top_k=3, timeout=60.0,
-                                             build_if_missing=False)
+    if topic:
+        topic_name = topics.get(topic, {}).get("name", topic)
+    elif scope_topics:
+        topic_name = " / ".join(
+            topics.get(key, {}).get("name", key) for key in scope_topics
+        )
+    else:
+        topic_name = "综合面试"
+
+    refs: list[str] = []
+    for scope_topic in scope_topics[:3]:
+        refs.extend(await safe_retrieve_topic_context(
+            scope_topic, question, user_id, top_k=3, timeout=60.0,
+            build_if_missing=False,
+        ))
     knowledge_context = "\n\n".join(refs) if refs else "（暂无参考材料）"
 
     if mode == "hint":
@@ -2413,19 +2446,19 @@ def _match_jd_to_topics(meta: dict, user_id: str) -> list[str]:
     writeback leg almost never fired. No fallback-to-arbitrary-topics on a miss:
     writeback pushes the user's mistakes into a topic's knowledge base, so an
     empty match must stay empty rather than pollute unrelated topics.
+
+    Shares ``_match_topics_in_text`` with the retrieval-side matcher so both
+    legs agree on what a JD mentions (whole-token ASCII, substring CJK).
     """
+    from backend.graphs.job_prep import _match_topics_in_text
+
     topics = load_topics(user_id)
     if not topics:
         return []
     jd_text = (
         str(meta.get("jd_excerpt", "")) + " " + str(meta.get("position", ""))
-    ).lower()
-    matched = []
-    for key, info in topics.items():
-        name = info.get("name", key).lower()
-        if name in jd_text or key.lower() in jd_text:
-            matched.append(key)
-    return matched[:3]
+    )
+    return _match_topics_in_text(jd_text, topics)[:3]
 
 
 # ── Profile update helpers ──

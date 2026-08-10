@@ -46,6 +46,10 @@ async def job_prep_start(req: JobPrepStartRequest, user_id: str = Depends(get_cu
 
     async def _gen():
         preview = req.preview_data if isinstance(req.preview_data, dict) else None
+        # Allocate the id up front so retrieval metrics can be attributed to this
+        # session. The row itself is still only created once questions succeed,
+        # so an aborted generation leaves no session behind.
+        session_id = new_session_id()
 
         if not preview:
             got_preview = False
@@ -64,6 +68,7 @@ async def job_prep_start(req: JobPrepStartRequest, user_id: str = Depends(get_cu
         questions = None
         async for kind, value in stream_generate_job_prep_questions(
             jd_text, preview, user_id, use_resume=req.use_resume,
+            session_id=session_id,
         ):
             if kind == "sse":
                 yield value
@@ -72,12 +77,20 @@ async def job_prep_start(req: JobPrepStartRequest, user_id: str = Depends(get_cu
         if questions is None:
             return
 
-        session_id = new_session_id()
+        # Freeze the matched knowledge topics on the session. JD prep spans
+        # several topics, so the sessions.topic column stays NULL; downstream
+        # consumers (reference-answer / hint retrieval) read meta.topics.
+        from backend.graphs.job_prep import _match_jd_topics
+        jd_topics = await asyncio.to_thread(_match_jd_topics, jd_text, user_id)
         meta = {
             "company": preview.get("company") or (req.company or "").strip(),
             "position": preview.get("position") or (req.position or "").strip() or "JD 备面",
             "jd_excerpt": jd_text[:1500],
             "use_resume": req.use_resume,
+            "resume_used": bool(
+                (preview.get("resume_alignment") or {}).get("resume_used")
+            ),
+            "topics": jd_topics,
             "preview": preview,
         }
 

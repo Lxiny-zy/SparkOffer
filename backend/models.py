@@ -98,20 +98,29 @@ class RetryInterviewReplyRequest(BaseModel):
 
 
 class ReferenceAnswerRequest(BaseModel):
-    topic: str = Field(min_length=1, max_length=200)
+    # ``topic`` is optional: JD-prep sessions span several knowledge topics and
+    # therefore carry none. A blank topic makes the route resolve the knowledge
+    # scope from the session instead (see routers/interview.py). It used to be
+    # ``min_length=1``, which rejected every JD-prep hint request with HTTP 422.
+    topic: str = Field(default="", max_length=200)
     question: str = Field(min_length=1, max_length=100_000)
     session_id: str | None = Field(default=None, max_length=200)
     question_id: str | int | None = None
     force: bool = False
     mode: Literal["full", "hint"] = "full"
 
-    @field_validator("topic", "question")
+    @field_validator("question")
     @classmethod
     def strip_required_text(cls, value: str) -> str:
         value = value.strip()
         if not value:
             raise ValueError("must not be blank")
         return value
+
+    @field_validator("topic")
+    @classmethod
+    def strip_optional_topic(cls, value: str) -> str:
+        return value.strip()
 
     @field_validator("session_id")
     @classmethod
