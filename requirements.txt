@@ -49,5 +49,10 @@ redis>=5.0.0
 # Vector store (optional - only when VECTOR_BACKEND=qdrant; the default numpy
 # backend needs nothing extra). The LlamaIndex adapter enables the optional
 # Qdrant-backed RAG index path.
-qdrant-client>=1.12.0
+# llama-index-vector-stores-qdrant 0.10.2 still imports
+# IDF_EMBEDDING_MODELS from qdrant_client.qdrant_fastembed. qdrant-client
+# 1.19.0 moved that symbol to fastembed_common, breaking the adapter at import
+# time and making every knowledge-index rebuild fail before any embedding call.
+# Keep this exact pin until the LlamaIndex adapter updates its import.
+qdrant-client==1.18.0
 llama-index-vector-stores-qdrant>=0.3.0
