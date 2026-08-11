@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { ShieldCheck, Users, RefreshCw, Loader2, Crown } from "lucide-react";
+import { ShieldCheck, Users, RefreshCw, Loader2, Crown, EyeOff } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { getAuditLogs, getAdminUsers } from "@/api/settings";
@@ -91,17 +91,46 @@ export default function AdminAuditPanel() {
         <CardContent>
           <div className="space-y-2">
             {users.map((u) => (
-              <div key={u.id} className="flex items-center gap-3 text-sm py-1.5 border-b border-border/40 last:border-0">
-                <span className="sig-mono text-[11px] text-dim w-[72px] shrink-0">{u.id}</span>
-                <span className="truncate flex-1">{u.email}</span>
-                <span className="text-dim truncate max-w-[120px]">{u.name}</span>
-                {u.is_owner && (
-                  <span className="flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded"
-                        style={{ background: "color-mix(in srgb, var(--sig-warning) 15%, transparent)", color: "var(--sig-warning)" }}>
-                    <Crown size={11} /> 管理员
+              <div key={u.id} className="min-w-0 py-2 border-b border-border/40 last:border-0">
+                {/* Compact layout: keep long UUIDs from painting over adjacent fields. */}
+                <div className="flex min-w-0 items-start gap-3 sm:hidden">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate text-sm" title={u.email}>{u.email}</span>
+                      {u.is_owner && (
+                        <span className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium"
+                              style={{ background: "color-mix(in srgb, var(--sig-warning) 15%, transparent)", color: "var(--sig-warning)" }}>
+                          <Crown size={11} /> 管理员
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 text-[11px] text-dim">
+                      <span className="min-w-0 truncate sig-mono" title={u.id}>
+                        {u.id}
+                      </span>
+                      <span className="sig-mono shrink-0">{u.created_at?.slice(0, 10)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Wide layout: every flexible column has min-width: 0 so truncation works. */}
+                <div className="hidden min-w-0 grid-cols-[minmax(80px,1fr)_minmax(140px,1.65fr)_minmax(70px,.8fr)_auto] items-center gap-3 text-sm sm:grid">
+                  <span className="sig-mono min-w-0 truncate text-[11px] text-dim" title={u.id}>{u.id}</span>
+                  <span className="min-w-0 truncate" title={u.email}>{u.email}</span>
+                  <span className="flex min-w-0 items-center gap-1.5 text-dim">
+                    <EyeOff size={13} className="shrink-0" aria-hidden="true" />
+                    <span className="truncate">姓名已隐藏</span>
                   </span>
-                )}
-                <span className="sig-mono text-[11px] text-dim shrink-0">{u.created_at?.slice(0, 10)}</span>
+                  <div className="flex shrink-0 items-center justify-end gap-2">
+                    {u.is_owner && (
+                      <span className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium"
+                            style={{ background: "color-mix(in srgb, var(--sig-warning) 15%, transparent)", color: "var(--sig-warning)" }}>
+                        <Crown size={11} /> 管理员
+                      </span>
+                    )}
+                    <span className="sig-mono text-[11px] text-dim">{u.created_at?.slice(0, 10)}</span>
+                  </div>
+                </div>
               </div>
             ))}
           </div>
