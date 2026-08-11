@@ -87,7 +87,8 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:80/"]
+      # BusyBox wget may resolve localhost to ::1 while nginx listens on IPv4.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/"]
       interval: 30s
       timeout: 5s
       retries: 3
