@@ -101,6 +101,32 @@ def test_production_qdrant_requires_api_key():
         configured.validate_security_settings()
 
 
+def test_qdrant_readiness_retries_after_transient_probe_failure(monkeypatch):
+    import backend.indexer as indexer
+
+    class ProbeClient:
+        calls = 0
+
+        def get_collections(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("qdrant still starting")
+            return object()
+
+    client = ProbeClient()
+    clock = iter((1.0, 1.0, 1.0, 12.0, 12.0))
+    monkeypatch.setattr(indexer, "_use_qdrant_kb", lambda: True)
+    monkeypatch.setattr(indexer, "_get_qdrant_client", lambda: client)
+    monkeypatch.setattr(indexer.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(indexer, "_kb_qdrant_healthy", None)
+    monkeypatch.setattr(indexer, "_kb_qdrant_checked_at", 0.0)
+
+    assert indexer._qdrant_kb_available() is False
+    assert indexer._qdrant_kb_available() is False  # cached within TTL
+    assert indexer._qdrant_kb_available() is True   # retried after TTL
+    assert client.calls == 2
+
+
 def test_production_rejects_empty_cors_allowlist():
     configured = Settings(
         _env_file=None,
@@ -398,6 +424,30 @@ def test_deleted_user_token_is_rejected(monkeypatch):
     assert exc_info.value.status_code == 401
 
 
+def test_auth_user_responses_hide_internal_token_version(monkeypatch):
+    internal = {
+        "id": "deadbeef",
+        "email": "user@example.com",
+        "name": "User",
+        "_token_version": 7,
+    }
+    monkeypatch.setattr(auth_router, "get_user_by_id", lambda _user_id: dict(internal))
+    monkeypatch.setattr(
+        auth_router, "update_user_profile", lambda *_args, **_kwargs: dict(internal),
+    )
+    monkeypatch.setattr(auth_router, "log_event", lambda *_args, **_kwargs: None)
+
+    me = auth_router.get_me("deadbeef")
+    updated = auth_router.update_profile(
+        type("RequestModel", (), {"name": "User", "email": None})(),
+        _request("127.0.0.1"),
+        "deadbeef",
+    )
+
+    assert "_token_version" not in me
+    assert "_token_version" not in updated["user"]
+
+
 def test_password_change_revokes_previously_issued_token(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -534,13 +584,48 @@ def test_profile_email_unique_race_returns_conflict_and_rolls_back(
 @pytest.mark.parametrize("user_id", ["deadbeef", "a" * 32])
 def test_tokens_accept_legacy_and_full_length_user_ids(monkeypatch, user_id):
     monkeypatch.setattr(auth.settings, "jwt_secret", "test-secret")
-    monkeypatch.setattr(auth, "get_user_by_id", lambda candidate: {"id": candidate})
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda candidate: {"id": candidate, "_token_version": 0},
+    )
     credentials = HTTPAuthorizationCredentials(
         scheme="Bearer",
         credentials=auth.create_token(user_id),
     )
 
     assert auth.get_current_user(credentials) == user_id
+
+
+def test_token_validation_fails_closed_when_record_version_is_missing(monkeypatch):
+    monkeypatch.setattr(auth.settings, "jwt_secret", "test-secret")
+    monkeypatch.setattr(auth, "get_user_by_id", lambda candidate: {"id": candidate})
+    credentials = HTTPAuthorizationCredentials(
+        scheme="Bearer", credentials=auth.create_token("deadbeef", 0),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        auth.get_current_user(credentials)
+
+    assert exc_info.value.status_code == 503
+
+
+def test_token_validation_fails_closed_when_identity_store_is_unavailable(monkeypatch):
+    monkeypatch.setattr(auth.settings, "jwt_secret", "test-secret")
+
+    def unavailable(_user_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(auth, "get_user_by_id", unavailable)
+    credentials = HTTPAuthorizationCredentials(
+        scheme="Bearer", credentials=auth.create_token("deadbeef", 0),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        auth.get_current_user(credentials)
+
+    assert exc_info.value.status_code == 503
+    assert "database is locked" not in str(exc_info.value.detail)
 
 
 def test_new_user_and_default_user_ids_use_full_128_bits(monkeypatch):

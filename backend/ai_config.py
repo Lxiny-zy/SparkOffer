@@ -9,6 +9,7 @@ import os
 import threading
 import logging
 import uuid
+import copy
 from pathlib import Path
 
 from backend.config import settings
@@ -20,6 +21,66 @@ AI_CONFIG_PATH: Path = settings.base_dir / "data" / "ai_config.json"
 _lock = threading.Lock()
 _cache: dict = {}
 _config_version: int = 0
+
+# Fixed-length placeholder returned by owner-only settings APIs.  A fixed mask
+# avoids leaking key length or prefixes while still allowing the existing UI to
+# render one input per configured key.  The placeholder is never persisted as a
+# credential: save helpers restore the previous value when it is submitted.
+SECRET_MASK = "********"
+_SECRET_FIELDS = {"api_key", "keys", "token", "password", "secret"}
+
+
+def is_secret_mask(value: object) -> bool:
+    return isinstance(value, str) and value == SECRET_MASK
+
+
+def mask_secret(value: object) -> str:
+    return SECRET_MASK if value not in (None, "") else ""
+
+
+def redact_channel(channel: dict) -> dict:
+    """Return a deep-copied channel with all provider keys masked."""
+    result = copy.deepcopy(channel)
+    keys = result.get("keys")
+    if isinstance(keys, list):
+        # Preserve list positions.  ``save_channels`` uses the position of a
+        # masked key to restore the value from the persisted channel; dropping
+        # empty slots here would shift later keys and could restore the wrong
+        # credential after an otherwise harmless settings edit.
+        result["keys"] = [mask_secret(key) for key in keys]
+    for field in ("api_key", "token", "password", "secret"):
+        if field in result:
+            result[field] = mask_secret(result.get(field))
+    # Legacy configurations allowed credentials in URL userinfo.  Current
+    # validation rejects that shape for provider bases, but an old config (or
+    # a proxy URL) can still contain it and must not be reflected by the
+    # owner-only settings response.
+    for field in ("api_base", "proxy"):
+        value = result.get(field)
+        if isinstance(value, str) and value:
+            try:
+                from backend.utils.outbound import redact_url_credentials
+                result[field] = redact_url_credentials(value)
+            except Exception:
+                # Redaction is a security boundary: if parsing fails, do not
+                # return the original potentially credential-bearing value.
+                result[field] = "<redacted-url>"
+    return result
+
+
+def _restore_masked_url(value: object, old_value: object) -> object:
+    """Restore a URL that came back from ``redact_channel`` unchanged."""
+    if not isinstance(value, str) or not isinstance(old_value, str) or not old_value:
+        return value
+    if value == SECRET_MASK:
+        return old_value
+    try:
+        from backend.utils.outbound import redact_url_credentials
+        if value == redact_url_credentials(old_value):
+            return old_value
+    except Exception:
+        pass
+    return value
 
 # Mapping from (section, key) to the settings attribute name
 _SETTINGS_KEY_MAP = {
@@ -168,6 +229,16 @@ def save_ai_config(config: dict):
             if section not in _cache:
                 _cache[section] = {}
             for key, value in incoming.items():
+                # The settings UI sends SECRET_MASK for an unchanged key after
+                # GET responses were redacted.  Keep the stored credential in
+                # that case; an explicit empty value still removes it.
+                if key in _SECRET_FIELDS and is_secret_mask(value):
+                    continue
+                # Legacy flat settings responses redact credentials embedded in
+                # api_base URLs.  Preserve the persisted URL when a client
+                # sends that redacted representation back unchanged.
+                if key == "api_base":
+                    value = _restore_masked_url(value, _cache[section].get(key))
                 if value is None or value == "":
                     _cache[section].pop(key, None)
                 else:
@@ -188,6 +259,35 @@ def save_channels(channels_config: dict):
             channels = channels_config.get(section)
             if channels is None:
                 continue
+            # Merge masked key placeholders with the previous persisted values.
+            # This permits editing a channel's model/base URL without forcing a
+            # credential rotation or exposing the old value to the browser.
+            old_channels = ((_cache.get(section) or {}).get("channels") or [])
+            old_by_id = {str(ch.get("id")): ch for ch in old_channels if isinstance(ch, dict)}
+            normalized_channels = []
+            for incoming in channels:
+                ch = copy.deepcopy(incoming)
+                old = old_by_id.get(str(ch.get("id")), {})
+                incoming_keys = ch.get("keys")
+                old_keys = old.get("keys") if isinstance(old, dict) else []
+                if isinstance(incoming_keys, list):
+                    kept = []
+                    for idx, key in enumerate(incoming_keys):
+                        if is_secret_mask(key):
+                            old_key = old_keys[idx] if isinstance(old_keys, list) and idx < len(old_keys) else ""
+                            if old_key:
+                                kept.append(old_key)
+                        elif key not in (None, ""):
+                            kept.append(key)
+                    ch["keys"] = kept
+                for field in ("api_key", "token", "password", "secret"):
+                    if is_secret_mask(ch.get(field)):
+                        ch[field] = old.get(field, "") if isinstance(old, dict) else ""
+                for field in ("api_base", "proxy"):
+                    if isinstance(old, dict):
+                        ch[field] = _restore_masked_url(ch.get(field), old.get(field))
+                normalized_channels.append(ch)
+            channels = normalized_channels
             for ch in channels:
                 if not ch.get("id"):
                     ch["id"] = uuid.uuid4().hex[:8]
@@ -200,11 +300,15 @@ def save_channels(channels_config: dict):
 
 
 def get_channels(section: str) -> list[dict]:
-    """Return channel list for a section from cache."""
+    """Return a redacted channel list for API/UI consumers.
+
+    Internal provider code reads the cache through ``channel_manager`` or
+    ``get_effective``; this public helper is intentionally safe by default.
+    """
     with _lock:
         sec = _cache.get(section)
         if isinstance(sec, dict):
-            return sec.get("channels", [])
+            return [redact_channel(ch) for ch in sec.get("channels", []) if isinstance(ch, dict)]
     return []
 
 
@@ -264,7 +368,15 @@ def get_all_effective() -> dict:
         value = get_effective(section, key)
         source = _detect_source(section, key)
 
-        if isinstance(value, (int, float)):
+        if key in _SECRET_FIELDS:
+            display = mask_secret(value)
+        elif key == "api_base" and isinstance(value, str):
+            try:
+                from backend.utils.outbound import redact_url_credentials
+                display = redact_url_credentials(value)
+            except Exception:
+                display = "<redacted-url>"
+        elif isinstance(value, (int, float)):
             display = value
         else:
             display = str(value) if value else ""

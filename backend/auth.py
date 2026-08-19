@@ -538,17 +538,23 @@ def get_current_user(
         token_version = payload.get("ver", 0)
         if not isinstance(token_version, int) or token_version < 0:
             raise HTTPException(401, "Invalid token")
-        if get_user_by_id(user_id) is None:
-            raise HTTPException(401, "Invalid or expired token")
         try:
-            row = get_db().execute(
-                "SELECT token_version FROM users WHERE id = ?", (user_id,)
-            ).fetchone()
-            current_version = int(row["token_version"] or 0) if row else None
-        except sqlite3.OperationalError:
-            # Compatibility for a legacy database opened before startup migration.
-            current_version = 0
-        if current_version != token_version:
+            user_record = get_user_by_id(user_id)
+        except sqlite3.Error as exc:
+            # Authentication must fail closed when the identity store cannot be
+            # read. Treating the JWT's own version as authoritative would let a
+            # caller choose any `ver` value during a database outage.
+            logger.error(
+                "Token validation database lookup failed (%s)", type(exc).__name__,
+            )
+            raise HTTPException(503, "Authentication service unavailable") from exc
+        if user_record is None:
+            raise HTTPException(401, "Invalid or expired token")
+        record_version = user_record.get("_token_version")
+        if not isinstance(record_version, int) or record_version < 0:
+            logger.error("Token validation record has no valid token_version for user %s", user_id)
+            raise HTTPException(503, "Authentication service unavailable")
+        if record_version != token_version:
             raise HTTPException(401, "Invalid or expired token")
         return user_id
     except JWTError:
@@ -574,12 +580,16 @@ def require_owner(user_id: str = Depends(get_current_user)) -> str:
 
 def get_user_by_id(user_id: str) -> dict | None:
     conn = get_db()
-    row = conn.execute("SELECT id, email, name, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    row = conn.execute(
+        "SELECT id, email, name, created_at, token_version FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
     if not row:
         return None
     return {
         "id": row["id"], "email": row["email"], "name": row["name"],
         "created_at": row["created_at"], "is_owner": is_owner(row["id"]),
+        "_token_version": int(row["token_version"] or 0),
     }
 
 

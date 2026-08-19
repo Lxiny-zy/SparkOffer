@@ -881,8 +881,31 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str,
     snapshot's point text instead of being trusted as positions.
     """
     weak_points = profile.setdefault("weak_points", [])
+    if not isinstance(weak_points, list):
+        weak_points = []
+        profile["weak_points"] = weak_points
+    if index_points is not None and not isinstance(index_points, list):
+        index_points = None
 
-    def _resolve(idx) -> int | None:
+    def _coerce_index(value) -> int | None:
+        # LLMs frequently serialize JSON indexes as strings. Accept only
+        # canonical finite integer values; booleans/floats are never valid
+        # positions and must not reach range comparisons below.
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            if text and (text.isdigit() or (text.startswith("-") and text[1:].isdigit())):
+                try:
+                    return int(text)
+                except ValueError:
+                    return None
+        return None
+
+    def _resolve(raw_idx) -> int | None:
+        idx = _coerce_index(raw_idx)
         if idx is None:
             return None
         if index_points is not None:
@@ -890,7 +913,7 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str,
                 return None
             text = index_points[idx]
             for i, wp in enumerate(weak_points):
-                if wp.get("point") == text:
+                if isinstance(wp, dict) and wp.get("point") == text:
                     return i
             return None
         return idx if 0 <= idx < len(weak_points) else None
@@ -912,6 +935,8 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str,
             idx = _resolve(op.get("index"))
             if idx is not None:
                 wp = weak_points[idx]
+                if not isinstance(wp, dict):
+                    continue
                 if op.get("new_point"):
                     wp["point"] = op["new_point"]
                 wp["times_seen"] = wp.get("times_seen", 1) + 1
@@ -920,13 +945,21 @@ def _apply_memory_ops(profile: dict, ops: dict, topic: str | None, now: str,
     for imp in ops.get("improvements", []):
         idx = _resolve(imp.get("weak_index"))
         if idx is not None:
-            weak_points[idx]["improved"] = True
-            weak_points[idx]["improved_at"] = now
+            if isinstance(weak_points[idx], dict):
+                weak_points[idx]["improved"] = True
+                weak_points[idx]["improved_at"] = now
 
-    existing_strong = {s["point"] for s in profile.get("strong_points", [])}
+    strong_points = profile.setdefault("strong_points", [])
+    if not isinstance(strong_points, list):
+        strong_points = []
+        profile["strong_points"] = strong_points
+    existing_strong = {
+        s.get("point") for s in strong_points
+        if isinstance(s, dict) and isinstance(s.get("point"), str)
+    }
     for op in ops.get("strong_point_ops", []):
         if op.get("action") == "ADD" and op.get("point") and op["point"] not in existing_strong:
-            profile.setdefault("strong_points", []).append({
+            strong_points.append({
                 "point": op["point"],
                 "topic": op.get("topic", topic or ""),
                 "first_seen": now,

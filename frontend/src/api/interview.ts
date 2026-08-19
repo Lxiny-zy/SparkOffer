@@ -1,5 +1,5 @@
 import { API_BASE, authFetch, iterSSEFrames } from "./client";
-import { fetchSSE, withSSETimeout, type SSECallbacks } from "./sse";
+import { fetchSSE, withSSETimeout, SSETerminalError, type SSECallbacks } from "./sse";
 import type {
   Question,
   InterviewStartResponse,
@@ -92,13 +92,37 @@ export async function startInterviewStream(mode: string, topic: string | null, {
     });
     if (!res.ok) throw new Error(await res.text());
 
+    let sawComplete = false;
+    let sawDone = false;
+    let doneEvent: any = null;
+    let errorMessage: string | null = null;
     for await (const event of iterSSEFrames(res)) {
       if (event.type === "question" && onQuestion) onQuestion(event.data);
       else if (event.type === "question_update" && onQuestionUpdate) onQuestionUpdate(event.data);
-      else if (event.type === "done" && onDone) onDone(event);
-      else if (event.type === "error" && onError) onError(event.message);
+      else if (event.type === "complete") sawComplete = true;
+      else if (event.type === "done") {
+        sawDone = true;
+        doneEvent = event;
+        if (event.terminal === "error" && !errorMessage) errorMessage = "出题失败，请稍后重试";
+      }
+      else if (event.type === "error") {
+        errorMessage = event.message || "出题失败，请稍后重试";
+        if (onError) onError(errorMessage);
+      }
       else if (event.type === "pipeline_stage" && onStage) onStage(event as PipelineStageEvent);
     }
+
+    if (errorMessage) {
+      const error = new SSETerminalError(errorMessage, "error");
+      // Home already surfaced the callback error; mark it so its catch block
+      // does not show the same toast a second time.
+      (error as Error & { handled?: boolean }).handled = true;
+      throw error;
+    }
+    if (!sawDone || !sawComplete) {
+      throw new SSETerminalError("出题连接提前关闭，未收到完成事件，请重试");
+    }
+    if (onDone) onDone(doneEvent);
   }, undefined, externalSignal);
 }
 
@@ -202,6 +226,8 @@ export async function endInterview(
     }
 
     let result: EndInterviewResponse | null = null;
+    let sawDone = false;
+    let errorMessage: string | null = null;
 
     for await (const event of iterSSEFrames(res)) {
       if (event.type === "eval_progress" && callbacks?.onProgress) {
@@ -210,10 +236,19 @@ export async function endInterview(
         callbacks.onRAGMetrics(event.data);
       } else if (event.type === "complete") {
         result = event.data;
+      } else if (event.type === "error") {
+        errorMessage = event.message || "评估失败，请稍后重试";
+      } else if (event.type === "done") {
+        sawDone = true;
+        if (event.terminal === "error" && !errorMessage) {
+          errorMessage = "评估失败，请稍后重试";
+        }
       }
     }
 
-    if (!result) throw new Error("评估流结束但未收到结果");
+    if (errorMessage) throw new SSETerminalError(errorMessage, "error");
+    if (!sawDone) throw new SSETerminalError("评估连接提前关闭，未收到完成事件，请重试");
+    if (result === null) throw new Error("评估流结束但未收到结果");
     return result;
   });
 }

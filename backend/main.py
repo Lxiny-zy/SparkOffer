@@ -90,9 +90,43 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SparkOffer", version="0.3.0", lifespan=lifespan)
 
+
+def _request_limit_for_path(path: str) -> int | None:
+    """Return the larger streaming limit only for multipart upload routes."""
+    normalized = path.rstrip("/")
+    if normalized.startswith("/api/knowledge/") and normalized.endswith("/upload"):
+        return settings.max_knowledge_upload_request_bytes
+    if normalized == "/api/resume/upload":
+        return settings.max_resume_upload_request_bytes
+    return None
+
+
+@app.get("/health/live", include_in_schema=False)
+def health_live():
+    """Process liveness probe: no dependency calls and safe during startup."""
+    return {"status": "ok"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+def health_ready():
+    """Readiness probe covering the database and configured vector backend."""
+    from fastapi import HTTPException
+    from backend.storage.database import get_db
+
+    try:
+        get_db().execute("SELECT 1").fetchone()
+        if settings.vector_backend_mode() == "qdrant":
+            from backend.indexer import _qdrant_kb_available
+            if not _qdrant_kb_available():
+                raise RuntimeError("qdrant is not ready")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="dependencies not ready") from exc
+    return {"status": "ok", "vector_backend": settings.vector_backend_mode()}
+
 app.add_middleware(
     RequestBodyLimitMiddleware,
     max_bytes=settings.max_request_body_bytes,
+    path_limit_resolver=_request_limit_for_path,
 )
 _cors_origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
 app.add_middleware(

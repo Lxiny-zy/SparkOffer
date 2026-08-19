@@ -1,5 +1,5 @@
 import { API_BASE, authHeaders, handleStreamUnauthorized, iterSSEFrames } from "./client";
-import { withSSETimeoutGen } from "./sse";
+import { SSETerminalError, withSSETimeoutGen } from "./sse";
 import type { ChatMessage } from "../types/api";
 
 /**
@@ -57,6 +57,25 @@ export function streamAssistantChat(message: string, signal?: AbortSignal): Asyn
       throw new Error(`Assistant error: ${res.status}`);
     }
 
-    yield* iterSSEFrames(res);
+    let sawDone = false;
+    let errorMessage: string | null = null;
+    for await (const event of iterSSEFrames(res)) {
+      if (event.type === "error") {
+        errorMessage = event.message || "AI 服务暂时不可用，请稍后重试";
+        continue;
+      }
+      if (event.type === "done") {
+        sawDone = true;
+        if (event.terminal === "error" && !errorMessage) {
+          errorMessage = "AI 服务暂时不可用，请稍后重试";
+        }
+        continue;
+      }
+      yield event;
+    }
+    if (errorMessage) throw new SSETerminalError(errorMessage, "error");
+    if (!sawDone) {
+      throw new SSETerminalError("连接提前关闭，未收到完成事件，请重试");
+    }
   }, undefined, signal);
 }

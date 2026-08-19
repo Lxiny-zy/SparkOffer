@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable
 from typing import Any, Callable
 
 from fastapi.responses import StreamingResponse
@@ -26,16 +26,164 @@ def _observe_blocking_task(task: asyncio.Task) -> None:
         return
     error = task.exception()
     if error is not None:
-        logger.error("Detached blocking SSE task failed: %s", error)
+        # Provider exceptions may embed API URLs, query credentials, or proxy
+        # userinfo.  The type is enough to identify the failing subsystem
+        # without copying attacker/provider-controlled text into logs.
+        logger.error(
+            "Detached blocking SSE task failed (%s)", type(error).__name__,
+        )
 
 
 def sse_event(data: dict) -> str:
-    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+    """Serialize one SSE data frame and annotate terminal events.
+
+    ``complete``/``done`` and ``error`` are the application-level terminal
+    protocol.  Older callers only supplied ``type``; adding the explicit
+    ``terminal`` field here keeps those callers compatible while allowing
+    clients to distinguish a successful close from an error close.
+    """
+    payload = dict(data)
+    event_type = payload.get("type")
+    if event_type == "complete":
+        payload["terminal"] = "success"
+    elif event_type == "done":
+        payload.setdefault("terminal", "success")
+    elif event_type == "error":
+        payload["terminal"] = "error"
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def sse_complete(data: Any) -> str:
+    """Build the successful result event for a terminal SSE stream."""
+    return sse_event({"type": "complete", "terminal": "success", "data": data})
+
+
+def sse_error(message: str, **extra: Any) -> str:
+    """Build a terminal error event without leaking an implementation detail."""
+    payload = {"type": "error", "terminal": "error", "message": str(message)}
+    payload.update(extra)
+    return sse_event(payload)
+
+
+def sse_done(*, terminal: str = "success", **extra: Any) -> str:
+    """Build the explicit stream terminator.
+
+    A failed stream must send ``sse_done(terminal="error")`` after its error
+    event.  Keeping this separate from :func:`sse_event` prevents an error
+    path from accidentally emitting a success-looking ``done`` event.
+    """
+    return sse_event({"type": "done", "terminal": terminal, **extra})
+
+
+async def _normalized_sse_stream(generator: AsyncGenerator[str, None]):
+    """Enforce one explicit terminal pair for every SSE response.
+
+    A number of older generators returned immediately after forwarding an
+    ``error`` event.  Browsers then observed a clean EOF and callers that only
+    awaited the stream treated the failed request as successful.  This adapter
+    repairs that contract at the transport boundary while preserving the
+    generator's existing event payloads.
+    """
+    saw_error = False
+    saw_complete = False
+    saw_done = False
+    cancelled = False
+    stream_failed = False
+    # Hold terminal frames until the source generator has actually returned.
+    # Several endpoints do cleanup/persistence after yielding ``done``; if
+    # that work fails, forwarding ``done(success)`` immediately would make the
+    # client observe a false success. Non-terminal progress is still forwarded
+    # as soon as it arrives.
+    pending_complete: str | None = None
+    pending_error: str | None = None
+    pending_done: str | None = None
+    try:
+        async for line in generator:
+            if not isinstance(line, str) or not line.startswith("data: "):
+                yield line
+                continue
+            try:
+                event = json.loads(line[6:].strip())
+            except (TypeError, json.JSONDecodeError):
+                yield line
+                continue
+            event_type = event.get("type")
+            # Normalize terminal fields even for legacy generators that build
+            # frames manually instead of using ``sse_event``.
+            if event_type in {"complete", "error", "done"}:
+                if event_type == "error":
+                    event["terminal"] = "error"
+                elif event_type == "done":
+                    if event.get("terminal") == "error":
+                        saw_error = True
+                    event["terminal"] = "error" if saw_error else "success"
+                else:
+                    event["terminal"] = "success"
+                line = sse_event(event)
+                if event_type == "error":
+                    # A malformed source may emit a successful done frame
+                    # before discovering a late failure. Once an error is
+                    # observed, discard that success terminator so the
+                    # normalized stream cannot report both outcomes.
+                    pending_error = line
+                    pending_done = None
+                    saw_done = False
+                    saw_error = True
+                elif event_type == "complete":
+                    pending_complete = line
+                    saw_complete = True
+                else:
+                    pending_done = line
+                    saw_done = True
+                continue
+            yield line
+    except (asyncio.CancelledError, GeneratorExit):
+        cancelled = True
+        raise
+    except Exception as exc:
+        stream_failed = True
+        logger.error(
+            "SSE generator failed before terminal event (%s)",
+            type(exc).__name__,
+        )
+        # A generator may fail after yielding ``complete`` while persisting
+        # side effects. That remains a failed request, not a successful close.
+        saw_error = True
+        # Terminal frames are intentionally buffered until the source returns;
+        # discard any success frame that was waiting behind the exception.
+        pending_complete = None
+        pending_done = None
+        saw_done = False
+    finally:
+        if not saw_done and not cancelled:
+            if stream_failed:
+                saw_error = True
+            elif not saw_error and not saw_complete:
+                pending_error = sse_error("连接提前关闭，未收到完成事件，请重试")
+                saw_error = True
+        if not cancelled:
+            if saw_error:
+                if pending_error is not None:
+                    yield pending_error
+                else:
+                    yield sse_error("请求处理失败，请稍后重试")
+                yield pending_done or sse_done(terminal="error")
+            elif saw_complete:
+                if pending_complete is not None:
+                    yield pending_complete
+                yield pending_done or sse_done(terminal="success")
+            elif saw_done:
+                # Chat-style streams may have tokens/actions but no
+                # ``complete`` payload; an explicit done is still valid.
+                if pending_done is not None:
+                    yield pending_done
+                else:
+                    yield sse_done(terminal="success")
 
 
 def streaming_response(generator: AsyncGenerator[str, None]) -> StreamingResponse:
     return StreamingResponse(
-        generator,
+        _normalized_sse_stream(generator),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -221,6 +369,14 @@ async def iter_llm_stream(
                 rbuf = ""
             yield ("token", t)
             last_emit = time.monotonic()
+        elif not r and time.monotonic() - last_emit >= keepalive_interval:
+            # Some OpenAI-compatible gateways emit transport keepalive chunks
+            # with neither visible content nor recognized reasoning fields.
+            # Those chunks keep the upstream socket active, so the idle reader
+            # never fires, but without this branch the downstream SSE can still
+            # remain silent until nginx closes it.
+            yield ("idle", "")
+            last_emit = time.monotonic()
     if rbuf:
         yield ("reasoning", rbuf)
 
@@ -288,12 +444,60 @@ async def stream_llm_sse(
                     )
                     chars_since_heartbeat = 0
     except Exception as e:
-        logger.error("stream_llm_sse failed: %s", e)
+        logger.error("stream_llm_sse failed (%s)", type(e).__name__)
         yield ("sse", sse_event({"type": "error", "message": "AI 服务暂时不可用，请稍后重试"}))
         yield ("error", "AI 服务暂时不可用，请稍后重试")
         return
 
     yield ("result", accumulated)
+
+
+async def stream_awaitable_sse(
+    awaitable: Awaitable[Any],
+    *,
+    heartbeat_interval: float = 5.0,
+    timeout: float | None = None,
+    cancel_on_exit: bool = True,
+) -> AsyncGenerator[tuple[str, Any], None]:
+    """Await async work while keeping an SSE response alive.
+
+    The final item is ``("result", value)``. Heartbeats are returned as
+    ``("sse", line)``. Exceptions, cancellation, and timeout propagate so the
+    owning pipeline can choose whether to fail open or fail the request.
+    """
+    task = asyncio.ensure_future(awaitable)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout if timeout is not None else None
+
+    try:
+        while True:
+            if task.done():
+                yield ("result", task.result())
+                return
+
+            wait_for = max(heartbeat_interval, 0.001)
+            if deadline is not None:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError(f"operation exceeded {timeout:g}s")
+                wait_for = min(wait_for, remaining)
+
+            done, _ = await asyncio.wait({task}, timeout=wait_for)
+            if done:
+                yield ("result", task.result())
+                return
+            yield ("sse", sse_event({"type": "ping"}))
+    finally:
+        if not task.done() and cancel_on_exit:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        elif not task.done():
+            # Cancellation cannot stop a synchronous worker wrapped by
+            # asyncio.to_thread(). Keep a strong reference and observe its
+            # eventual completion so timeout/disconnect cannot create silent
+            # "Task exception was never retrieved" warnings.
+            _blocking_tasks.add(task)
+            task.add_done_callback(_observe_blocking_task)
 
 
 async def stream_blocking_sse(
@@ -322,9 +526,13 @@ async def stream_blocking_sse(
             break
         yield ("sse", sse_event({"type": "ping"}))
 
-    if task.exception():
-        logger.error("stream_blocking_sse failed: %s", task.exception())
-        yield ("sse", sse_event({"type": "error", "message": str(task.exception())}))
+    error = task.exception()
+    if error is not None:
+        logger.error("stream_blocking_sse failed (%s)", type(error).__name__)
+        yield (
+            "sse",
+            sse_error("请求处理失败，请稍后重试"),
+        )
         return
 
     yield ("result", task.result())

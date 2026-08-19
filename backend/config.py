@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     # trusted. Empty means the direct TCP peer is always used.
     trusted_proxy_cidrs: str = ""
     max_request_body_bytes: int = 40 * 1024 * 1024
+    # Multipart uploads are streamed and have their own route-level limits.
+    # These defaults include multipart framing overhead around the documented
+    # per-file/batch payload caps.
+    max_knowledge_upload_request_bytes: int = 512 * 1024 * 1024
+    max_resume_upload_request_bytes: int = 32 * 1024 * 1024
 
     # Interview settings
     max_questions_per_phase: int = 5

@@ -42,7 +42,8 @@ def list_audit_logs(*, event: str = None, user_id: str = None,
         f"SELECT COUNT(*) FROM audit_logs WHERE {where_sql}", params
     ).fetchone()[0]
     rows = conn.execute(
-        f"SELECT * FROM audit_logs WHERE {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM audit_logs WHERE {where_sql} "
+        "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
         params + [min(int(limit), 500), int(offset)],
     ).fetchall()
     return {"total": total, "items": [dict(r) for r in rows]}

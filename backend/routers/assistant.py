@@ -1,6 +1,5 @@
 """AI assistant routes — chat, history, welcome."""
 from fastapi import APIRouter, Depends
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.auth import get_current_user
@@ -49,6 +48,7 @@ async def assistant_chat(
     user_id: str = Depends(get_current_user),
 ):
     from backend.assistant import stream_assistant_chat
+    from backend.utils.sse_helpers import streaming_response
 
     # New format: {message: "text"} — server loads history
     # Legacy format: {messages: [...]} — extract last user message
@@ -56,11 +56,7 @@ async def assistant_chat(
     if message is None:
         message = req.messages[-1].content
 
-    return StreamingResponse(
-        stream_assistant_chat(message, user_id),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return streaming_response(stream_assistant_chat(message, user_id))
 
 
 @router.get("/assistant/history")

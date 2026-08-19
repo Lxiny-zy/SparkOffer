@@ -65,6 +65,10 @@ interview-docs/00_AGENT_DEVELOPER_INTERVIEW_QA.md
 interview-docs/07_PY_AGENT_TECH_QA.md
 # 面试答辩稿：含简历口径风险自查，仅本地保留
 面试答辩/
+# Personal resume / screenshot / desktop-tool state (local only)
+简历修订稿_SparkOffer.md
+Lxiny_01.png
+.reasonix/
 
 # Local runtime logs / scratch
 .local-backend.*.log

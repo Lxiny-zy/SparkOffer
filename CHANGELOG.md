@@ -4,6 +4,7 @@
 
 ### Added / Changed / Fixed
 
+- Added validation/repair SSE heartbeats and bounded timeouts, explicit LLM `extra_body` forwarding, deterministic audit ordering, early-close detection for interview streams, and refreshed project documentation.
 - Added durable Resume interview reply recovery across SSE/network failures, including pending-turn replay, refresh restoration, evaluation fencing, empty-response rejection, and reverse-QA completion fixes.
 - Hardened production authentication and Docker defaults, trusted-proxy handling, bounded/atomic rate limiting, deleted-user token checks, and transactional default-user ID migration.
 - Extended default-user migration to stage, verify, roll back, and finalize Qdrant memory/knowledge data without exposing reserved resume or escaped Topic namespaces.

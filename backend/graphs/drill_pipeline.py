@@ -47,7 +47,7 @@ from backend.prompts.strategies import allocate_slots, render_strategy_block, di
 from backend.redis_cache import get_cache
 from backend.spaced_repetition import get_due_reviews, init_sr_for_existing_points
 from backend.storage.sessions import create_session, new_session_id
-from backend.utils.sse_helpers import sse_event, iter_llm_stream
+from backend.utils.sse_helpers import sse_event, iter_llm_stream, stream_awaitable_sse
 from backend.utils.stream_parser import extract_complete_objects
 
 logger = logging.getLogger("uvicorn")
@@ -56,6 +56,10 @@ logger = logging.getLogger("uvicorn")
 # ── Stage event helpers ──
 
 STAGE_NAMES = ["prepare", "retrieve", "generate", "validate", "finalize"]
+
+PIPELINE_HEARTBEAT_SECONDS = 5.0
+VALIDATION_TIMEOUT_SECONDS = 180.0
+REPAIR_TIMEOUT_SECONDS = 300.0
 
 # Frontend-facing display labels — keep in sync with PipelineTimeline.tsx
 STAGE_LABELS = {
@@ -108,11 +112,25 @@ class DrillPipeline:
                 handler = getattr(self, f"_stage_{stage}")
                 async for event in handler():
                     yield event
+            except asyncio.CancelledError:
+                duration_ms = (time.perf_counter() - t0) * 1000.0
+                logger.warning(
+                    "DrillPipeline client disconnected during stage=%s after %.0fms",
+                    stage, duration_ms,
+                )
+                raise
             except Exception as exc:
                 duration_ms = (time.perf_counter() - t0) * 1000.0
-                logger.exception("DrillPipeline stage=%s failed: %s", stage, exc)
-                yield _stage_event(stage, "error", duration_ms=duration_ms, detail=str(exc)[:200])
-                yield sse_event({"type": "error", "message": f"{STAGE_LABELS.get(stage, stage)}失败: {exc}"})
+                logger.exception(
+                    "DrillPipeline stage=%s failed (%s)", stage, type(exc).__name__,
+                )
+                yield _stage_event(
+                    stage, "error", duration_ms=duration_ms, detail="stage failed",
+                )
+                yield sse_event({
+                    "type": "error",
+                    "message": f"{STAGE_LABELS.get(stage, stage)}失败，请稍后重试",
+                })
                 return
             duration_ms = (time.perf_counter() - t0) * 1000.0
             extra = {}
@@ -652,23 +670,35 @@ class DrillPipeline:
             recent_questions=self.ctx.get("drill_ctx", {}).get("recent_questions", []),
         )
 
-        bad_ids: list[int] = []
-        reasons: dict[int, str] = {}
-        validator_summaries: list[str] = []
+        validation = None
+        try:
+            async for kind, value in stream_awaitable_sse(
+                asyncio.to_thread(self._run_validators, ctx),
+                heartbeat_interval=PIPELINE_HEARTBEAT_SECONDS,
+                timeout=VALIDATION_TIMEOUT_SECONDS,
+                # Validators may call synchronous embedding/provider code;
+                # cancelling the asyncio wrapper cannot stop its worker thread.
+                # Detach it on timeout and observe completion instead of
+                # pretending the underlying work was interrupted.
+                cancel_on_exit=False,
+            ):
+                if kind == "sse":
+                    yield value
+                else:
+                    validation = value
+        except TimeoutError:
+            logger.warning(
+                "Question validation exceeded %.0fs; keeping the generated batch",
+                VALIDATION_TIMEOUT_SECONDS,
+            )
+            self.ctx["validator_summary"] = ["validation=timeout-skipped"]
+            return
 
-        for v in DEFAULT_VALIDATORS:
-            try:
-                result: ValidationResult = v.validate(self.questions, ctx)
-            except Exception as exc:
-                logger.warning("Validator %s crashed: %s", v.name, exc)
-                continue
-            validator_summaries.append(f"{v.name}={'ok' if result.ok else 'fail'}({result.summary})")
-            if not result.ok:
-                for qid in result.bad_ids:
-                    if qid in bad_ids:
-                        continue
-                    bad_ids.append(qid)
-                    reasons[qid] = result.reasons.get(qid, f"{v.name} flagged this question")
+        if validation is None:
+            self.ctx["validator_summary"] = ["validation=no-result-skipped"]
+            return
+
+        bad_ids, reasons, validator_summaries = validation
 
         self.ctx["validator_summary"] = validator_summaries
 
@@ -682,10 +712,23 @@ class DrillPipeline:
         })
 
         try:
-            repaired = await self._repair_partial(bad_ids, reasons)
+            repaired = None
+            async for kind, value in stream_awaitable_sse(
+                self._repair_partial(bad_ids, reasons),
+                heartbeat_interval=PIPELINE_HEARTBEAT_SECONDS,
+                timeout=REPAIR_TIMEOUT_SECONDS,
+            ):
+                if kind == "sse":
+                    yield value
+                else:
+                    repaired = value
         except Exception as exc:
             logger.warning("Repair pass failed: %s", exc)
             self.ctx["repair_outcome"] = f"failed: {exc}"
+            return
+
+        if repaired is None:
+            self.ctx["repair_outcome"] = "failed: no result"
             return
 
         # Replace the bad questions with the repaired ones, preserving order/IDs.
@@ -698,6 +741,34 @@ class DrillPipeline:
                 yield sse_event({"type": "question_update", "data": self.questions[i], "repaired": True})
 
         self.ctx["repair_outcome"] = f"repaired {len(repaired_by_id)}/{len(bad_ids)}"
+
+    def _run_validators(
+        self, ctx: ValidationContext,
+    ) -> tuple[list[int], dict[int, str], list[str]]:
+        """Run sync validators off the event loop; the caller emits heartbeats."""
+        bad_ids: list[int] = []
+        reasons: dict[int, str] = {}
+        summaries: list[str] = []
+
+        for validator in DEFAULT_VALIDATORS:
+            try:
+                result: ValidationResult = validator.validate(self.questions, ctx)
+            except Exception as exc:
+                logger.warning("Validator %s crashed: %s", validator.name, exc)
+                continue
+            summaries.append(
+                f"{validator.name}={'ok' if result.ok else 'fail'}({result.summary})"
+            )
+            if not result.ok:
+                for question_id in result.bad_ids:
+                    if question_id in bad_ids:
+                        continue
+                    bad_ids.append(question_id)
+                    reasons[question_id] = result.reasons.get(
+                        question_id, f"{validator.name} flagged this question",
+                    )
+
+        return bad_ids, reasons, summaries
 
     async def _repair_partial(self, bad_ids: list[int], reasons: dict[int, str]) -> list[dict]:
         """Single LLM call that re-emits ONLY the questions listed in bad_ids."""
@@ -793,10 +864,14 @@ class DrillPipeline:
             "questions": self.questions,
             "user_id": self.user_id,
         })
-        yield sse_event({
-            "type": "done",
+        result = {
             "session_id": self.session_id,
             "topic": self.topic,
             "mode": self.mode,
             "total": len(self.questions),
-        })
+        }
+        # ``complete`` carries the durable result; ``done`` is only the
+        # transport terminator.  Keep the legacy fields on ``done`` so older
+        # clients that read session_id directly continue to work.
+        yield sse_event({"type": "complete", "data": result})
+        yield sse_event({"type": "done", **result})

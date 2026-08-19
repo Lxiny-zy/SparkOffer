@@ -120,7 +120,11 @@ async def generate_cards(
                 covered,
             )
         except Exception as exc:
-            yield sse_event({"type": "error", "message": str(exc)})
+            import logging
+            logging.getLogger("uvicorn").error(
+                "Knowledge training section sampling failed (%s)", type(exc).__name__,
+            )
+            yield sse_event({"type": "error", "message": "知识片段暂时不可用，请稍后重试"})
             return
 
         if not sections:

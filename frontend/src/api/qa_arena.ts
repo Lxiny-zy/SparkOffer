@@ -1,4 +1,5 @@
 import { API_BASE, authFetch, authHeaders, iterSSEFrames } from "./client";
+import { SSETerminalError, withSSETimeout, withSSETimeoutGen } from "./sse";
 
 export interface QASession {
   id: string;
@@ -102,34 +103,64 @@ export async function clearQAMessages(sessionId: string): Promise<void> {
 // ── Streaming Chat ──
 
 export async function* streamQAChat(sessionId: string, message: string, images: string[] | undefined, signal?: AbortSignal): AsyncGenerator<any> {
-  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/chat`, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ message, images: images || [] }),
-    signal,
-  });
+  yield* withSSETimeoutGen(async function* (innerSignal) {
+    const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/chat`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ message, images: images || [] }),
+      signal: innerSignal,
+    });
 
-  if (!res.ok) throw new Error(`问答演练场错误: ${res.status}`);
+    if (!res.ok) throw new Error(`问答演练场错误: ${res.status}`);
 
-  for await (const event of iterSSEFrames(res)) {
-    yield event;
-  }
+    let sawDone = false;
+    let errorMessage: string | null = null;
+    for await (const event of iterSSEFrames(res)) {
+      if (event.type === "error") {
+        errorMessage = event.message || "问答生成失败，请稍后重试";
+        continue;
+      }
+      if (event.type === "done") {
+        sawDone = true;
+        if (event.terminal === "error" && !errorMessage) errorMessage = "问答生成失败，请稍后重试";
+        continue;
+      }
+      yield event;
+    }
+    if (errorMessage) throw new SSETerminalError(errorMessage, "error");
+    if (!sawDone) throw new SSETerminalError("问答连接提前关闭，未收到完成事件，请重试");
+  }, undefined, signal);
 }
 
 // Re-answer the last user question (regenerate). No body: the backend re-uses the
 // last stored user message and drops any trailing (broken/partial/empty) AI reply.
 export async function* regenerateQAChat(sessionId: string, signal?: AbortSignal): AsyncGenerator<any> {
-  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/regenerate`, {
-    method: "POST",
-    headers: authHeaders(),
-    signal,
-  });
+  yield* withSSETimeoutGen(async function* (innerSignal) {
+    const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/regenerate`, {
+      method: "POST",
+      headers: authHeaders(),
+      signal: innerSignal,
+    });
 
-  if (!res.ok) throw new Error(`重新生成失败: ${res.status}`);
+    if (!res.ok) throw new Error(`重新生成失败: ${res.status}`);
 
-  for await (const event of iterSSEFrames(res)) {
-    yield event;
-  }
+    let sawDone = false;
+    let errorMessage: string | null = null;
+    for await (const event of iterSSEFrames(res)) {
+      if (event.type === "error") {
+        errorMessage = event.message || "重新生成失败，请稍后重试";
+        continue;
+      }
+      if (event.type === "done") {
+        sawDone = true;
+        if (event.terminal === "error" && !errorMessage) errorMessage = "重新生成失败，请稍后重试";
+        continue;
+      }
+      yield event;
+    }
+    if (errorMessage) throw new SSETerminalError(errorMessage, "error");
+    if (!sawDone) throw new SSETerminalError("问答连接提前关闭，未收到完成事件，请重试");
+  }, undefined, signal);
 }
 
 // ── Summary ──
@@ -141,35 +172,44 @@ export async function generateQASummary(
   signal?: AbortSignal,
 ): Promise<QASummaryResult> {
   const qs = effort ? `?effort=${encodeURIComponent(effort)}` : "";
-  const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/summary${qs}`, {
-    method: "POST",
-    headers: authHeaders(),
-    signal,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || "生成总结失败");
-  }
-
-  const contentType = res.headers.get("content-type") || "";
-  if (!contentType.includes("text/event-stream")) {
-    return res.json();
-  }
-
-  let result: QASummaryResult | null = null;
-
-  for await (const event of iterSSEFrames(res)) {
-    if (event.type === "progress" && onProgress) {
-      onProgress(event.message);
-    } else if (event.type === "error") {
-      throw new Error(event.message);
-    } else if (event.type === "complete") {
-      result = event.data;
+  return withSSETimeout(async (innerSignal) => {
+    const res = await authFetch(`${API_BASE}/qa-arena/sessions/${sessionId}/summary${qs}`, {
+      method: "POST",
+      headers: authHeaders(),
+      signal: innerSignal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "生成总结失败");
     }
-  }
 
-  if (!result) throw new Error("生成失败：未收到结果");
-  return result;
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("text/event-stream")) {
+      return res.json();
+    }
+
+    let result: QASummaryResult | null = null;
+    let sawDone = false;
+    let errorMessage: string | null = null;
+
+    for await (const event of iterSSEFrames(res)) {
+      if (event.type === "progress" && onProgress) {
+        onProgress(event.message);
+      } else if (event.type === "error") {
+        errorMessage = event.message || "生成总结失败，请稍后重试";
+      } else if (event.type === "complete") {
+        result = event.data;
+      } else if (event.type === "done") {
+        sawDone = true;
+        if (event.terminal === "error" && !errorMessage) errorMessage = "生成总结失败，请稍后重试";
+      }
+    }
+
+    if (errorMessage) throw new SSETerminalError(errorMessage, "error");
+    if (!sawDone) throw new SSETerminalError("总结连接提前关闭，未收到完成事件，请重试");
+    if (result === null) throw new Error("生成失败：未收到结果");
+    return result;
+  }, undefined, signal);
 }
 
 export async function ingestQACardToKnowledge(

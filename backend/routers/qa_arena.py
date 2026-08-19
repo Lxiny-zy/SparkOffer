@@ -6,10 +6,11 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from backend.auth import get_current_user
+from backend.utils.sse_helpers import streaming_response
 from backend.storage import qa_sessions as store
 
 router = APIRouter(prefix="/api/qa-arena")
@@ -128,11 +129,7 @@ def chat(
         raise HTTPException(404, "会话不存在")
 
     from backend.qa_arena import stream_qa_chat
-    return StreamingResponse(
-        stream_qa_chat(session_id, message, user_id, images),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return streaming_response(stream_qa_chat(session_id, message, user_id, images))
 
 
 @router.get("/sessions/{session_id}/images/{name}")
@@ -163,11 +160,7 @@ def regenerate(session_id: str, user_id: str = Depends(get_current_user)):
         raise HTTPException(404, "会话不存在")
 
     from backend.qa_arena import stream_qa_regenerate
-    return StreamingResponse(
-        stream_qa_regenerate(session_id, user_id),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return streaming_response(stream_qa_regenerate(session_id, user_id))
 
 
 @router.post("/sessions/{session_id}/summary")
@@ -176,10 +169,8 @@ def summary(session_id: str, effort: str = "", user_id: str = Depends(get_curren
         raise HTTPException(404, "会话不存在")
 
     from backend.qa_arena import stream_generate_summary
-    return StreamingResponse(
+    return streaming_response(
         stream_generate_summary(session_id, user_id, reasoning_effort=effort or None),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

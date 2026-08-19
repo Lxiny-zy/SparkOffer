@@ -1,5 +1,5 @@
 import { API_BASE, authFetch, iterSSEFrames } from "./client";
-import { withSSETimeout } from "./sse";
+import { SSETerminalError, withSSETimeout } from "./sse";
 
 export type KnowledgeTrainingMode = "random" | "high_freq";
 export type KnowledgeTrainingDepth = "basic" | "understand" | "interview_expression";
@@ -83,6 +83,8 @@ export async function generateKnowledgeTrainingCards(
 
     const streamedCards: KnowledgeTrainingCard[] = [];
     let result: KnowledgeTrainingCardsResult | null = null;
+    let sawDone = false;
+    let errorMessage: string | null = null;
     for await (const event of iterSSEFrames(res)) {
       if (event.type === "progress") callbacks?.onProgress?.(event.message);
       else if (event.type === "card") {
@@ -91,10 +93,15 @@ export async function generateKnowledgeTrainingCards(
       } else if (event.type === "complete") {
         result = event.data;
       } else if (event.type === "error") {
-        throw new Error(event.message || "训练卡片生成失败");
+        errorMessage = event.message || "训练卡片生成失败";
+      } else if (event.type === "done") {
+        sawDone = true;
+        if (event.terminal === "error" && !errorMessage) errorMessage = "训练卡片生成失败";
       }
     }
 
+    if (errorMessage) throw new SSETerminalError(errorMessage, "error");
+    if (!sawDone) throw new SSETerminalError("训练卡片连接提前关闭，未收到完成事件，请重试");
     if (result) return result;
     if (streamedCards.length > 0) {
       return { cards: streamedCards, total: streamedCards.length, seed: payload.seed || "" };

@@ -577,7 +577,11 @@ async def start_rag_eval(
                 load_frozen_cases, req.topic, n,
             )
         except (OSError, ValueError) as exc:
-            raise HTTPException(500, f"固定评测集不可用: {str(exc)[:160]}") from exc
+            import logging
+            logging.getLogger("uvicorn").error(
+                "Frozen evaluation set unavailable (%s)", type(exc).__name__,
+            )
+            raise HTTPException(503, "固定评测集暂时不可用，请稍后重试") from exc
         if not selected_cases:
             raise HTTPException(422, f"固定评测集尚未覆盖 topic: {req.topic}")
         n = len(selected_cases)

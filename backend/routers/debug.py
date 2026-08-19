@@ -44,7 +44,7 @@ def _app_caches() -> dict:
                 "max": indexer._INDEX_CACHE_MAX_SIZE,
             }
     except Exception as e:  # noqa: BLE001 — 诊断端点必须永不崩
-        caches["llama_index_cache"] = f"n/a ({e})"
+        caches["llama_index_cache"] = f"n/a ({type(e).__name__})"
     try:
         from backend import live_store
         caches["live_sessions"] = {
@@ -53,7 +53,7 @@ def _app_caches() -> dict:
                          "algorithm_sessions", "rag_eval_jobs")
         }
     except Exception as e:  # noqa: BLE001
-        caches["live_sessions"] = f"n/a ({e})"
+        caches["live_sessions"] = f"n/a ({type(e).__name__})"
     return caches
 
 

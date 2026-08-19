@@ -122,7 +122,9 @@ def _build_http_clients(proxy: str = "", *, timeout: httpx.Timeout | None = _LLM
         cached = _http_client_cache.get(cache_key)
         if cached is not None:
             return cached
-        kw: dict = {"headers": _CUSTOM_HEADERS, "follow_redirects": True}
+        # Provider endpoints are operator-configured; following a redirect can
+        # turn an otherwise public target into an internal-network request.
+        kw: dict = {"headers": _CUSTOM_HEADERS, "follow_redirects": False}
         if timeout:
             kw["timeout"] = timeout
         if proxy:
@@ -269,7 +271,7 @@ class ResilientChatModel:
     def _make_llm(self, channel: dict) -> ChatOpenAI:
         sync_c, async_c = _build_http_clients(channel.get("proxy", ""), timeout=_channel_timeout(channel))
         effort = _resolve_reasoning_effort(self._effort_override or channel.get("reasoning_effort"))
-        model_kwargs = {"extra_body": {"reasoning_effort": effort}} if effort else {}
+        extra_body = {"reasoning_effort": effort} if effort else None
         return ChatOpenAI(
             model=channel.get("model", ""),
             api_key=channel.get("api_key", ""),
@@ -279,7 +281,7 @@ class ResilientChatModel:
             http_client=sync_c,
             http_async_client=async_c,
             default_headers=_CUSTOM_HEADERS,
-            model_kwargs=model_kwargs,
+            extra_body=extra_body,
         )
 
     def invoke(self, messages, **kwargs):
@@ -421,7 +423,7 @@ def get_langchain_llm(tier: str | None = None, reasoning_effort: str | None = No
         return ResilientChatModel(tier=tier, effort_override=reasoning_effort or None)
     sync_c, async_c = _build_http_clients()
     effort = _resolve_reasoning_effort(reasoning_effort or get_effective("llm", "reasoning_effort"))
-    model_kwargs = {"extra_body": {"reasoning_effort": effort}} if effort else {}
+    extra_body = {"reasoning_effort": effort} if effort else None
     if tier is not None:
         logger.warning(
             "get_langchain_llm(tier=%s) requested but no channel pool configured; "
@@ -436,7 +438,7 @@ def get_langchain_llm(tier: str | None = None, reasoning_effort: str | None = No
         http_client=sync_c,
         http_async_client=async_c,
         default_headers=_CUSTOM_HEADERS,
-        model_kwargs=model_kwargs,
+        extra_body=extra_body,
     )
 
 

@@ -6,11 +6,26 @@ export interface SSECallbacks {
   onContent?: (delta: string) => void;
 }
 
+export type SSETerminal = "success" | "error";
+
+/** Error raised when an SSE response closes without a valid terminal pair. */
+export class SSETerminalError extends Error {
+  readonly terminal: SSETerminal | "incomplete";
+
+  constructor(message: string, terminal: SSETerminal | "incomplete" = "incomplete") {
+    super(message);
+    this.name = "SSETerminalError";
+    this.terminal = terminal;
+  }
+}
+
 // SSE 请求超时时间（毫秒）
-// 6 分钟硬上限。出题流水线最坏情况：retrieve(90s) + generate(70s) +
-// validate+repair(60s) + 余量。早先用 120s 在复杂出题/网络抖动时会误杀
-// 正常请求，让用户看到 "network error"。后端有 30s SSE heartbeat 兜底真正的卡死。
-const SSE_TIMEOUT_MS = 360000;
+// 12-minute hard ceiling. This is deliberately above the sum of the bounded
+// retrieval, validation, and repair stages; liveness between those bounds is
+// maintained by SSE heartbeats. The backend still owns the shorter per-stage
+// timeouts, so extending this client ceiling cannot make a stuck repair run
+// forever.
+const SSE_TIMEOUT_MS = 720000;
 
 /** Map an AbortController abort into a localized 超时 error; pass other errors through. */
 function _timeoutError(error: any, timeoutMs: number): Error {
@@ -140,6 +155,8 @@ export async function fetchSSE<T>(
     }
 
     let result: T | null = null;
+    let sawDone = false;
+    let errorMessage: string | null = null;
 
     for await (const event of iterSSEFrames(res)) {
       switch (event.type) {
@@ -150,14 +167,25 @@ export async function fetchSSE<T>(
           callbacks?.onContent?.(event.delta);
           break;
         case "error":
-          throw new Error(event.message);
+          errorMessage = event.message || "请求失败，请稍后重试";
+          break;
         case "complete":
           result = event.data as T;
+          break;
+        case "done":
+          sawDone = true;
+          if (event.terminal === "error" && !errorMessage) {
+            errorMessage = "请求失败，请稍后重试";
+          }
           break;
       }
     }
 
-    if (!result) throw new Error("请求失败：未收到结果");
+    if (errorMessage) throw new SSETerminalError(errorMessage, "error");
+    if (!sawDone) {
+      throw new SSETerminalError("连接提前关闭，未收到完成事件，请重试");
+    }
+    if (result === null) throw new Error("请求失败：未收到结果");
     return result;
   }, SSE_TIMEOUT_MS, externalSignal);
 }

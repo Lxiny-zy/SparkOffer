@@ -212,6 +212,7 @@ export default function Home() {
       } catch (err: any) {
         // A superseded / aborted stream is not a user-facing failure.
         if (!isCurrent()) return;
+        if (err?.handled) return;
         setIsStreaming(false);
         setLoading(false);
         toast.error("启动失败: " + err.message);

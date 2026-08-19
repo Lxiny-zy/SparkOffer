@@ -7,7 +7,6 @@ import threading
 import weakref
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, AIMessage
 
 from backend.models import (
@@ -1133,7 +1132,11 @@ async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get
         try:
             questions = await asyncio.to_thread(generate_drill_questions, req.topic, user_id)
         except RuntimeError as e:
-            raise HTTPException(500, str(e))
+            import logging as _log
+            _log.getLogger("uvicorn").error(
+                "Drill question generation failed (%s)", type(e).__name__,
+            )
+            raise HTTPException(503, "面试题生成服务暂时不可用，请稍后重试") from e
         await asyncio.to_thread(
             create_session, session_id, req.mode.value, req.topic,
             questions=questions, user_id=user_id,
@@ -1176,6 +1179,7 @@ async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get
                         ai_message = value
 
                 if ai_message is None:
+                    yield sse_event({"type": "error", "message": "面试初始化未返回有效问题，请稍后重试"})
                     return
                 yield sse_event({"type": "complete", "data": {
                     "session_id": session_id, "mode": req.mode.value,
@@ -1184,8 +1188,10 @@ async def start_interview(req: StartInterviewRequest, user_id: str = Depends(get
                 yield sse_event({"type": "done"})
             except Exception as e:
                 import logging as _log
-                _log.getLogger("uvicorn").error(f"Resume interview SSE error: {e}")
-                yield sse_event({"type": "error", "message": f"面试初始化失败: {str(e)[:200]}"})
+                _log.getLogger("uvicorn").error(
+                    "Resume interview SSE error (%s)", type(e).__name__,
+                )
+                yield sse_event({"type": "error", "message": "面试初始化失败，请稍后重试"})
 
         return streaming_response(_gen())
 
@@ -1202,12 +1208,11 @@ async def start_interview_stream(req: StartInterviewRequest, user_id: str = Depe
         raise HTTPException(400, f"Invalid topic. Available: {list(topics.keys())}")
 
     from backend.graphs.drill_pipeline import DrillPipeline
+    from backend.utils.sse_helpers import streaming_response
 
     pipeline = DrillPipeline(topic=req.topic, user_id=user_id, mode=req.mode.value)
-    return StreamingResponse(
+    return streaming_response(
         pipeline.run(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -1544,7 +1549,15 @@ async def end_interview(session_id: str, body: EndDrillRequest = None,
                     eval_result = await eval_task
                     yield sse_event({"type": "eval_result", "data": eval_result})
                 except Exception as exc:
-                    yield sse_event({"type": "progress", "message": f"并发评分失败，回退到批量评估: {exc}"})
+                    import logging as _log
+                    _log.getLogger("uvicorn").warning(
+                        "Concurrent drill evaluation failed (%s); falling back",
+                        type(exc).__name__,
+                    )
+                    yield sse_event({
+                        "type": "progress",
+                        "message": "并发评分失败，正在回退到批量评估",
+                    })
                     eval_result = {}
 
             if not eval_result:
@@ -2400,7 +2413,7 @@ async def generate_reference_answer(
             if kind == "sse":
                 yield value
             elif kind == "error":
-                return  # LLM failed — don't cache an empty answer
+                return  # error SSE already forwarded; transport adds done(error)
             else:
                 answer = value.strip()
 

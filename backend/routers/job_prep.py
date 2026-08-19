@@ -1,6 +1,7 @@
 """JD-targeted prep routes — preview and start."""
 
 import asyncio
+import json
 
 from fastapi import APIRouter, HTTPException, Depends
 
@@ -53,28 +54,44 @@ async def job_prep_start(req: JobPrepStartRequest, user_id: str = Depends(get_cu
 
         if not preview:
             got_preview = False
+            preview_error = False
             async for kind, value in stream_generate_job_prep_preview(
                 jd_text, user_id,
                 company=req.company, position=req.position, use_resume=req.use_resume,
             ):
                 if kind == "sse":
                     yield value
+                    if isinstance(value, str) and value.startswith("data: "):
+                        try:
+                            preview_error |= json.loads(value[6:].strip()).get("type") == "error"
+                        except (TypeError, json.JSONDecodeError):
+                            pass
                 else:
                     preview = value
                     got_preview = True
             if not got_preview:
+                if not preview_error:
+                    yield sse_event({"type": "error", "message": "JD 分析未返回有效结果，请稍后重试"})
                 return
 
         questions = None
+        questions_error = False
         async for kind, value in stream_generate_job_prep_questions(
             jd_text, preview, user_id, use_resume=req.use_resume,
             session_id=session_id,
         ):
             if kind == "sse":
                 yield value
+                if isinstance(value, str) and value.startswith("data: "):
+                    try:
+                        questions_error |= json.loads(value[6:].strip()).get("type") == "error"
+                    except (TypeError, json.JSONDecodeError):
+                        pass
             else:
                 questions = value
         if questions is None:
+            if not questions_error:
+                yield sse_event({"type": "error", "message": "JD 出题未返回有效结果，请稍后重试"})
             return
 
         # Freeze the matched knowledge topics on the session. JD prep spans

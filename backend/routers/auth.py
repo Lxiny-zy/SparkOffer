@@ -29,6 +29,11 @@ _REGISTER_MAX_ATTEMPTS = 5     # attempts per window, success or not
 _REGISTER_WINDOW_S = 3600
 
 
+def _public_user(user: dict) -> dict:
+    """Remove internal authentication metadata from API responses."""
+    return {key: value for key, value in user.items() if not key.startswith("_")}
+
+
 def client_ip(request: Request) -> str:
     peer_host = request.client.host if request.client else "unknown"
     try:
@@ -142,7 +147,7 @@ def get_me(user_id: str = Depends(get_current_user)):
     user = get_user_by_id(user_id)
     if not user:
         raise HTTPException(404, "User not found")
-    return user
+    return _public_user(user)
 
 
 @router.put("/auth/profile")
@@ -150,7 +155,7 @@ def update_profile(req: UpdateProfileRequest, request: Request, user_id: str = D
     user = update_user_profile(user_id, name=req.name, email=req.email)
     log_event("profile_updated", user_id=user_id, ip=client_ip(request),
               detail={"fields": [k for k, v in (("name", req.name), ("email", req.email)) if v is not None]})
-    return {"ok": True, "user": user}
+    return {"ok": True, "user": _public_user(user)}
 
 
 @router.put("/auth/password")

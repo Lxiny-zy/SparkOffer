@@ -274,7 +274,9 @@ async def rerank(
                     connect=10.0, read=read_to, write=10.0, pool=10.0,
                 ),
                 "headers": {"User-Agent": "curl/7.88.1"},
-                "follow_redirects": True,
+                # Do not let a configured reranker endpoint redirect requests
+                # into an internal host.
+                "follow_redirects": False,
             }
             proxy = config.get("proxy", "")
             if proxy:

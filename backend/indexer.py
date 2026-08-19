@@ -564,6 +564,9 @@ def _build_nodes(docs: list) -> list:
 
 _qdrant_client_singleton = None
 _kb_qdrant_healthy: bool | None = None   # None=未探测；探测后缓存健康与否
+_kb_qdrant_checked_at = 0.0
+_QDRANT_HEALTH_CACHE_TTL = 10.0
+_qdrant_health_lock = threading.Lock()
 _embed_dim_cache: int | None = None      # 当前 embedding 维度（探测一次后缓存）
 
 
@@ -589,18 +592,39 @@ def _qdrant_kb_available() -> bool:
     本函数在启动时被调用一次，给出"Qdrant 是否真的连得上"的运维信号；结果缓存，
     配置变更时由 reset_qdrant_state() 清空。
     """
-    global _kb_qdrant_healthy
+    global _kb_qdrant_healthy, _kb_qdrant_checked_at
     if not _use_qdrant_kb():
+        # Do not retain a successful result from an earlier Qdrant
+        # configuration if the backend has since been disabled.
+        with _qdrant_health_lock:
+            _kb_qdrant_healthy = None
+            _kb_qdrant_checked_at = 0.0
         return False
-    if _kb_qdrant_healthy is None:
-        try:
-            _get_qdrant_client().get_collections()
-            _kb_qdrant_healthy = True
-            logger.info("Qdrant KB backend healthy.")
-        except Exception as e:
-            _kb_qdrant_healthy = False
-            logger.warning("Qdrant KB 连通性探针失败（qdrant-only，不降级；操作将抛 IndexNotReady）：%s", e)
-    return _kb_qdrant_healthy
+    # Readiness can be hit by several workers/threads at once.  Serialize the
+    # short probe and the cache update so a cold start does not fan out a
+    # request per health-check caller or race singleton construction.
+    with _qdrant_health_lock:
+        now = time.monotonic()
+        # A transient startup/network failure must not poison readiness forever.
+        # Keep a short cache while allowing Docker's periodic probe to recover.
+        if (
+            _kb_qdrant_healthy is None
+            or now - _kb_qdrant_checked_at >= _QDRANT_HEALTH_CACHE_TTL
+        ):
+            try:
+                _get_qdrant_client().get_collections()
+                _kb_qdrant_healthy = True
+                logger.info("Qdrant KB backend healthy.")
+            except Exception as e:
+                _kb_qdrant_healthy = False
+                logger.warning(
+                    "Qdrant KB connectivity probe failed (%s); readiness remains unavailable",
+                    type(e).__name__,
+                )
+            # Timestamp after the call, so the TTL describes the period since
+            # the observed result rather than including network latency.
+            _kb_qdrant_checked_at = time.monotonic()
+        return bool(_kb_qdrant_healthy)
 
 
 def _current_embed_dim() -> int:
@@ -614,10 +638,12 @@ def _current_embed_dim() -> int:
 def reset_qdrant_state() -> None:
     """清空 Qdrant client / 健康标志 / 维度缓存，使配置变更（换 embedding 通道等）
     对知识库生效 —— 由 llm_provider.invalidate_singletons 调用。"""
-    global _qdrant_client_singleton, _kb_qdrant_healthy, _embed_dim_cache
-    _qdrant_client_singleton = None
-    _kb_qdrant_healthy = None
-    _embed_dim_cache = None
+    global _qdrant_client_singleton, _kb_qdrant_healthy, _kb_qdrant_checked_at, _embed_dim_cache
+    with _qdrant_health_lock:
+        _qdrant_client_singleton = None
+        _kb_qdrant_healthy = None
+        _kb_qdrant_checked_at = 0.0
+        _embed_dim_cache = None
     clear_index_cache()
 
 

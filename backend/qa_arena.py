@@ -359,8 +359,8 @@ async def _stream_chat_answer(
     Persists the assistant reply itself so callers stay thin. Three mutually-exclusive
     terminal states:
       - non-empty content, clean finish     → save assistant + ``done``
-      - non-empty content, mid-stream error → save partial  + ``error`` (no ``done``)
-      - empty content (any reason)          → persist nothing + ``error``
+      - non-empty content, mid-stream error → save partial  + ``error`` + terminal ``done``
+      - empty content (any reason)          → persist nothing + ``error`` + terminal ``done``
 
     Emits ``stage`` events (memory → thinking → answering) and ``reasoning`` deltas so the
     front end can show progress and the SSE stream never goes byte-silent during a long

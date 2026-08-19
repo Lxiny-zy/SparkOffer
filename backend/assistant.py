@@ -18,7 +18,14 @@ from backend.storage.assistant_chats import save_message
 from backend.spaced_repetition import get_due_reviews
 from backend.vector_memory import search_memory
 from backend.indexer import load_topics, retrieve_topic_context
-from backend.utils.sse_helpers import chunk_text, chunk_reasoning, iter_chunks_with_idle
+from backend.utils.sse_helpers import (
+    chunk_text,
+    chunk_reasoning,
+    iter_chunks_with_idle,
+    sse_done,
+    sse_error,
+    sse_event,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -736,7 +743,7 @@ async def _stream_assistant_chat_unlocked(
             async for _kind, chunk in iter_chunks_with_idle(aiter, IDLE_HEARTBEAT_SECONDS):
                 if _kind == "idle":
                     last_beat = time.monotonic()
-                    yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+                    yield sse_event({"type": "ping"})
                     continue
                 full_response = chunk if full_response is None else full_response + chunk
 
@@ -748,25 +755,23 @@ async def _stream_assistant_chat_unlocked(
                 # nor the idle ping fires — the stream would go byte-silent until timeout.
                 if chunk_reasoning(chunk) and time.monotonic() - last_beat >= 2.0:
                     last_beat = time.monotonic()
-                    yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+                    yield sse_event({"type": "ping"})
 
                 token = chunk_text(chunk)
                 if token and not has_tool_chunks:
                     streamed_content += token
                     last_beat = time.monotonic()
-                    yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+                    yield sse_event({"type": "token", "content": token})
         except Exception as e:
             logger.error("Assistant LLM call failed: %s", e)
-            if not streamed_content:
-                streamed_content = "抱歉，AI 服务暂时不可用，请稍后重试。"
-                yield f"data: {json.dumps({'type': 'token', 'content': streamed_content}, ensure_ascii=False)}\n\n"
             final_content = streamed_content
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-            break
+            yield sse_error("AI 服务暂时不可用，请稍后重试")
+            yield sse_done(terminal="error")
+            return
 
         if not has_tool_chunks:
             final_content = streamed_content
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            yield sse_done()
             break
 
         # Tool calling round — extract tool_calls from accumulated response
@@ -774,8 +779,8 @@ async def _stream_assistant_chat_unlocked(
         if not tool_calls:
             final_content = full_response.content if full_response else "处理完成。"
             if not streamed_content:
-                yield f"data: {json.dumps({'type': 'token', 'content': final_content}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                yield sse_event({"type": "token", "content": final_content})
+            yield sse_done()
             break
 
         lc_messages.append({
@@ -806,7 +811,7 @@ async def _stream_assistant_chat_unlocked(
             done, _ = await asyncio.wait({tool_task}, timeout=15)
             if done:
                 break
-            yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+            yield sse_event({"type": "ping"})
         raw_results = tool_task.result()
         results = []
         for tc, r in zip(tool_calls, raw_results):
@@ -819,7 +824,7 @@ async def _stream_assistant_chat_unlocked(
         for tc, result in zip(tool_calls, results):
             # If it's a frontend action, emit it
             if "action" in result:
-                yield f"data: {json.dumps({'type': 'action', **result}, ensure_ascii=False)}\n\n"
+                yield sse_event({"type": "action", **result})
 
             # Feed result back to LLM
             tool_content = result.get("data", json.dumps(result, ensure_ascii=False))
@@ -831,8 +836,8 @@ async def _stream_assistant_chat_unlocked(
     else:
         # Fallback if max rounds exceeded
         final_content = "操作完成。"
-        yield f"data: {json.dumps({'type': 'token', 'content': final_content}, ensure_ascii=False)}\n\n"
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        yield sse_event({"type": "token", "content": final_content})
+        yield sse_done()
 
     # ── Persist assistant reply ──
     if final_content:
